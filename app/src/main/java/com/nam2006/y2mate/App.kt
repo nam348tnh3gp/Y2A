@@ -1,18 +1,17 @@
 package com.nam2006.y2mate
 
 import android.app.Application
-import android.util.Log
-import com.ffmpegkit.ytdlp.YtDlp
-import com.ffmpegkit.ytdlp.YtDlpException
+import com.chaquo.python.Python
+import com.chaquo.python.android.AndroidPlatform
 
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
-        try {
-            YtDlp.init(this)
-            Downloader.init(this)
-        } catch (e: YtDlpException) {
-            Log.e("App", "Không khởi tạo được yt-dlp", e)
+        // Khởi tạo Python runtime
+        if (!Python.isStarted()) {
+            Python.start(AndroidPlatform(this))
         }
+        // Khởi tạo Downloader
+        Downloader.init(this)
     }
 }
