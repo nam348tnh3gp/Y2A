@@ -4,8 +4,6 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val ytDlpAndroid = "2.0.2"
-
 android {
     namespace = "com.nam2006.y2mate"
     compileSdk = 35
@@ -54,7 +52,7 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
 
     // Thư viện yt-dlp mới (ffmpegkit-maintained)
-    implementation("dev.ffmpegkit-maintained:yt-dlp-android:$ytDlpAndroid")
-    // Gói tương thích (giữ lại để dự phòng, có thể xóa nếu không dùng API cũ)
-    implementation("dev.ffmpegkit-maintained:yt-dlp-android-compat:$ytDlpAndroid")
+    implementation("dev.ffmpegkit-maintained:yt-dlp-android:2.0.2")
+    // FFmpeg để hỗ trợ chuyển đổi âm thanh/video
+    implementation("dev.ffmpegkit-maintained:ffmpeg-kit-full:8.1.7")
 }
