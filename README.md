@@ -13,29 +13,4 @@ App Android (Kotlin + Jetpack Compose) chạy **yt-dlp + FFmpeg ngay trên đi�
 - Nhận link từ nút **Chia sẻ** của app YouTube / Facebook / TikTok
 - File lưu ở `Download/Mini-Y2mate` (không cần cấp quyền lưu trữ)
 
-## Build APK trên GitHub (không cần Android Studio — làm được ngay trên Termux)
-```bash
-pkg install git gh
-gh auth login
-cd Y2mateAndroid
-git init && git add . && git commit -m "init"
-gh repo create y2mate-android --private --source=. --push   # push xong workflow tự chạy
-gh run watch                                                # theo dõi build (~8-15 phút lần đầu)
-gh run download -n Mini-Y2mate-Pro-apk                      # tải file .apk về
-```
-Hoặc vào tab **Actions → Build APK → Run workflow** trên github.com rồi tải artifact `Mini-Y2mate-Pro-apk`.
-Mở file `.apk` để cài (cho phép "Cài ứng dụng không rõ nguồn gốc").
-
-## Build bằng Android Studio
-Mở thư mục này → để Studio sync Gradle → Run. (JDK 17, Android SDK 35.)
-
-## Lưu ý
-- Yêu cầu **Android 10 trở lên** (minSdk 29). APK nặng (~100 MB) vì chứa Python + yt-dlp + FFmpeg cho arm64 và arm32.
-  Muốn nhẹ hơn: trong `app/build.gradle.kts` đổi `abiFilters` chỉ còn `"arm64-v8a"`.
-- **yt-dlp hay lỗi khi YouTube đổi cách chặn.** Cách chắc chắn nhất: tăng `youtubedlAndroid` trong
-  `app/build.gradle.kts` lên bản mới nhất rồi build lại. Nút "Cập nhật yt-dlp" trong app chỉ là thử nghiệm.
-- YouTube thường đòi đăng nhập ("Sign in to confirm you're not a bot"): bấm 🍪 trong app và nhập `cookies.txt`.
-  Bản Android **không** tự lấy cookies từ trình duyệt như bản web.
-- APK ký bằng khóa debug → chỉ để cài trực tiếp, **không đưa lên Google Play** (chính sách Play cấm app tải video YouTube).
-- Thư viện youtubedl-android theo giấy phép GPL-3.0; nếu bạn phát hành lại app thì cần tuân thủ giấy phép đó.
 # Y2A
