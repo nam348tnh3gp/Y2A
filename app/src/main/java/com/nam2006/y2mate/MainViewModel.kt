@@ -46,7 +46,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    // Đổi tên từ setOpts -> updateOpts để tránh trùng setter JVM của property `opts`
     fun updateOpts(o: Options) {
         opts = o
         prefs.edit()
