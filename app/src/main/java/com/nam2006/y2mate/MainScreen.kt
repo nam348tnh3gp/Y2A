@@ -221,29 +221,29 @@ private fun MainContent(vm: MainViewModel) {
             // ---------- loại tải
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Soft).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TypeButton("🎬 Video", !o.audioOnly, accent, Modifier.weight(1f)) { vm.setOpts(o.copy(audioOnly = false)) }
-                TypeButton("🎵 Audio", o.audioOnly, accent, Modifier.weight(1f)) { vm.setOpts(o.copy(audioOnly = true)) }
+                TypeButton("🎬 Video", !o.audioOnly, accent, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioOnly = false)) }
+                TypeButton("🎵 Audio", o.audioOnly, accent, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioOnly = true)) }
             }
 
             // ---------- tùy chọn
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (!o.audioOnly) {
-                    Picker("Chất lượng", o.quality, o.platform.qualities.map { it to qLabel(it) }, Modifier.weight(1f)) { vm.setOpts(o.copy(quality = it)) }
-                    Picker("Định dạng video", o.videoFormat, listOf("mp4", "webm", "mkv", "avi", "mov", "flv").map { it to it.uppercase() }, Modifier.weight(1f)) { vm.setOpts(o.copy(videoFormat = it)) }
+                    Picker("Chất lượng", o.quality, o.platform.qualities.map { it to qLabel(it) }, Modifier.weight(1f)) { vm.updateOpts(o.copy(quality = it)) }
+                    Picker("Định dạng video", o.videoFormat, listOf("mp4", "webm", "mkv", "avi", "mov", "flv").map { it to it.uppercase() }, Modifier.weight(1f)) { vm.updateOpts(o.copy(videoFormat = it)) }
                 } else {
-                    Picker("Định dạng âm thanh", o.audioFormat, o.platform.audioFormats.map { it to it.uppercase() }, Modifier.weight(1f)) { vm.setOpts(o.copy(audioFormat = it)) }
-                    Picker("Bitrate", o.audioBitrate.toString(), listOf(64, 128, 192, 256, 320).map { it.toString() to "$it kbps" }, Modifier.weight(1f)) { vm.setOpts(o.copy(audioBitrate = it.toInt())) }
+                    Picker("Định dạng âm thanh", o.audioFormat, o.platform.audioFormats.map { it to it.uppercase() }, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioFormat = it)) }
+                    Picker("Bitrate", o.audioBitrate.toString(), listOf(64, 128, 192, 256, 320).map { it.toString() to "$it kbps" }, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioBitrate = it.toInt())) }
                 }
             }
 
             if (!o.audioOnly) {
                 Spacer(Modifier.height(12.dp))
-                SwitchRow("📱 iPhone Compatible", "H.264 + AAC, phát được trên iPhone", o.iphone, accent, onAccent) { vm.setOpts(o.copy(iphone = it)) }
+                SwitchRow("📱 iPhone Compatible", "H.264 + AAC, phát được trên iPhone", o.iphone, accent, onAccent) { vm.updateOpts(o.copy(iphone = it)) }
             }
             if (o.platform == Platform.YOUTUBE) {
                 Spacer(Modifier.height(8.dp))
-                SwitchRow("📀 Tải toàn bộ playlist / kênh", "Lưu vào thư mục riêng trong Download/Mini-Y2mate", o.playlist, accent, onAccent) { vm.setOpts(o.copy(playlist = it)) }
+                SwitchRow("📀 Tải toàn bộ playlist / kênh", "Lưu vào thư mục riêng trong Download/Mini-Y2mate", o.playlist, accent, onAccent) { vm.updateOpts(o.copy(playlist = it)) }
             }
 
             // ---------- nút tải
