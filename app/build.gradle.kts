@@ -4,8 +4,6 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val youtubedlAndroid = "0.18.1"
-
 android {
     namespace = "com.nam2006.y2mate"
     compileSdk = 35
@@ -16,15 +14,12 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-        // Thư viện yt-dlp + Python + FFmpeg có sẵn mã native cho từng kiến trúc CPU.
-        // Chỉ cần arm64-v8a nếu điện thoại của bạn là máy đời mới (từ ~2017) để APK nhẹ hơn.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Ký bằng khóa debug để cài trực tiếp (sideload). Không dùng để đưa lên Google Play.
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -36,7 +31,6 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
 
-    // Bắt buộc với youtubedl-android: giải nén thư viện .so khi cài
     packaging { jniLibs { useLegacyPackaging = true } }
 
     lint {
@@ -57,6 +51,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlAndroid")
-    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroid")
+    // Thư viện yt-dlp mới (được duy trì tích cực)
+    implementation("dev.ffmpegkit-maintained:yt-dlp-android:2.0.2")
+    // Gói tương thích: giữ nguyên API cũ (YoutubeDL, YoutubeDLRequest)
+    implementation("dev.ffmpegkit-maintained:yt-dlp-android-compat:2.0.2")
 }
