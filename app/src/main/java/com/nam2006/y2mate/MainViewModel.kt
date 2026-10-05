@@ -46,7 +46,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun setOpts(o: Options) {
+    // Đổi tên từ setOpts -> updateOpts để tránh trùng setter JVM của property `opts`
+    fun updateOpts(o: Options) {
         opts = o
         prefs.edit()
             .putString("platform", o.platform.name)
@@ -64,7 +65,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (o.quality !in p.qualities) o = o.copy(quality = "720p")
         if (o.audioFormat !in p.audioFormats) o = o.copy(audioFormat = "mp3")
         if (p != Platform.YOUTUBE) o = o.copy(playlist = false)
-        setOpts(o)
+        updateOpts(o)
     }
 
     fun onUrlChange(v: String) {
