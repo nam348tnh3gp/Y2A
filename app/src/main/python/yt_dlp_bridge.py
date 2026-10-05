@@ -44,7 +44,6 @@ def get_latest_version():
         return f"Error: {e}"
 
 def get_info(url, cookies_file=""):
-    """Trả về dict thông tin video để Kotlin hiển thị preview."""
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -86,6 +85,11 @@ def download(url, options):
                 options.get('output_template', '%(title)s.%(ext)s')
             ),
         }
+
+        # ffmpeg_location: đường dẫn binary FFmpeg từ FFmpegKit
+        ffmpeg_path = options.get('ffmpeg_path')
+        if ffmpeg_path:
+            ydl_opts['ffmpeg_location'] = ffmpeg_path
 
         cookies_file = options.get('cookies_file')
         if cookies_file and os.path.exists(cookies_file):
