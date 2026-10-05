@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.chaquo.python") // <-- Áp dụng plugin Chaquopy
+    id("com.chaquo.python") // <-- Chaquopy plugin
 }
 
 android {
@@ -42,9 +42,9 @@ android {
     // Cấu hình Chaquopy: phiên bản Python và các gói pip
     chaquopy {
         defaultConfig {
-            version = "3.11" // Phiên bản Python ổn định
+            version = "3.11"
             pip {
-                install("yt-dlp") // Cài yt-dlp từ PyPI
+                install("yt-dlp")
             }
         }
     }
@@ -62,6 +62,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    // FFmpegKit để cung cấp ffmpeg cho yt-dlp (post-processing)
+    // FFmpegKit (maintained fork) — cung cấp ffmpeg cho yt-dlp
     implementation("dev.ffmpegkit-maintained:ffmpeg-kit-full:8.1.7")
 }
