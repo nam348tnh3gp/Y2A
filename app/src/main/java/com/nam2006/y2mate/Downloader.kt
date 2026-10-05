@@ -111,6 +111,8 @@ object Downloader {
         val req = YoutubeDLRequest(url)
         req.addOption("--no-playlist")
         req.addOption("--socket-timeout", "15")
+        // Xem trước cũng cần client hợp lệ để tránh lỗi "page needs to be reloaded"
+        req.addOption("--extractor-args", "youtube:player_client=web,mweb,android,tv")
         addCookies(req)
         val info = YoutubeDL.getInstance().getInfo(req)
         val title = (info.title as? String) ?: "(không có tiêu đề)"
@@ -194,9 +196,10 @@ object Downloader {
             // ---- Cookies: quan trọng nhất để tránh 403 khi tải nhiều video
             addCookies(req)
 
-            // ---- YouTube: buộc dùng client tv/mweb, tránh lớp SABR mới
+            // ---- YouTube: mở rộng danh sách client để yt-dlp tự fallback
+            // web → mweb → android → tv (thử lần lượt, client nào chạy được thì dùng)
             if (o.platform == Platform.YOUTUBE) {
-                req.addOption("--extractor-args", "youtube:player_client=tv,mweb")
+                req.addOption("--extractor-args", "youtube:player_client=web,mweb,android,tv")
             }
 
             if (o.playlist) {
@@ -261,7 +264,35 @@ object Downloader {
                 state.value = DlState.Running(label, frac, lastSpeed, eta)
             }
 
-            YoutubeDL.getInstance().execute(req, PROCESS_ID, cb)
+            // ----- Thực thi với retry tự động khi gặp lỗi "page needs to be reloaded"
+            val maxRetries = 3
+            var lastError: Throwable? = null
+            for (attempt in 1..maxRetries) {
+                if (cancelled) throw IllegalStateException("cancelled")
+                try {
+                    YoutubeDL.getInstance().execute(req, PROCESS_ID, cb)
+                    lastError = null
+                    break // Thành công
+                } catch (t: Throwable) {
+                    lastError = t
+                    val msg = t.message.orEmpty()
+                    val isReload = msg.contains("page needs to be reloaded", ignoreCase = true)
+                    val is403 = msg.contains("403", ignoreCase = true)
+                    if ((isReload || is403) && attempt < maxRetries) {
+                        // Báo cho UI biết đang thử lại
+                        state.value = DlState.Running(
+                            "🔁 Thử lại lần $attempt/$maxRetries…",
+                            lastPct / 100f, lastSpeed, -1L
+                        )
+                        // Đợi tăng dần: 2s → 4s → 6s
+                        Thread.sleep(2000L * attempt)
+                        continue
+                    } else {
+                        throw t // Lỗi khác hoặc hết lượt retry → ném ra ngoài
+                    }
+                }
+            }
+            if (lastError != null) throw lastError
             if (cancelled) throw IllegalStateException("cancelled")
 
             // ----- lưu vào thư mục Download/Mini-Y2mate
@@ -310,8 +341,15 @@ object Downloader {
         val msg = (t.message ?: t.toString()).trim()
         val lines = msg.lines()
         val line = lines.lastOrNull { it.contains("ERROR", ignoreCase = true) } ?: lines.lastOrNull().orEmpty()
-        val hint = if (msg.contains("Sign in", ignoreCase = true) || msg.contains("not a bot", ignoreCase = true))
-            " — hãy nhập cookies.txt (nút 🍪)" else ""
+        val hint = when {
+            msg.contains("Sign in", ignoreCase = true) || msg.contains("not a bot", ignoreCase = true) ->
+                " — hãy nhập cookies.txt (nút 🍪)"
+            msg.contains("page needs to be reloaded", ignoreCase = true) ->
+                " — YouTube đang giới hạn tạm thời. Chờ vài phút rồi thử lại, hoặc đổi mạng (WiFi ↔ 4G)."
+            msg.contains("403", ignoreCase = true) ->
+                " — bị chặn tạm thời. Thử lại sau vài phút hoặc nhập cookies."
+            else -> ""
+        }
         return line.take(280) + hint
     }
 }
