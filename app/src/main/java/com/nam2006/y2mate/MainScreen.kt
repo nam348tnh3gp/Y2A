@@ -133,6 +133,7 @@ private fun MainContent(vm: MainViewModel) {
             .verticalScroll(rememberScrollState())
             .padding(14.dp),
     ) {
+        // ---------- tiêu đề
         Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(42.dp).clip(RoundedCornerShape(12.dp))
@@ -161,6 +162,7 @@ private fun MainContent(vm: MainViewModel) {
             PlatformTabs(o.platform) { vm.setPlatform(it) }
             Spacer(Modifier.height(14.dp))
 
+            // ---------- ô link
             OutlinedTextField(
                 value = vm.url,
                 onValueChange = { vm.onUrlChange(it) },
@@ -183,6 +185,7 @@ private fun MainContent(vm: MainViewModel) {
                 },
             )
 
+            // ---------- xem trước
             val pv = vm.preview
             if (pv != null || vm.previewLoading) {
                 Row(
@@ -215,12 +218,14 @@ private fun MainContent(vm: MainViewModel) {
                 }
             }
 
+            // ---------- loại tải
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Soft).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 TypeButton("🎬 Video", !o.audioOnly, accent, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioOnly = false)) }
                 TypeButton("🎵 Audio", o.audioOnly, accent, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioOnly = true)) }
             }
 
+            // ---------- tùy chọn
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (!o.audioOnly) {
@@ -241,6 +246,7 @@ private fun MainContent(vm: MainViewModel) {
                 SwitchRow("📀 Tải toàn bộ playlist / kênh", "Lưu vào thư mục riêng trong Download/Mini-Y2mate", o.playlist, accent, onAccent) { vm.updateOpts(o.copy(playlist = it)) }
             }
 
+            // ---------- nút tải
             Spacer(Modifier.height(18.dp))
             val running = dl is DlState.Running
             Button(
@@ -260,6 +266,7 @@ private fun MainContent(vm: MainViewModel) {
                 )
             }
 
+            // ---------- kết quả
             when (val s = dl) {
                 is DlState.Running -> RunningPanel(s, accent) { vm.cancel() }
                 is DlState.Done -> ResultPanel(s.files, ctx)
@@ -472,20 +479,26 @@ private fun SettingsDialog(vm: MainViewModel, ctx: Context, onPick: () -> Unit, 
                     OutlinedButton(onClick = { vm.clearCookies() }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) { Text("🗑️ Xóa cookies", color = Err) }
                 }
                 Spacer(Modifier.height(14.dp))
+
+                // Nút kiểm tra cập nhật yt-dlp — gọi Downloader.checkYtDlpUpdate()
                 OutlinedButton(
                     onClick = {
                         updating = true
                         scope.launch {
-                            val r = withContext(Dispatchers.IO) {
-                                "Thư viện mới không hỗ trợ cập nhật in-app. Hãy nâng version trong build.gradle.kts"
-                            }
+                            val r = withContext(Dispatchers.IO) { Downloader.checkYtDlpUpdate() }
                             updating = false
                             toast(ctx, r)
                         }
                     },
                     enabled = !updating,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text(if (updating) "Đang cập nhật…" else "🔄 Cập nhật yt-dlp", color = Fg) }
+                ) { Text(if (updating) "Đang kiểm tra…" else "🔄 Kiểm tra cập nhật yt-dlp", color = Fg) }
+
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "ℹ️ yt-dlp được quản lý bởi Python/pip. Muốn lên bản mới, sửa `install(\"yt-dlp\")` trong build.gradle.kts rồi build lại.",
+                    fontSize = 11.sp, color = Muted,
+                )
             }
         },
         confirmButton = { TextButton(onClick = onClose) { Text("Đóng") } },
