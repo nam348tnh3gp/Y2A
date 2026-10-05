@@ -7,8 +7,9 @@ import android.content.Intent
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
-import com.yausername.youtubedl_android.YoutubeDL
-import com.yausername.youtubedl_android.YoutubeDLRequest
+import com.ffmpegkit.ytdlp.YtDlp
+import com.ffmpegkit.ytdlp.YtDlpRequest
+import com.ffmpegkit.ytdlp.YtDlpException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -18,8 +19,8 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Lõi tải: bọc yt-dlp + FFmpeg chạy ngay trên điện thoại (thư viện youtubedl-android).
- * Logic chọn định dạng được chuyển từ app.py bản web.
+ * Lõi tải: bọc yt-dlp + FFmpeg chạy ngay trên điện thoại (thư viện ffmpegkit-maintained).
+ * Sử dụng API mới (YtDlp, YtDlpRequest) thay vì API cũ.
  */
 object Downloader {
     private const val PROCESS_ID = "y2m-current"
@@ -41,21 +42,13 @@ object Downloader {
         app = application
         scope.launch {
             try {
-                YoutubeDL.getInstance().init(application)
-                initFfmpeg(application)
+                YtDlp.init(application)
                 ready.value = true
             } catch (t: Throwable) {
                 val root = t.cause ?: t
                 initError.value = root.message ?: root.toString()
             }
         }
-    }
-
-    /** Khởi tạo FFmpeg bằng reflection để không phụ thuộc đường dẫn lớp của từng phiên bản thư viện. */
-    private fun initFfmpeg(application: Application) {
-        val cls = Class.forName("com.yausername.ffmpeg.FFmpeg")
-        val inst = cls.getMethod("getInstance").invoke(null)
-        inst!!.javaClass.getMethod("init", Context::class.java).invoke(inst, application)
     }
 
     // ---------------------------------------------------------------- điều khiển
@@ -81,9 +74,9 @@ object Downloader {
     fun cancel() {
         cancelled = true
         try {
-            YoutubeDL.getInstance().destroyProcessById(PROCESS_ID)
+            YtDlp.destroyProcessById(PROCESS_ID)
         } catch (e: Exception) {
-            // bỏ qua: tiến trình có thể chưa chạy
+            // bỏ qua
         }
         state.value = DlState.Idle
     }
@@ -108,13 +101,12 @@ object Downloader {
             Thread.sleep(200)
             waited += 200
         }
-        val req = YoutubeDLRequest(url)
+        val req = YtDlpRequest(url)
         req.addOption("--no-playlist")
         req.addOption("--socket-timeout", "15")
-        // Xem trước cũng cần client hợp lệ để tránh lỗi "page needs to be reloaded"
         req.addOption("--extractor-args", "youtube:player_client=web,mweb,android,tv")
         addCookies(req)
-        val info = YoutubeDL.getInstance().getInfo(req)
+        val info = YtDlp.getInfo(req)
         val title = (info.title as? String) ?: "(không có tiêu đề)"
         val uploader = (info.uploader as? String) ?: ""
         val duration = (info.duration as? Number)?.toInt() ?: 0
@@ -122,36 +114,9 @@ object Downloader {
         return PreviewInfo(title, uploader, duration, thumb)
     }
 
-    /**
-     * Cập nhật yt-dlp bằng reflection để không phụ thuộc chữ ký hàm của từng phiên bản thư viện.
-     * Nếu thất bại, cách chắc chắn nhất là tăng phiên bản thư viện trong app/build.gradle.kts rồi build lại.
-     */
-    fun updateYtDlp(): String {
-        return try {
-            val inst = YoutubeDL.getInstance()
-            val m = inst.javaClass.methods.firstOrNull { it.name == "updateYoutubeDL" }
-                ?: return "Phiên bản thư viện này không có hàm cập nhật"
-            val types = m.parameterTypes
-            val args = arrayOfNulls<Any>(types.size)
-            for (i in types.indices) {
-                val t = types[i]
-                args[i] = when {
-                    i == 0 -> app
-                    t.isEnum -> t.enumConstants?.firstOrNull { (it as Enum<*>).name == "STABLE" }
-                        ?: t.enumConstants?.firstOrNull()
-                    else -> try { t.getField("STABLE").get(null) } catch (e: Exception) { null }
-                }
-            }
-            val r = m.invoke(inst, *args)
-            "Cập nhật xong: ${r ?: "OK"}"
-        } catch (e: Exception) {
-            "Lỗi cập nhật: ${(e.cause ?: e).message}"
-        }
-    }
-
     // ---------------------------------------------------------------- tải
 
-    private fun addCookies(req: YoutubeDLRequest) {
+    private fun addCookies(req: YtDlpRequest) {
         if (CookieStore.has(app)) req.addOption("--cookies", CookieStore.file(app).absolutePath)
     }
 
@@ -170,16 +135,14 @@ object Downloader {
 
     private fun runDownload(url: String, o: Options): List<SavedFile> {
         val root = app.getExternalFilesDir("tmp") ?: File(app.filesDir, "tmp")
-        // Cùng URL + cùng tùy chọn => cùng thư mục => bấm "Thử lại" sẽ tải tiếp phần dang dở
         val dir = File(root, Integer.toHexString((url + o.toString()).hashCode()))
         dir.mkdirs()
         try {
             if (cancelled) throw IllegalStateException("cancelled")
 
             val selector = formatSelector(o)
-            val req = YoutubeDLRequest(url)
+            val req = YtDlpRequest(url)
 
-            // ---- Option chung: chống 403, chống bị chặn bot
             req.addOption("--no-mtime")
             req.addOption("--concurrent-fragments", "4")
             req.addOption("--retries", "10")
@@ -192,23 +155,19 @@ object Downloader {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             req.addOption("--add-header", "Accept-Language:en-US,en;q=0.9")
-
-            // ---- Cookies: quan trọng nhất để tránh 403 khi tải nhiều video
             addCookies(req)
 
-            // ---- YouTube: mở rộng danh sách client để yt-dlp tự fallback
-            // web → mweb → android → tv (thử lần lượt, client nào chạy được thì dùng)
             if (o.platform == Platform.YOUTUBE) {
                 req.addOption("--extractor-args", "youtube:player_client=web,mweb,android,tv")
             }
 
             if (o.playlist) {
                 req.addOption("--yes-playlist")
-                req.addOption("--ignore-errors")           // 1 video lỗi không dừng cả playlist
+                req.addOption("--ignore-errors")
                 req.addOption("--no-abort-on-error")
-                req.addOption("--sleep-requests", "1")     // nghỉ giữa các request metadata
-                req.addOption("--min-sleep-interval", "5") // nghỉ tối thiểu 5s giữa các video
-                req.addOption("--max-sleep-interval", "10")// nghỉ tối đa 10s (random)
+                req.addOption("--sleep-requests", "1")
+                req.addOption("--min-sleep-interval", "5")
+                req.addOption("--max-sleep-interval", "10")
                 req.addOption("-o", dir.absolutePath + "/%(playlist_title).80B/%(playlist_index)03d - %(title).100B.%(ext)s")
             } else {
                 req.addOption("--no-playlist")
@@ -264,31 +223,29 @@ object Downloader {
                 state.value = DlState.Running(label, frac, lastSpeed, eta)
             }
 
-            // ----- Thực thi với retry tự động khi gặp lỗi "page needs to be reloaded"
+            // ----- Thực thi với retry tự động
             val maxRetries = 3
             var lastError: Throwable? = null
             for (attempt in 1..maxRetries) {
                 if (cancelled) throw IllegalStateException("cancelled")
                 try {
-                    YoutubeDL.getInstance().execute(req, PROCESS_ID, cb)
+                    YtDlp.execute(req, PROCESS_ID, cb)
                     lastError = null
-                    break // Thành công
+                    break
                 } catch (t: Throwable) {
                     lastError = t
                     val msg = t.message.orEmpty()
                     val isReload = msg.contains("page needs to be reloaded", ignoreCase = true)
                     val is403 = msg.contains("403", ignoreCase = true)
                     if ((isReload || is403) && attempt < maxRetries) {
-                        // Báo cho UI biết đang thử lại
                         state.value = DlState.Running(
                             "🔁 Thử lại lần $attempt/$maxRetries…",
                             lastPct / 100f, lastSpeed, -1L
                         )
-                        // Đợi tăng dần: 2s → 4s → 6s
                         Thread.sleep(2000L * attempt)
                         continue
                     } else {
-                        throw t // Lỗi khác hoặc hết lượt retry → ném ra ngoài
+                        throw t
                     }
                 }
             }
@@ -345,7 +302,7 @@ object Downloader {
             msg.contains("Sign in", ignoreCase = true) || msg.contains("not a bot", ignoreCase = true) ->
                 " — hãy nhập cookies.txt (nút 🍪)"
             msg.contains("page needs to be reloaded", ignoreCase = true) ->
-                " — YouTube đang giới hạn tạm thời. Chờ vài phút rồi thử lại, hoặc đổi mạng (WiFi ↔ 4G)."
+                " — YouTube đang giới hạn. Chờ vài phút hoặc đổi mạng (WiFi ↔ 4G)."
             msg.contains("403", ignoreCase = true) ->
                 " — bị chặn tạm thời. Thử lại sau vài phút hoặc nhập cookies."
             else -> ""
