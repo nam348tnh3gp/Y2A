@@ -4,7 +4,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val youtubedlAndroid = "0.18.1"
+val ytDlpAndroid = "2.0.2"
 
 android {
     namespace = "com.nam2006.y2mate"
@@ -53,6 +53,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlAndroid")
-    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroid")
+    // Thư viện yt-dlp mới (ffmpegkit-maintained)
+    implementation("dev.ffmpegkit-maintained:yt-dlp-android:$ytDlpAndroid")
+    // Gói tương thích (giữ lại để dự phòng, có thể xóa nếu không dùng API cũ)
+    implementation("dev.ffmpegkit-maintained:yt-dlp-android-compat:$ytDlpAndroid")
 }
