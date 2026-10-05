@@ -176,16 +176,36 @@ object Downloader {
 
             val selector = formatSelector(o)
             val req = YoutubeDLRequest(url)
+
+            // ---- Option chung: chống 403, chống bị chặn bot
             req.addOption("--no-mtime")
             req.addOption("--concurrent-fragments", "4")
-            req.addOption("--retries", "5")
-            req.addOption("--fragment-retries", "10")
-            req.addOption("--socket-timeout", "20")
+            req.addOption("--retries", "10")
+            req.addOption("--fragment-retries", "20")
+            req.addOption("--file-access-retries", "5")
+            req.addOption("--socket-timeout", "30")
+            req.addOption("--no-check-certificates")
+            req.addOption("--geo-bypass")
+            req.addOption("--user-agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            req.addOption("--add-header", "Accept-Language:en-US,en;q=0.9")
+
+            // ---- Cookies: quan trọng nhất để tránh 403 khi tải nhiều video
             addCookies(req)
+
+            // ---- YouTube: buộc dùng client tv/mweb, tránh lớp SABR mới
+            if (o.platform == Platform.YOUTUBE) {
+                req.addOption("--extractor-args", "youtube:player_client=tv,mweb")
+            }
 
             if (o.playlist) {
                 req.addOption("--yes-playlist")
-                req.addOption("--ignore-errors")
+                req.addOption("--ignore-errors")           // 1 video lỗi không dừng cả playlist
+                req.addOption("--no-abort-on-error")
+                req.addOption("--sleep-requests", "1")     // nghỉ giữa các request metadata
+                req.addOption("--min-sleep-interval", "5") // nghỉ tối thiểu 5s giữa các video
+                req.addOption("--max-sleep-interval", "10")// nghỉ tối đa 10s (random)
                 req.addOption("-o", dir.absolutePath + "/%(playlist_title).80B/%(playlist_index)03d - %(title).100B.%(ext)s")
             } else {
                 req.addOption("--no-playlist")
