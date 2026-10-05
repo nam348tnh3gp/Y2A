@@ -2,14 +2,11 @@ package com.nam2006.y2mate
 
 import android.app.Application
 import android.content.ContentValues
-import android.content.Context
 import android.content.Intent
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
-import com.chaquo.python.PyObject
 import com.chaquo.python.Python
-import com.ffmpegkit.FFmpegKit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -36,9 +33,8 @@ object Downloader {
         app = application
         scope.launch {
             try {
-                // Kiểm tra Python đã sẵn sàng
                 val py = Python.getInstance()
-                py.getModule("yt_dlp_bridge") // Load module để đảm bảo import thành công
+                py.getModule("yt_dlp_bridge")
                 ready.value = true
             } catch (t: Throwable) {
                 val root = t.cause ?: t
@@ -69,8 +65,6 @@ object Downloader {
 
     fun cancel() {
         cancelled = true
-        // Với Chaquopy, việc hủy giữa chừng phức tạp hơn.
-        // Cách đơn giản: đánh dấu cancelled và để luồng Python tự kết thúc.
         state.value = DlState.Idle
     }
 
@@ -86,6 +80,7 @@ object Downloader {
         }
     }
 
+    /** Xem trước thông tin video — gọi hàm Python get_info. */
     fun fetchInfo(url: String): PreviewInfo {
         var waited = 0
         while (!ready.value) {
@@ -93,18 +88,34 @@ object Downloader {
             Thread.sleep(200)
             waited += 200
         }
-
         val py = Python.getInstance()
         val module = py.getModule("yt_dlp_bridge")
-        
-        // Gọi hàm trích xuất thông tin (cần thêm hàm vào file Python bridge)
-        // Tạm thời trả về thông tin cơ bản
-        return PreviewInfo(
-            title = "Đang tải thông tin…",
-            uploader = "",
-            duration = 0,
-            thumbnail = null
-        )
+        val cookiesFile = if (CookieStore.has(app)) CookieStore.file(app).absolutePath else ""
+        val result = module.callAttr("get_info", url, cookiesFile).asMap()
+        val title = result["title"]?.toString() ?: "(không có tiêu đề)"
+        val uploader = result["uploader"]?.toString() ?: ""
+        val duration = (result["duration"]?.toString()?.toDoubleOrNull() ?: 0.0).toInt()
+        val thumb = result["thumbnail"]?.toString()
+        return PreviewInfo(title, uploader, duration, thumb)
+    }
+
+    /** Kiểm tra phiên bản yt-dlp — gọi từ SettingsDialog. */
+    fun checkYtDlpUpdate(): String {
+        return try {
+            val py = Python.getInstance()
+            val module = py.getModule("yt_dlp_bridge")
+            val installed = module.callAttr("get_installed_version").toString()
+            val latest = module.callAttr("get_latest_version").toString()
+            if (latest.startsWith("Error")) {
+                "Không thể kiểm tra: $latest"
+            } else if (installed != latest) {
+                "Có bản cập nhật: $installed → $latest. Hãy build lại app với version mới."
+            } else {
+                "yt-dlp đã là bản mới nhất ($installed)."
+            }
+        } catch (e: Exception) {
+            "Lỗi kiểm tra: ${e.message}"
+        }
     }
 
     // ---------------------------------------------------------------- tải
@@ -132,8 +143,8 @@ object Downloader {
             val py = Python.getInstance()
             val module = py.getModule("yt_dlp_bridge")
 
-            // Chuẩn bị options cho Python
-            val pyOptions = mutableMapOf<String, Any>()
+            // Khai báo tường minh HashMap<String, Any> để tránh lỗi type inference
+            val pyOptions: HashMap<String, Any> = HashMap()
             pyOptions["format"] = formatSelector(o)
             pyOptions["output_dir"] = dir.absolutePath
             pyOptions["output_template"] = if (o.playlist) {
@@ -146,20 +157,14 @@ object Downloader {
             pyOptions["audio_format"] = o.audioFormat
             pyOptions["audio_bitrate"] = o.audioBitrate.toString()
 
-            // Cookies
             if (CookieStore.has(app)) {
                 pyOptions["cookies_file"] = CookieStore.file(app).absolutePath
             }
 
-            // FFmpeg path (từ FFmpegKit)
-            // Lưu ý: FFmpegKit cung cấp ffmpeg thông qua một API, cần kiểm tra cách lấy path chính xác.
-            // Tạm thời bỏ qua, yt-dlp sẽ tự tìm trong PATH.
-            // pyOptions["ffmpeg_path"] = ...
-
             // Gọi hàm download trong Python
             val result = module.callAttr("download", url, pyOptions).asMap()
-            val success = result["success"] as? Boolean ?: false
-            val error = result["error"] as? String
+            val success = result["success"]?.toJava(Boolean::class.java) ?: false
+            val error = result["error"]?.toString()
 
             if (!success) {
                 throw IllegalStateException(error ?: "Tải thất bại")
