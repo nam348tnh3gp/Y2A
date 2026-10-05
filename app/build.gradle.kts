@@ -4,6 +4,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val youtubedlAndroid = "0.18.1"
+
 android {
     namespace = "com.nam2006.y2mate"
     compileSdk = 35
@@ -51,8 +53,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    // Thư viện yt-dlp mới (được duy trì tích cực)
-    implementation("dev.ffmpegkit-maintained:yt-dlp-android:2.0.2")
-    // Gói tương thích: giữ nguyên API cũ (YoutubeDL, YoutubeDLRequest)
-    implementation("dev.ffmpegkit-maintained:yt-dlp-android-compat:2.0.2")
+    implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlAndroid")
+    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroid")
 }
