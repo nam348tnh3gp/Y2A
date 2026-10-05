@@ -6,6 +6,7 @@ import android.content.Intent
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
+import com.artheanica.ffmpegkit.FFmpegKit
 import com.chaquo.python.Python
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -133,6 +134,16 @@ object Downloader {
         }
     }
 
+    /** Lấy đường dẫn ffmpeg từ FFmpegKit. */
+    private fun getFfmpegPath(): String? {
+        return try {
+            // FFmpegKit cung cấp đường dẫn đến binary ffmpeg đã đóng gói
+            FFmpegKit.getFFmpegPath()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun runDownload(url: String, o: Options): List<SavedFile> {
         val root = app.getExternalFilesDir("tmp") ?: File(app.filesDir, "tmp")
         val dir = File(root, Integer.toHexString((url + o.toString()).hashCode()))
@@ -143,7 +154,7 @@ object Downloader {
             val py = Python.getInstance()
             val module = py.getModule("yt_dlp_bridge")
 
-            // Khai báo tường minh HashMap<String, Any> để tránh lỗi type inference
+            // Khai báo tường minh HashMap<String, Any>
             val pyOptions: HashMap<String, Any> = HashMap()
             pyOptions["format"] = formatSelector(o)
             pyOptions["output_dir"] = dir.absolutePath
@@ -156,6 +167,9 @@ object Downloader {
             pyOptions["audio_only"] = o.audioOnly
             pyOptions["audio_format"] = o.audioFormat
             pyOptions["audio_bitrate"] = o.audioBitrate.toString()
+
+            // Đường dẫn ffmpeg từ FFmpegKit
+            getFfmpegPath()?.let { pyOptions["ffmpeg_path"] = it }
 
             if (CookieStore.has(app)) {
                 pyOptions["cookies_file"] = CookieStore.file(app).absolutePath
@@ -226,6 +240,8 @@ object Downloader {
                 " — YouTube đang giới hạn. Chờ vài phút hoặc đổi mạng (WiFi ↔ 4G)."
             msg.contains("403", ignoreCase = true) ->
                 " — bị chặn tạm thời. Thử lại sau vài phút hoặc nhập cookies."
+            msg.contains("ffmpeg", ignoreCase = true) ->
+                " — FFmpeg không tìm thấy. Kiểm tra dependency ffmpeg-kit-full."
             else -> ""
         }
         return line.take(280) + hint
