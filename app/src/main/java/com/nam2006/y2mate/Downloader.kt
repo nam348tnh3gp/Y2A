@@ -20,7 +20,7 @@ import java.io.File
 
 /**
  * Lõi tải: bọc yt-dlp + FFmpeg chạy ngay trên điện thoại (thư viện ffmpegkit-maintained).
- * Sử dụng API mới (YtDlp, YtDlpRequest) thay vì API cũ.
+ * Sử dụng API mới (YtDlp, YtDlpRequest) với executeAsync.
  */
 object Downloader {
     private const val PROCESS_ID = "y2m-current"
@@ -93,7 +93,7 @@ object Downloader {
         }
     }
 
-    /** Dùng cho xem trước (chạy trên luồng IO, chặn tối đa ~40 giây chờ khởi tạo). */
+    /** Dùng cho xem trước (chạy trên luồng IO). */
     fun fetchInfo(url: String): PreviewInfo {
         var waited = 0
         while (!ready.value) {
@@ -168,10 +168,10 @@ object Downloader {
                 req.addOption("--sleep-requests", "1")
                 req.addOption("--min-sleep-interval", "5")
                 req.addOption("--max-sleep-interval", "10")
-                req.addOption("-o", dir.absolutePath + "/%(playlist_title).80B/%(playlist_index)03d - %(title).100B.%(ext)s")
+                req.setOutputTemplate(dir.absolutePath + "/%(playlist_title).80B/%(playlist_index)03d - %(title).100B.%(ext)s")
             } else {
                 req.addOption("--no-playlist")
-                req.addOption("-o", dir.absolutePath + "/%(title).100B_%(id)s.%(ext)s")
+                req.setOutputTemplate(dir.absolutePath + "/%(title).100B_%(id)s.%(ext)s")
             }
 
             req.addOption("-f", selector)
@@ -229,7 +229,7 @@ object Downloader {
             for (attempt in 1..maxRetries) {
                 if (cancelled) throw IllegalStateException("cancelled")
                 try {
-                    YtDlp.execute(req, PROCESS_ID, cb)
+                    YtDlp.executeAsync(req, PROCESS_ID, cb)
                     lastError = null
                     break
                 } catch (t: Throwable) {
