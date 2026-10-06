@@ -9,8 +9,12 @@ object PythonBridge {
     @Volatile private var initialized = false
     private var initError: String? = null
 
-    // JNI — signature mới: (nativeLibDir, sitePackagesDir)
-    private external fun nativeInit(nativeLibDir: String, sitePackagesDir: String): Boolean
+    // Signature MỚI: 3 params (thêm filesDir)
+    private external fun nativeInit(
+        nativeLibDir: String,
+        sitePackagesDir: String,
+        filesDir: String
+    ): Boolean
     private external fun nativeCallFunction(module: String, func: String, argJson: String): String
     private external fun nativeFinalize()
 
@@ -18,7 +22,6 @@ object PythonBridge {
         System.loadLibrary("python_jni")
     }
 
-    /** Lỗi khởi tạo gần nhất (null nếu chưa lỗi). */
     fun lastError(): String? = initError
 
     /** PHẢI gọi từ thread nền (giải nén asset + Py_Initialize rất nặng). */
@@ -27,7 +30,6 @@ object PythonBridge {
         if (initialized) return true
         initError = null
         try {
-            // nativeLibDir chứa libpython3.14.so (Android tự extract)
             val nativeLibDir = app.applicationInfo.nativeLibraryDir
             Log.i(TAG, "nativeLibDir: $nativeLibDir")
 
@@ -35,33 +37,38 @@ object PythonBridge {
             val sitePackages = File(app.filesDir, "site-packages")
             val marker = File(sitePackages, ".extracted")
             if (!marker.exists()) {
-                Log.i(TAG, "Extract site-packages...")
+                Log.i(TAG, "⏳ Extract site-packages lần đầu...")
                 sitePackages.mkdirs()
                 copyAssetDir(app, "python/site-packages", sitePackages)
                 marker.writeText("ok")
+                Log.i(TAG, "✅ Extract xong")
+            } else {
+                Log.i(TAG, "✅ Site-packages đã có sẵn")
             }
 
-            // Copy yt_dlp_bridge.py vào filesDir — luôn ghi đè để bản cập nhật có hiệu lực
+            // Copy yt_dlp_bridge.py vào filesDir — luôn ghi đè
             val scriptFile = File(app.filesDir, "yt_dlp_bridge.py")
             app.assets.open("yt_dlp_bridge.py").use { input ->
                 scriptFile.outputStream().use { input.copyTo(it) }
             }
+            Log.i(TAG, "✅ Copy yt_dlp_bridge.py → ${scriptFile.absolutePath}")
 
-            // Init Python
-            initialized = nativeInit(nativeLibDir, sitePackages.absolutePath)
-            if (!initialized) initError = "nativeInit thất bại (xem logcat tag PythonJNI)"
+            // Init Python — truyền 3 path
+            Log.i(TAG, "⏳ nativeInit...")
+            initialized = nativeInit(
+                nativeLibDir,
+                sitePackages.absolutePath,
+                app.filesDir.absolutePath
+            )
+            Log.i(TAG, "✅ nativeInit kết quả: $initialized")
 
-            if (initialized) {
-                // Thêm filesDir vào sys.path để import yt_dlp_bridge
-                // (Python code tự thêm thông qua sys.path.insert trong nativeInit,
-                //  nhưng ta cần thêm filesDir nữa)
-                // Đã làm trong nativeInit, ở đây không cần
-                Log.i(TAG, "✅ Python initialized")
+            if (!initialized) {
+                initError = "nativeInit thất bại (xem logcat tag PythonJNI)"
             }
             return initialized
         } catch (t: Throwable) {
             initError = t.message
-            Log.e(TAG, "Init fail", t)
+            Log.e(TAG, "❌ Init fail", t)
             return false
         }
     }
@@ -69,7 +76,6 @@ object PythonBridge {
     private fun copyAssetDir(app: Application, assetPath: String, dest: File) {
         val children = app.assets.list(assetPath) ?: return
         if (children.isEmpty()) {
-            // Là file
             dest.parentFile?.mkdirs()
             app.assets.open(assetPath).use { input ->
                 dest.outputStream().use { input.copyTo(it) }
