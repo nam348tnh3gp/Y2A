@@ -3,7 +3,6 @@ package com.nam2006.y2mate
 import android.app.Application
 import android.content.ContentValues
 import android.content.Intent
-import android.os.Build
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
@@ -31,28 +30,23 @@ object Downloader {
     val ready = MutableStateFlow(false)
     val initError = MutableStateFlow<String?>(null)
 
-    // JNI methods
+    // JNI methods — khai báo trực tiếp trong object, không cần companion
     private external fun nativeChmod(path: String): Boolean
     private external fun nativeExecFfmpeg(binaryPath: String, args: Array<String>): Int
     private external fun nativeCanExecute(path: String): Boolean
 
-    companion object {
-        init {
-            System.loadLibrary("ffmpeg_jni")
-        }
+    // Init block thay cho companion object
+    init {
+        System.loadLibrary("ffmpeg_jni")
     }
 
     fun init(application: Application) {
         app = application
         scope.launch {
             try {
-                // Khởi tạo Python
                 val py = Python.getInstance()
                 py.getModule("yt_dlp_bridge")
-                
-                // Chuẩn bị FFmpeg
                 prepareFfmpeg()
-                
                 ready.value = true
             } catch (t: Throwable) {
                 val root = t.cause ?: t
@@ -63,41 +57,31 @@ object Downloader {
 
     /** Chuẩn bị FFmpeg: copy từ jniLibs, chmod, và extract các thư viện phụ thuộc. */
     private fun prepareFfmpeg() {
-        // 1. Lấy đường dẫn FFmpeg từ nativeLibraryDir (đã có quyền thực thi)
         val nativeLibDir = app.applicationInfo.nativeLibraryDir
         val ffmpegInLib = File(nativeLibDir, "libffmpeg.so")
-        
+
         if (!ffmpegInLib.exists()) {
-            // Fallback: copy từ assets sang filesDir
             extractFfmpegFromAssets()
             return
         }
 
-        // 2. Copy sang filesDir để có thể chmod và thực thi
         val destDir = File(app.filesDir, "ffmpeg")
         destDir.mkdirs()
         val destFfmpeg = File(destDir, "ffmpeg")
-        
+
         if (!destFfmpeg.exists()) {
             ffmpegInLib.copyTo(destFfmpeg, overwrite = true)
         }
 
-        // 3. Cấp quyền thực thi qua JNI (không dùng Runtime.exec)
-        val chmodOk = nativeChmod(destFfmpeg.absolutePath)
-        
-        // 4. Extract các thư viện phụ thuộc từ assets
+        nativeChmod(destFfmpeg.absolutePath)
         extractLibsFromAssets(destDir)
-        
-        // 5. Set LD_LIBRARY_PATH cho Python (nếu cần)
-        // Các thư viện .so phải nằm cùng thư mục với ffmpeg
     }
 
-    /** Fallback: extract FFmpeg từ assets nếu jniLibs không khả dụng. */
     private fun extractFfmpegFromAssets() {
         val destDir = File(app.filesDir, "ffmpeg")
         destDir.mkdirs()
         val destFfmpeg = File(destDir, "ffmpeg")
-        
+
         try {
             app.assets.open("ffmpeg/ffmpeg").use { input ->
                 FileOutputStream(destFfmpeg).use { output ->
@@ -111,7 +95,6 @@ object Downloader {
         }
     }
 
-    /** Extract các thư viện .so phụ thuộc của FFmpeg từ assets. */
     private fun extractLibsFromAssets(destDir: File) {
         try {
             val libFiles = app.assets.list("ffmpeg/lib") ?: return
@@ -126,11 +109,10 @@ object Downloader {
                 }
             }
         } catch (e: Exception) {
-            // Không có thư viện phụ thuộc (FFmpeg static) - bỏ qua
+            // Không có thư viện phụ thuộc
         }
     }
 
-    /** Lấy đường dẫn FFmpeg đã sẵn sàng. */
     fun getFfmpegPath(): String? {
         val destFfmpeg = File(app.filesDir, "ffmpeg/ffmpeg")
         return if (destFfmpeg.exists() && nativeCanExecute(destFfmpeg.absolutePath)) {
@@ -232,7 +214,8 @@ object Downloader {
             val py = Python.getInstance()
             val module = py.getModule("yt_dlp_bridge")
 
-            val pyOptions = HashMap<String, Any>()
+            // Map<String, Any> tường minh để tránh lỗi type inference
+            val pyOptions: MutableMap<String, Any> = LinkedHashMap()
             pyOptions["format"] = formatSelector(o)
             pyOptions["output_dir"] = dir.absolutePath
             pyOptions["output_template"] = if (o.playlist) {
@@ -245,16 +228,20 @@ object Downloader {
             pyOptions["audio_format"] = o.audioFormat
             pyOptions["audio_bitrate"] = o.audioBitrate.toString()
 
-            // Truyền đường dẫn FFmpeg cho yt-dlp
             getFfmpegPath()?.let { pyOptions["ffmpeg_path"] = it }
 
             if (CookieStore.has(app)) {
                 pyOptions["cookies_file"] = CookieStore.file(app).absolutePath
             }
 
-            val result = module.callAttr("download", url, pyOptions).asMap()
-            val success = result["success"]?.toJava(Boolean::class.java) ?: false
-            val error = result["error"]?.toString()
+            // Gọi hàm Python — kết quả là PyObject, convert sang Map<String, Any>
+            val resultPy = module.callAttr("download", url, pyOptions)
+            val resultMap: Map<String, Any> = resultPy.asMap().entries.associate { (k, v) ->
+                k.toString() to (v.toJava(Any::class.java) ?: "")
+            }
+
+            val success = (resultMap["success"] as? Boolean) ?: false
+            val error = resultMap["error"] as? String
 
             if (!success) throw IllegalStateException(error ?: "Tải thất bại")
             if (cancelled) throw IllegalStateException("cancelled")
