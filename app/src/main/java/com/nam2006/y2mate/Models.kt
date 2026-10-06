@@ -1,6 +1,7 @@
 package com.nam2006.y2mate
 
 import androidx.annotation.DrawableRes
+import androidx.compose.runtime.Immutable
 
 enum class Platform(
     val label: String,
@@ -33,6 +34,7 @@ enum class Platform(
     }
 }
 
+@Immutable
 data class Options(
     val platform: Platform = Platform.YOUTUBE,
     val audioOnly: Boolean = false,
@@ -44,6 +46,7 @@ data class Options(
     val playlist: Boolean = false,
 )
 
+@Immutable
 data class PreviewInfo(
     val title: String,
     val uploader: String,
@@ -51,13 +54,27 @@ data class PreviewInfo(
     val thumbnail: String?,
 )
 
+@Immutable
 data class SavedFile(val name: String, val uri: String)
 
+@Immutable
 data class HistoryItem(val url: String, val name: String, val uri: String, val ts: Long)
 
 sealed interface DlState {
+    @Immutable
     data object Idle : DlState
-    data class Running(val label: String, val progress: Float, val speed: String, val eta: Long) : DlState
+
+    @Immutable
+    data class Running(
+        val label: String,
+        val progress: Float,
+        val speed: String,
+        val eta: Long
+    ) : DlState
+
+    @Immutable
     data class Done(val files: List<SavedFile>) : DlState
+
+    @Immutable
     data class Failed(val message: String) : DlState
 }
