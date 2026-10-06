@@ -2,19 +2,12 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.chaquo.python")
 }
 
-// Đọc version code từ versioncode.txt ở root repo.
-// CI workflow sẽ tự động bump file này mỗi lần build.
-// Nếu file chưa tồn tại (build local lần đầu), dùng mặc định là 1.
+// Version code từ file, CI bump tự động
 val versionCodeFromFile: Int = run {
     val f = rootProject.file("versioncode.txt")
-    if (f.exists()) {
-        f.readText().trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
-    } else {
-        1
-    }
+    if (f.exists()) f.readText().trim().toIntOrNull()?.coerceAtLeast(1) ?: 1 else 1
 }
 
 android {
@@ -25,10 +18,7 @@ android {
         applicationId = "com.nam2006.y2mate"
         minSdk = 29
         targetSdk = 34
-
-        // Version code đọc từ file, được CI bump tự động
         versionCode = versionCodeFromFile
-        // versionName theo versionCode để dễ nhìn trong Settings → About
         versionName = "1.0.$versionCodeFromFile"
 
         ndk {
@@ -38,6 +28,8 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
+                // Truyền đường dẫn tới Python runtime trong project
+                arguments += "-DPYTHON_RUNTIME_DIR=${projectDir}/src/main/assets/python"
             }
         }
     }
@@ -56,7 +48,7 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
 
-    // Build JNI từ CMake
+    // Build JNI từ CMake (FFmpeg + Python)
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -64,7 +56,6 @@ android {
         }
     }
 
-    // Đảm bảo Gradle pick up jniLibs và assets
     sourceSets {
         getByName("main") {
             jniLibs.srcDirs("src/main/jniLibs")
@@ -75,31 +66,23 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            // Tránh conflict nếu có nhiều lib cùng tên
             pickFirsts += listOf(
                 "**/libffmpeg.so",
-                "**/libffprobe.so"
+                "**/libffprobe.so",
+                "**/libpython3.14.so",
+                "**/libc++_shared.so"
             )
         }
     }
 
     androidResources {
-        // Không nén các file binary trong assets (cần cho extract runtime)
-        noCompress += listOf("zip", "so", "ffmpeg", "ffprobe")
+        // Không nén .py, .so, .zip để Python đọc được từ assets
+        noCompress += listOf("py", "pyc", "so", "zip", "dat")
     }
 
     lint {
         abortOnError = false
         checkReleaseBuilds = false
-    }
-
-    chaquopy {
-        defaultConfig {
-            version = "3.11"
-            pip {
-                install("yt-dlp")
-            }
-        }
     }
 }
 
