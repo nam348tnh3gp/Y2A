@@ -34,49 +34,68 @@ object Downloader {
 
     private const val READY_TIMEOUT_MS = 120_000
 
-    // Mỗi lần start()/cancel() tăng counter → các tác vụ cũ biết mình đã "hết hiệu lực"
     private val runCounter = AtomicLong(0)
-    // Chỉ cho 1 lần tải chạy tại 1 thời điểm
     private val runMutex = Mutex()
 
     val state = MutableStateFlow<DlState>(DlState.Idle)
     val ready = MutableStateFlow(false)
     val initError = MutableStateFlow<String?>(null)
 
-    // FFmpeg JNI
+    // FFmpeg JNI — khai báo external, load lazy
+    @Volatile private var ffmpegLibLoaded = false
     private external fun nativeChmod(path: String): Boolean
     private external fun nativeExecFfmpeg(binaryPath: String, args: Array<String>): Int
     private external fun nativeCanExecute(path: String): Boolean
 
-    init {
-        System.loadLibrary("ffmpeg_jni")
+    /** Load ffmpeg_jni.so an toàn — không crash nếu thiếu. */
+    private fun ensureFfmpegLib(): Boolean {
+        if (ffmpegLibLoaded) return true
+        return try {
+            System.loadLibrary("ffmpeg_jni")
+            ffmpegLibLoaded = true
+            Log.i(TAG, "✅ loadLibrary ffmpeg_jni OK")
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "❌ loadLibrary ffmpeg_jni fail", t)
+            false
+        }
     }
 
     // ==========================================================
-    // INIT — chờ PythonBridge sẵn sàng
+    // INIT
     // ==========================================================
     fun init(application: Application) {
         app = application
         scope.launch {
+            // 1. FFmpeg (không bắt buộc cho UI)
             try {
-                // 1. Chuẩn bị FFmpeg (copy .so từ nativeLibDir → filesDir, chmod, extract libs)
-                prepareFfmpeg()
+                if (ensureFfmpegLib()) {
+                    prepareFfmpeg()
+                    Log.i(TAG, "✅ FFmpeg ready")
+                } else {
+                    Log.w(TAG, "⚠️ FFmpeg không load được, tính năng convert/merge có thể lỗi")
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "⚠️ prepareFfmpeg fail (app vẫn chạy)", t)
+            }
 
-                // 2. Khởi tạo Python runtime (giải nén stdlib.zip + sitepackages.zip)
-                Log.i(TAG, "⏳ Khởi tạo Python runtime…")
+            // 2. Python (không bắt buộc cho UI — app vẫn mở được)
+            try {
+                Log.i(TAG, "⏳ Python init...")
                 if (!PythonBridge.init(app)) {
-                    initError.value = PythonBridge.lastError() ?: "Python không khởi tạo được"
-                    Log.e(TAG, "❌ Python init fail: ${initError.value}")
+                    initError.value = PythonBridge.lastError() ?: "Python init fail"
+                    Log.e(TAG, "❌ ${initError.value}")
                     return@launch
                 }
-                Log.i(TAG, "✅ Python runtime sẵn sàng")
-
-                ready.value = true
+                Log.i(TAG, "✅ Python ready")
             } catch (t: Throwable) {
-                val root = t.cause ?: t
-                initError.value = root.message ?: root.toString()
-                Log.e(TAG, "❌ Init fail", t)
+                initError.value = "Python: ${t.message}"
+                Log.e(TAG, "❌ Python fail", t)
+                return@launch
             }
+
+            ready.value = true
+            Log.i(TAG, "✅ Downloader ready")
         }
     }
 
@@ -111,7 +130,7 @@ object Downloader {
             nativeChmod(destFfmpeg.absolutePath)
             extractLibsFromAssets(destDir)
         } catch (e: Exception) {
-            initError.value = "Không extract được FFmpeg: ${e.message}"
+            Log.w(TAG, "Không extract được FFmpeg: ${e.message}")
         }
     }
 
@@ -130,10 +149,15 @@ object Downloader {
     }
 
     fun getFfmpegPath(): String? {
+        if (!ffmpegLibLoaded) return null
         val destFfmpeg = File(app.filesDir, "ffmpeg/ffmpeg")
-        return if (destFfmpeg.exists() && nativeCanExecute(destFfmpeg.absolutePath)) {
-            destFfmpeg.absolutePath
-        } else null
+        return try {
+            if (destFfmpeg.exists() && nativeCanExecute(destFfmpeg.absolutePath)) {
+                destFfmpeg.absolutePath
+            } else null
+        } catch (t: Throwable) {
+            null
+        }
     }
 
     // ==========================================================
@@ -168,10 +192,11 @@ object Downloader {
     fun cancel() {
         runCounter.incrementAndGet()
         state.value = DlState.Idle
-        // Báo Python dừng thật sự (nếu không, yt-dlp vẫn tải ngầm)
         scope.launch {
             try {
-                PythonBridge.callFunction("yt_dlp_bridge", "cancel_json", "{}")
+                if (PythonBridge.isInitialized()) {
+                    PythonBridge.callFunction("yt_dlp_bridge", "cancel_json", "{}")
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "cancel_json fail", t)
             }
@@ -315,7 +340,6 @@ object Downloader {
                 }
             }.toString()
 
-            // Gọi Python qua JNI
             val resultJson = PythonBridge.callFunction("yt_dlp_bridge", "download_json", optionsJson)
             val result = JSONObject(resultJson)
 
