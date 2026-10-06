@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.chaquo.python") // <-- Chaquopy plugin
+    id("com.chaquo.python")
 }
 
 android {
@@ -15,7 +15,16 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+            }
+        }
     }
 
     buildTypes {
@@ -32,14 +41,32 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
 
-    packaging { jniLibs { useLegacyPackaging = true } }
+    // Build JNI từ CMake
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            // Không nén thư viện FFmpeg
+            keepDebugSymbols += "**/libffmpeg.so"
+        }
+    }
+
+    androidResources {
+        // Không nén các file binary trong assets
+        noCompress += listOf("zip", "so")
+    }
 
     lint {
         abortOnError = false
         checkReleaseBuilds = false
     }
 
-    // Cấu hình Chaquopy: phiên bản Python và các gói pip
     chaquopy {
         defaultConfig {
             version = "3.11"
@@ -61,7 +88,4 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
-
-    // FFmpegKit (maintained fork) — cung cấp ffmpeg cho yt-dlp
-    implementation("dev.ffmpegkit-maintained:ffmpeg-kit-full:8.1.7")
 }
