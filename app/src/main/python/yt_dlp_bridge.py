@@ -1,7 +1,23 @@
 import yt_dlp
 import os
 import json
+import threading
 import urllib.request
+
+try:
+    from yt_dlp.utils import DownloadCancelled as _CancelBase
+except Exception:  # bản yt-dlp cũ
+    _CancelBase = Exception
+
+
+class UserCancelled(_CancelBase):
+    """Người dùng bấm Hủy. Kế thừa DownloadCancelled để yt-dlp không nuốt lỗi khi ignoreerrors (playlist)."""
+    def __init__(self, msg="cancelled"):
+        super().__init__(msg)
+
+
+_cancel = threading.Event()
+
 
 class DownloadProgress:
     def __init__(self):
@@ -16,6 +32,8 @@ current_progress = DownloadProgress()
 
 def progress_hook(d):
     global current_progress
+    if _cancel.is_set():
+        raise UserCancelled()
     status = d.get('status')
     if status == 'downloading':
         current_progress.status = "downloading"
@@ -50,6 +68,9 @@ def get_info_json(args_json):
         'no_warnings': True,
         'noplaylist': True,
         'skip_download': True,
+        'socket_timeout': 20,      # tránh treo vô hạn khi mạng chập chờn
+        'retries': 2,
+        'extractor_retries': 1,
     }
     if cookies_file and os.path.exists(cookies_file):
         ydl_opts['cookiefile'] = cookies_file
@@ -68,6 +89,24 @@ def get_info_json(args_json):
             })
     except Exception:
         return json.dumps({'title': '', 'uploader': '', 'duration': 0, 'thumbnail': ''})
+
+
+def get_progress_json(_args_json="{}"):
+    """Kotlin gọi định kỳ để lấy tiến độ."""
+    p = current_progress
+    return json.dumps({
+        'status': p.status,
+        'percent': p.percent,
+        'speed': p.speed,
+        'eta': p.eta,
+        'filename': p.filename,
+    })
+
+
+def cancel_json(_args_json="{}"):
+    """Đặt cờ hủy; progress_hook sẽ raise ở lần gọi kế tiếp."""
+    _cancel.set()
+    return json.dumps({'success': True})
 
 
 def check_versions_json(args_json):
@@ -97,6 +136,7 @@ def download_json(options_json):
 
     global current_progress
     current_progress = DownloadProgress()
+    _cancel.clear()
 
     try:
         url = options.get('url', '')
