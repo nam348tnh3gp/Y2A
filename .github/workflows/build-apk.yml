@@ -76,41 +76,67 @@ jobs:
           LATEST_TAG=$(curl -sL \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/flet-dev/python-build/releases/latest" \
-            | jq -r '.tag_name')
+            "https://api.github.com/repos/flet-dev/python-build/releases?per_page=30" \
+            | jq -r '[.[].tag_name | select(test("^[0-9]{8}$"))][0]')
+
           if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+            echo "⚠️ Không tìm được tag, dùng fallback"
             LATEST_TAG="20260921"
           fi
-          echo "✅ Latest python-build release: $LATEST_TAG"
+          echo "✅ Latest release: $LATEST_TAG"
           echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
 
-      # ---------- Download python-build runtime ----------
+      # ---------- Download Python runtime ----------
       - name: Download Python runtime
+        id: python-runtime
         env:
           PY_BUILD_RELEASE: ${{ steps.python-release.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           PY_VERSION="3.14"
           ABI="arm64-v8a"
-          TARBALL="python-android-dart-${PY_VERSION}-${ABI}.tar.gz"
-          URL="https://github.com/flet-dev/python-build/releases/download/${PY_BUILD_RELEASE}/${TARBALL}"
 
+          # Tải manifest.json để lấy full version
+          MANIFEST_URL="https://github.com/flet-dev/python-build/releases/download/${PY_BUILD_RELEASE}/manifest.json"
+          echo "📥 Tải manifest: $MANIFEST_URL"
+          wget -q -O manifest.json "$MANIFEST_URL"
+
+          FULL_VERSION=$(jq -r --arg pv "$PY_VERSION" '.pythons[$pv].full_version // empty' manifest.json)
+          if [ -z "$FULL_VERSION" ]; then
+            echo "⚠️ Không có full_version, dùng fallback"
+            FULL_VERSION="${PY_VERSION}.0"
+          fi
+          echo "🐍 Full Python version: $FULL_VERSION"
+
+          # Tải tarball
+          TARBALL="python-android-dart-${FULL_VERSION}-${ABI}.tar.gz"
+          URL="https://github.com/flet-dev/python-build/releases/download/${PY_BUILD_RELEASE}/${TARBALL}"
           echo "📥 Downloading: $URL"
+
           mkdir -p _python_runtime
           cd _python_runtime
 
           if ! wget -q --show-progress -O "$TARBALL" "$URL"; then
-            echo "❌ Tải thất bại. Liệt kê assets..."
+            echo "❌ Tải thất bại. Assets có sẵn:"
             curl -sL -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer $GH_TOKEN" \
               "https://api.github.com/repos/flet-dev/python-build/releases/tags/${PY_BUILD_RELEASE}" \
-              | jq -r '.assets[].name' || true
+              | jq -r '.assets[].name' | grep -i android || true
             exit 1
           fi
 
+          echo "📦 Extracting..."
           tar -xzf "$TARBALL"
+
           echo "📂 Structure:"
-          find . -maxdepth 3 -type d | head -20
+          find . -maxdepth 4 -type d | head -30
+          echo ""
+          echo "🔍 Tìm libpython và stdlib:"
+          find . -name "libpython*.so" -o -name "os.py" | head -10
+          echo ""
+          echo "📊 Size:"
+          du -sh .
 
       # ---------- Install pip + yt-dlp ----------
       - name: Install pip and yt-dlp
@@ -131,7 +157,6 @@ jobs:
           SITE_PACKAGES="$STDLIB_DIR/site-packages"
           mkdir -p "$SITE_PACKAGES"
 
-          # yt-dlp là pure Python → wheel py3-none-any
           python3 -m pip install --upgrade pip
           python3 -m pip install --target="$SITE_PACKAGES" \
             --no-compile --only-binary=:all: --no-deps \
@@ -141,7 +166,7 @@ jobs:
           ls -la "$SITE_PACKAGES/"
           du -sh "$SITE_PACKAGES"
 
-      # ---------- Copy runtime vào Android project ----------
+      # ---------- Integrate runtime into Android project ----------
       - name: Integrate runtime
         env:
           PY_VERSION: "3.14"
@@ -149,21 +174,32 @@ jobs:
           set -e
           cd _python_runtime
 
-          # libpython*.so → jniLibs
+          # 1. libpython → jniLibs
           LIBPY=$(find . -name "libpython${PY_VERSION}.so" | head -1)
           [ -z "$LIBPY" ] && { echo "❌ Không có libpython"; exit 1; }
           mkdir -p ../app/src/main/jniLibs/arm64-v8a
           cp "$LIBPY" ../app/src/main/jniLibs/arm64-v8a/libpython3.14.so
-          echo "✅ $LIBPY → jniLibs"
+          echo "✅ libpython → jniLibs"
 
-          # Stdlib → assets
+          # 2. stdlib → assets
           STDLIB_DIR=$(find . -type d -name "python${PY_VERSION}" -path "*/lib/*" | head -1)
           STDLIB_PARENT=$(dirname "$STDLIB_DIR")
           mkdir -p ../app/src/main/assets/python
           cp -r "$STDLIB_PARENT/python${PY_VERSION}" ../app/src/main/assets/python/
           echo "✅ stdlib → assets/python/python3.14/"
 
-          # Native .so khác → jniLibs
+          # 3. Header files → cpp/include (chỉ dùng lúc compile)
+          INCLUDE_DIR=$(find . -type d -name "python${PY_VERSION}" -path "*/include/*" | head -1)
+          if [ -n "$INCLUDE_DIR" ]; then
+            mkdir -p ../app/src/main/cpp/include
+            cp -r "$INCLUDE_DIR"/* ../app/src/main/cpp/include/
+            echo "✅ Headers → cpp/include/"
+          else
+            echo "⚠️ Không tìm thấy include/"
+            find . -name "Python.h" | head -3
+          fi
+
+          # 4. Native .so khác → jniLibs
           find . -name "*.so" ! -name "libpython*.so" | while read -r so; do
             name=$(basename "$so")
             [[ "$name" =~ ^(lib.+\.so)\.[0-9]+$ ]] && name="${BASH_REMATCH[1]}"
@@ -172,10 +208,8 @@ jobs:
           done
 
           echo ""
-          echo "📋 jniLibs:"
-          ls -lh ../app/src/main/jniLibs/arm64-v8a/
-          echo "📋 assets:"
-          du -sh ../app/src/main/assets/
+          echo "📋 jniLibs:"; ls -lh ../app/src/main/jniLibs/arm64-v8a/
+          echo "📋 assets:"; du -sh ../app/src/main/assets/
 
       # ---------- Setup debug keystore ----------
       - name: Setup debug keystore
