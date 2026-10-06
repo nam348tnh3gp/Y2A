@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -28,6 +29,8 @@ object Downloader {
     private const val PROCESS_ID = "y2m-current"
     private val SAFE = setOf("mp4", "mkv", "webm")
     private val LOSSLESS = setOf("flac", "wav", "alac")
+    private const val POLL_INTERVAL_MS = 800L
+    private const val PROGRESS_DELTA = 0.005f  // 0.5%
 
     private lateinit var app: Application
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -41,13 +44,12 @@ object Downloader {
     val ready = MutableStateFlow(false)
     val initError = MutableStateFlow<String?>(null)
 
-    // FFmpeg JNI — khai báo external, load lazy
+    // FFmpeg JNI
     @Volatile private var ffmpegLibLoaded = false
     private external fun nativeChmod(path: String): Boolean
     private external fun nativeExecFfmpeg(binaryPath: String, args: Array<String>): Int
     private external fun nativeCanExecute(path: String): Boolean
 
-    /** Load ffmpeg_jni.so an toàn — không crash nếu thiếu. */
     private fun ensureFfmpegLib(): Boolean {
         if (ffmpegLibLoaded) return true
         return try {
@@ -73,13 +75,13 @@ object Downloader {
                     prepareFfmpeg()
                     Log.i(TAG, "✅ FFmpeg ready")
                 } else {
-                    Log.w(TAG, "⚠️ FFmpeg không load được, tính năng convert/merge có thể lỗi")
+                    Log.w(TAG, "⚠️ FFmpeg không load được")
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "⚠️ prepareFfmpeg fail (app vẫn chạy)", t)
             }
 
-            // 2. Python (không bắt buộc cho UI — app vẫn mở được)
+            // 2. Python (không bắt buộc cho UI)
             try {
                 Log.i(TAG, "⏳ Python init...")
                 if (!PythonBridge.init(app)) {
@@ -189,13 +191,21 @@ object Downloader {
         }
     }
 
+    /**
+     * Hủy tải. Đảm bảo:
+     * 1. Tăng runCounter để vô hiệu hóa run hiện tại
+     * 2. Đổi state về Idle ngay để UI phản hồi
+     * 3. Gọi Python cancel_json để dừng yt-dlp thật sự (không chỉ dừng UI)
+     */
     fun cancel() {
         runCounter.incrementAndGet()
         state.value = DlState.Idle
+
         scope.launch {
             try {
                 if (PythonBridge.isInitialized()) {
                     PythonBridge.callFunction("yt_dlp_bridge", "cancel_json", "{}")
+                    Log.i(TAG, "✅ cancel_json sent to Python")
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "cancel_json fail", t)
@@ -204,31 +214,52 @@ object Downloader {
     }
 
     // ==========================================================
-    // PROGRESS POLLING
+    // PROGRESS POLLING — chỉ update khi delta >= 0.5%
     // ==========================================================
     private suspend fun pollProgress(run: Long) {
+        var lastPct = -1f
+        var lastLabel = ""
+
         while (true) {
-            delay(600)
+            delay(POLL_INTERVAL_MS)
             if (runCounter.get() != run) return
+
             try {
-                val j = JSONObject(PythonBridge.callFunction("yt_dlp_bridge", "get_progress_json", "{}"))
-                val st = j.optString("status", "idle")
+                val j = JSONObject(
+                    PythonBridge.callFunction("yt_dlp_bridge", "get_progress_json", "{}")
+                )
+                val status = j.optString("status", "idle")
+
+                // Kết thúc poll khi Python báo idle/error/cancelled
+                if (status == "idle" || status == "error" || status == "cancelled") return
+
                 val pct = (j.optDouble("percent", 0.0) / 100.0).toFloat().coerceIn(0f, 1f)
-                val speed = j.optString("speed", "").replace(Regex("\u001B\\[[0-9;]*m"), "").trim()
+                val speed = j.optString("speed", "")
+                    .replace(Regex("\u001B\\[[0-9;]*m"), "").trim()
                 val eta = j.optLong("eta", -1L)
-                val label = when (st) {
-                    "downloading" -> "⬇️ Đang tải…"
-                    "finished" -> "⚙️ Đang xử lý…"
-                    else -> "⏳ Đang chuẩn bị…"
+
+                // Bỏ qua nếu delta < 0.5% (tránh recompose không cần thiết)
+                if (lastPct >= 0 && abs(pct - lastPct) < PROGRESS_DELTA) continue
+
+                val label = when {
+                    pct >= 1f || status == "finished" -> "⚙️ Đang xử lý…"
+                    else -> "⬇️ Đang tải…"
                 }
-                state.update { cur ->
-                    if (cur is DlState.Running && runCounter.get() == run)
-                        DlState.Running(label, pct, speed, eta)
-                    else cur
+
+                // Chỉ update khi label đổi hoặc pct đổi đủ
+                if (label != lastLabel || abs(pct - lastPct) >= PROGRESS_DELTA) {
+                    state.update { cur ->
+                        if (cur is DlState.Running && runCounter.get() == run) {
+                            DlState.Running(label, pct, speed, eta)
+                        } else cur
+                    }
+                    lastPct = pct
+                    lastLabel = label
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
+                // Bỏ qua lỗi tạm thời (Python đang bận, JSON malformed, ...)
             }
         }
     }
@@ -345,8 +376,10 @@ object Downloader {
 
             val success = result.optBoolean("success", false)
             val error = result.optString("error", "")
+            val cancelledFlag = result.optBoolean("cancelled", false)
 
             if (runCounter.get() != run) throw IllegalStateException("cancelled")
+            if (cancelledFlag) throw IllegalStateException("cancelled")
             if (!success) throw IllegalStateException(error.ifEmpty { "Tải thất bại" })
 
             val files = dir.walkTopDown().filter { it.isFile && !isTemp(it.name) }.toList()
