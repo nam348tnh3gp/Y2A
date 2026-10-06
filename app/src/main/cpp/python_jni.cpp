@@ -4,17 +4,17 @@
 #include <dlfcn.h>
 #include <cstring>
 #include <cstdlib>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define LOG_TAG "PythonJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 // ============================================================
-// Function pointer typedefs (thay vì Python.h)
+// Function pointer typedefs
 // ============================================================
 typedef void* PyObject;
-typedef void* PyObject_ptr;
-
 typedef void     (*Py_Initialize_t)();
 typedef void     (*Py_Finalize_t)();
 typedef int      (*PyRun_SimpleString_t)(const char*);
@@ -29,7 +29,6 @@ typedef const char* (*PyUnicode_AsUTF8_t)(PyObject);
 typedef void     (*PyErr_Print_t)();
 typedef const char* (*Py_GetVersion_t)();
 typedef void     (*Py_DecRef_t)(PyObject);
-typedef int      (*PyRun_SimpleFile_t)(void*, const char*);
 typedef int      (*PyGILState_Ensure_t)();
 typedef void     (*PyGILState_Release_t)(int);
 typedef void*    (*PyEval_SaveThread_t)();
@@ -60,12 +59,52 @@ static PyEval_SaveThread_t       p_PyEval_SaveThread = nullptr;
 static PyEval_RestoreThread_t    p_PyEval_RestoreThread = nullptr;
 static PyErr_Clear_t             p_PyErr_Clear = nullptr;
 
+// ============================================================
+// Helper: Trích xuất file ZIP từ assets ra filesystem
+// ============================================================
+static bool extractZipFromAssets(
+        JNIEnv *env, jobject assetManager,
+        const char* assetName, const char* destPath) {
+
+    // Mở asset
+    jclass assetManagerClass = env->GetObjectClass(assetManager);
+    jmethodID openMethod = env->GetMethodID(assetManagerClass, "open",
+        "(Ljava/lang/String;)Ljava/io/InputStream;");
+    jstring jAssetName = env->NewStringUTF(assetName);
+    jobject inputStream = env->CallObjectMethod(assetManager, openMethod, jAssetName);
+    env->DeleteLocalRef(jAssetName);
+
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+
+    // Tạo file đích
+    FILE* destFile = fopen(destPath, "wb");
+    if (!destFile) return false;
+
+    // Đọc từng byte từ InputStream
+    jclass inputStreamClass = env->GetObjectClass(inputStream);
+    jmethodID readMethod = env->GetMethodID(inputStreamClass, "read", "()I");
+
+    while (true) {
+        jint byte = env->CallIntMethod(inputStream, readMethod);
+        if (env->ExceptionCheck() || byte == -1) break;
+        fputc((char)byte, destFile);
+    }
+
+    fclose(destFile);
+    env->DeleteLocalRef(inputStream);
+    return true;
+}
+
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
 Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         JNIEnv *env, jobject,
-        jstring nativeLibDir, jstring sitePackagesDir, jstring filesDir) {
+        jstring nativeLibDir, jstring sitePackagesDir, jstring filesDir,
+        jobject assetManager) {
 
     if (g_initialized) return JNI_TRUE;
 
@@ -78,17 +117,40 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     LOGI("filesDir:    %s", filesDirC);
 
     // ========================================================
-    // KHÔNG set PYTHONHOME (vì flet-dev runtime không có
-    // lib/python3.14/ folder riêng — stdlib nằm trong bundle)
+    // 1. Trích xuất stdlib.zip từ assets
     // ========================================================
-    unsetenv("PYTHONHOME");
-    setenv("PYTHONPATH", siteDir, 1);
-    setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
-    setenv("LD_LIBRARY_PATH", libDir, 1);
-    setenv("PATH", libDir, 1);
+    std::string stdlibZipDest = std::string(filesDirC) + "/stdlib.zip";
+    bool stdlibOk = extractZipFromAssets(
+        env, assetManager, "python/stdlib.zip", stdlibZipDest.c_str());
+
+    if (!stdlibOk) {
+        // Fallback: thử lấy từ libpythonbundle.so
+        LOGI("stdlib.zip không có trong assets, thử từ libpythonbundle.so...");
+        std::string bundlePath = std::string(libDir) + "/libpythonbundle.so";
+        // TODO: extract stdlib.zip from bundle
+    }
+
+    if (!stdlibOk) {
+        LOGE("❌ Không trích xuất được stdlib.zip");
+        env->ReleaseStringUTFChars(nativeLibDir, libDir);
+        env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
+        env->ReleaseStringUTFChars(filesDir, filesDirC);
+        return JNI_FALSE;
+    }
 
     // ========================================================
-    // Load libpython3.14.so
+    // 2. Trích xuất sitepackages.zip từ assets
+    // ========================================================
+    std::string sitePackagesZipDest = std::string(filesDirC) + "/sitepackages.zip";
+    bool siteOk = extractZipFromAssets(
+        env, assetManager, "python/sitepackages.zip", sitePackagesZipDest.c_str());
+
+    if (!siteOk) {
+        LOGW("⚠️ sitepackages.zip không có trong assets (có thể dùng site-packages folder)");
+    }
+
+    // ========================================================
+    // 3. Load libpython3.14.so
     // ========================================================
     std::string libPath = std::string(libDir) + "/libpython3.14.so";
     g_libpython = dlopen(libPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
@@ -102,7 +164,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     LOGI("✅ dlopen libpython OK");
 
     // ========================================================
-    // Load symbols
+    // 4. Load symbols
     // ========================================================
     #define LOAD(name) \
         p_##name = (name##_t) dlsym(g_libpython, #name); \
@@ -127,7 +189,6 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     LOAD(PyEval_SaveThread)
     LOAD(PyEval_RestoreThread)
     LOAD(PyErr_Clear)
-
     #undef LOAD
 
     if (!p_Py_Initialize || !p_PyRun_SimpleString ||
@@ -141,7 +202,17 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     }
 
     // ========================================================
-    // Init Python
+    // 5. Set env vars cho Python
+    // ========================================================
+    // PYTHONHOME: trỏ đến thư mục chứa stdlib.zip
+    // Python sẽ tự động thêm stdlib.zip vào sys.path khi tìm thấy nó trong $PYTHONHOME/lib
+    setenv("PYTHONHOME", filesDirC, 1);
+    setenv("PYTHONPATH", siteDir, 1);
+    setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
+    setenv("LD_LIBRARY_PATH", libDir, 1);
+
+    // ========================================================
+    // 6. Init Python
     // ========================================================
     p_Py_Initialize();
 
@@ -150,13 +221,13 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     }
 
     // ========================================================
-    // TEST: import os — kiểm tra stdlib có load không
+    // 7. TEST: import os
     // ========================================================
     int rc_test = p_PyRun_SimpleString("import os; print('STDLIB_OS_OK')");
     LOGI("Test import os: rc=%d", rc_test);
 
     if (rc_test != 0) {
-        LOGE("❌ Stdlib không load được — runtime không tương thích");
+        LOGE("❌ Stdlib không load được");
         if (p_PyErr_Print) p_PyErr_Print();
         env->ReleaseStringUTFChars(nativeLibDir, libDir);
         env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
@@ -165,30 +236,34 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     }
 
     // ========================================================
-    // Thêm sys.path: filesDir, site-packages, nativeLibDir
+    // 8. Thêm sys.path: filesDir, site-packages, zip files
     // ========================================================
     std::string code = "import sys\n";
     code += "sys.path.insert(0, r'" + std::string(filesDirC) + "')\n";
-    code += "sys.path.insert(0, r'" + std::string(siteDir) + "')\n";
+    code += "sys.path.insert(0, r'" + std::string(filesDirC) + "/stdlib.zip')\n";
+    if (siteOk) {
+        code += "sys.path.insert(0, r'" + std::string(filesDirC) + "/sitepackages.zip')\n";
+    } else {
+        code += "sys.path.insert(0, r'" + std::string(siteDir) + "')\n";
+    }
     code += "sys.path.insert(0, r'" + std::string(libDir) + "')\n";
-    code += "print('sys.path:', sys.path[:5])\n";
+    code += "print('sys.path:', sys.path[:6])\n";
 
-    int rc_path = p_PyRun_SimpleString(code.c_str());
-    LOGI("Set sys.path: rc=%d", rc_path);
+    p_PyRun_SimpleString(code.c_str());
 
     // ========================================================
-    // TEST: import yt_dlp
+    // 9. TEST: import yt_dlp
     // ========================================================
     int rc_ytdlp = p_PyRun_SimpleString("import yt_dlp; print('YTDLP_OK', yt_dlp.version.__version__)");
     LOGI("Test import yt_dlp: rc=%d", rc_ytdlp);
 
     if (rc_ytdlp != 0) {
-        LOGE("⚠️ yt_dlp không import được (nhưng Python vẫn chạy)");
+        LOGE("⚠️ yt_dlp không import được");
         if (p_PyErr_Print) p_PyErr_Print();
     }
 
     // ========================================================
-    // Nhả GIL — bắt buộc để các thread khác gọi được Python
+    // 10. Nhả GIL
     // ========================================================
     g_mainTState = p_PyEval_SaveThread();
     g_initialized = true;
@@ -256,7 +331,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeCallFunction(
     p_PyGILState_Release(gstate);
 
     env->ReleaseStringUTFChars(moduleName, mod);
-    env->ReleaseStringUTFChars(funcName, fn);
+    env->ReleaseStringUTFChars(functionName, fn);
     env->ReleaseStringUTFChars(argJson, arg);
 
     return env->NewStringUTF(out.c_str());
