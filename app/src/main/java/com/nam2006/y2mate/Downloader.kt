@@ -6,12 +6,19 @@ import android.content.Intent
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
+import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -24,7 +31,12 @@ object Downloader {
     private lateinit var app: Application
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    @Volatile private var cancelled = false
+    private const val READY_TIMEOUT_MS = 120_000
+
+    // Mỗi lần start()/cancel() tăng counter → các tác vụ cũ biết mình đã "hết hiệu lực"
+    private val runCounter = AtomicLong(0)
+    // Chỉ cho 1 lần tải chạy tại 1 thời điểm (kể cả khi lần trước vừa bị hủy nhưng Python chưa dừng hẳn)
+    private val runMutex = Mutex()
 
     val state = MutableStateFlow<DlState>(DlState.Idle)
     val ready = MutableStateFlow(false)
@@ -45,15 +57,9 @@ object Downloader {
             try {
                 prepareFfmpeg()
 
-                // Chờ PythonBridge init xong
-                var waited = 0
-                while (!PythonBridge.isInitialized() && waited < 60_000) {
-                    delay(200)
-                    waited += 200
-                }
-
-                if (!PythonBridge.isInitialized()) {
-                    initError.value = "Python không khởi tạo được trong 60s"
+                // Giải nén site-packages + Py_Initialize: nặng → chạy ở nền, KHÔNG phải main thread
+                if (!PythonBridge.init(app)) {
+                    initError.value = PythonBridge.lastError() ?: "Python không khởi tạo được"
                     return@launch
                 }
 
@@ -120,25 +126,69 @@ object Downloader {
 
     fun start(url: String, o: Options) {
         if (state.value is DlState.Running) return
-        cancelled = false
+        val myRun = runCounter.incrementAndGet()
         state.value = DlState.Running("⏳ Đang chuẩn bị…", 0f, "", -1L)
         ContextCompat.startForegroundService(app, Intent(app, DownloadService::class.java))
         scope.launch {
-            try {
-                waitReady()
-                val saved = runDownload(url, o)
-                val now = System.currentTimeMillis()
-                HistoryStore.add(app, saved.map { HistoryItem(url, it.name, it.uri, now) })
-                state.value = DlState.Done(saved)
-            } catch (t: Throwable) {
-                state.value = if (cancelled) DlState.Idle else DlState.Failed(cleanError(t))
+            runMutex.withLock {
+                if (runCounter.get() != myRun) return@withLock
+                var poller: Job? = null
+                try {
+                    waitReady()
+                    if (runCounter.get() != myRun) return@withLock
+                    poller = launch { pollProgress(myRun) }
+                    val saved = runDownload(url, o, myRun)
+                    val now = System.currentTimeMillis()
+                    HistoryStore.add(app, saved.map { HistoryItem(url, it.name, it.uri, now) })
+                    if (runCounter.get() == myRun) state.value = DlState.Done(saved)
+                } catch (t: Throwable) {
+                    if (runCounter.get() == myRun) state.value = DlState.Failed(cleanError(t))
+                } finally {
+                    poller?.cancel()
+                }
             }
         }
     }
 
     fun cancel() {
-        cancelled = true
+        runCounter.incrementAndGet()
         state.value = DlState.Idle
+        // Báo Python dừng thật sự (nếu không, yt-dlp vẫn tải ngầm)
+        scope.launch {
+            try {
+                PythonBridge.callFunction("yt_dlp_bridge", "cancel_json", "{}")
+            } catch (t: Throwable) {
+                Log.w("Downloader", "cancel_json fail", t)
+            }
+        }
+    }
+
+    /** Đọc tiến độ từ Python mỗi ~0.6s để UI + notification không đứng ở 0%. */
+    private suspend fun pollProgress(run: Long) {
+        while (true) {
+            delay(600)
+            if (runCounter.get() != run) return
+            try {
+                val j = JSONObject(PythonBridge.callFunction("yt_dlp_bridge", "get_progress_json", "{}"))
+                val st = j.optString("status", "idle")
+                val pct = (j.optDouble("percent", 0.0) / 100.0).toFloat().coerceIn(0f, 1f)
+                val speed = j.optString("speed", "").replace(Regex("\u001B\\[[0-9;]*m"), "").trim()
+                val eta = j.optLong("eta", -1L)
+                val label = when (st) {
+                    "downloading" -> "⬇️ Đang tải…"
+                    "finished" -> "⚙️ Đang xử lý…"
+                    else -> "⏳ Đang chuẩn bị…"
+                }
+                state.update { cur ->
+                    if (cur is DlState.Running && runCounter.get() == run)
+                        DlState.Running(label, pct, speed, eta)
+                    else cur
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+        }
     }
 
     fun reset() {
@@ -146,17 +196,20 @@ object Downloader {
     }
 
     private suspend fun waitReady() {
+        var waited = 0
         while (!ready.value) {
             val err = initError.value
             if (err != null) throw IllegalStateException("Không khởi tạo được: $err")
+            if (waited > READY_TIMEOUT_MS) throw IllegalStateException("Khởi tạo quá lâu, hãy mở lại app")
             delay(200)
+            waited += 200
         }
     }
 
     fun fetchInfo(url: String): PreviewInfo {
         var waited = 0
         while (!ready.value) {
-            if (initError.value != null || waited > 40_000) throw IllegalStateException("Chưa sẵn sàng")
+            if (initError.value != null || waited > READY_TIMEOUT_MS) throw IllegalStateException("Chưa sẵn sàng")
             Thread.sleep(200); waited += 200
         }
 
@@ -206,12 +259,12 @@ object Downloader {
         }
     }
 
-    private fun runDownload(url: String, o: Options): List<SavedFile> {
+    private fun runDownload(url: String, o: Options, run: Long): List<SavedFile> {
         val root = app.getExternalFilesDir("tmp") ?: File(app.filesDir, "tmp")
         val dir = File(root, Integer.toHexString((url + o.toString()).hashCode()))
         dir.mkdirs()
         try {
-            if (cancelled) throw IllegalStateException("cancelled")
+            if (runCounter.get() != run) throw IllegalStateException("cancelled")
 
             val optionsJson = JSONObject().apply {
                 put("url", url)
@@ -241,8 +294,8 @@ object Downloader {
             val success = result.optBoolean("success", false)
             val error = result.optString("error", "")
 
+            if (runCounter.get() != run) throw IllegalStateException("cancelled")
             if (!success) throw IllegalStateException(error.ifEmpty { "Tải thất bại" })
-            if (cancelled) throw IllegalStateException("cancelled")
 
             val files = dir.walkTopDown().filter { it.isFile && !isTemp(it.name) }.toList()
             if (files.isEmpty()) throw IllegalStateException("Không tìm thấy file đã tải")
@@ -255,7 +308,7 @@ object Downloader {
             dir.deleteRecursively()
             return saved
         } catch (t: Throwable) {
-            if (cancelled) dir.deleteRecursively()
+            if (runCounter.get() != run) dir.deleteRecursively()
             throw t
         }
     }
