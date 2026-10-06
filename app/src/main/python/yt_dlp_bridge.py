@@ -1,7 +1,22 @@
 import yt_dlp
 import os
 import json
+import threading
 import urllib.request
+
+# ============================================================
+# Cancel flag — chia sẻ giữa các lần gọi từ Kotlin
+# ============================================================
+_cancel_event = threading.Event()
+
+# Lấy exception class để raise khi user hủy.
+# yt-dlp hiện đại có DownloadCancelled, fallback nếu không có.
+try:
+    from yt_dlp.utils import DownloadCancelled as _CancelExc
+except ImportError:
+    class _CancelExc(Exception):
+        pass
+
 
 class DownloadProgress:
     def __init__(self):
@@ -12,10 +27,20 @@ class DownloadProgress:
         self.filename = ""
         self.error = None
 
+
 current_progress = DownloadProgress()
 
+
+# ============================================================
+# Progress hook — kiểm tra cancel mỗi lần gọi
+# ============================================================
 def progress_hook(d):
     global current_progress
+
+    # User bấm hủy → raise để yt-dlp dừng ngay
+    if _cancel_event.is_set():
+        raise _CancelExc("cancelled by user")
+
     status = d.get('status')
     if status == 'downloading':
         current_progress.status = "downloading"
@@ -31,8 +56,42 @@ def progress_hook(d):
         current_progress.percent = 100.0
         current_progress.filename = d.get('filename', '')
 
+
+# ============================================================
+# API cho Kotlin — progress & cancel
+# ============================================================
+
+def get_progress(_args_json="{}"):
+    """
+    Kotlin gọi định kỳ (mỗi 1s) để lấy tiến độ.
+    Trả JSON: status, percent, speed, eta, filename
+    """
+    p = current_progress
+    return json.dumps({
+        'status': p.status,
+        'percent': p.percent,
+        'speed': p.speed,
+        'eta': p.eta,
+        'filename': p.filename,
+    })
+
+
+def cancel_download(_args_json="{}"):
+    """
+    Đặt cờ hủy. progress_hook sẽ raise ở lần gọi kế tiếp,
+    khiến yt-dlp dừng tải ngay lập tức.
+    """
+    _cancel_event.set()
+    return json.dumps({'success': True})
+
+
+# ============================================================
+# API cho Kotlin — kiểm tra phiên bản yt-dlp
+# ============================================================
+
 def get_installed_version():
     return yt_dlp.version.__version__
+
 
 def get_latest_version():
     try:
@@ -43,12 +102,19 @@ def get_latest_version():
     except Exception as e:
         return f"Error: {e}"
 
+
+# ============================================================
+# API cho Kotlin — lấy thông tin preview
+# ============================================================
+
 def get_info(url, cookies_file=""):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'skip_download': True,
+        'socket_timeout': 20,
+        'retries': 2,
     }
     if cookies_file and os.path.exists(cookies_file):
         ydl_opts['cookiefile'] = cookies_file
@@ -68,10 +134,15 @@ def get_info(url, cookies_file=""):
     except Exception:
         return json.dumps({'title': '', 'uploader': '', 'duration': 0, 'thumbnail': ''})
 
+
+# ============================================================
+# API cho Kotlin — tải chính
+# ============================================================
+
 def download(url, options_json):
     """
     Nhận options dưới dạng JSON string từ Kotlin.
-    Không bridge Java Map → tránh mọi lỗi Chaquopy iteration.
+    Trả JSON: {'success': bool, 'error': str | null, 'cancelled': bool (optional)}
     """
     try:
         options = json.loads(options_json)
@@ -80,6 +151,8 @@ def download(url, options_json):
 
     global current_progress
     current_progress = DownloadProgress()
+    _cancel_event.clear()
+
     try:
         ydl_opts = {
             'progress_hooks': [progress_hook],
@@ -145,8 +218,25 @@ def download(url, options_json):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
+        # Trường hợp yt-dlp nuốt exception và không raise khi bị hủy
+        if _cancel_event.is_set():
+            current_progress.status = "cancelled"
+            return json.dumps({
+                'success': False,
+                'error': 'cancelled',
+                'cancelled': True,
+            })
+
         return json.dumps({'success': True, 'error': None})
     except Exception as e:
+        # Phân biệt hủy với lỗi thật
+        if _cancel_event.is_set():
+            current_progress.status = "cancelled"
+            return json.dumps({
+                'success': False,
+                'error': 'cancelled',
+                'cancelled': True,
+            })
         current_progress.error = str(e)
         current_progress.status = "error"
         return json.dumps({'success': False, 'error': str(e)})
