@@ -22,10 +22,10 @@ jobs:
     timeout-minutes: 120
 
     env:
-      PYTHON_VERSION: "3.11.8"
-      OPENSSL_VERSION: "1.1.1w"
+      PYTHON_VERSION: "3.13.1"
+      OPENSSL_VERSION: "3.3.2"
       LIBFFI_VERSION: "3.4.6"
-      SQLITE_VERSION: "3450100"
+      SQLITE_VERSION: "3460100"
       SQLITE_YEAR: "2024"
       ZLIB_VERSION: "1.3.1"
       XZ_VERSION: "5.4.6"
@@ -33,7 +33,9 @@ jobs:
       TARGET_HOST: "aarch64-linux-android"
 
     steps:
+      # ==========================================================
       # SECTION 1: ENVIRONMENT SETUP
+      # ==========================================================
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -78,7 +80,9 @@ jobs:
           fi
           echo "Bridge script found"
 
+      # ==========================================================
       # SECTION 2: VERSION BUMP
+      # ==========================================================
       - name: Bump version code
         id: bump
         run: |
@@ -108,7 +112,9 @@ jobs:
             git push origin "HEAD:${{ github.ref_name }}"
           fi
 
-      # SECTION 3: HOST PYTHON + BEEWARE PATCHES
+      # ==========================================================
+      # SECTION 3: HOST PYTHON
+      # ==========================================================
       - name: Build Host Python
         run: |
           mkdir -p /tmp/build-host
@@ -120,18 +126,6 @@ jobs:
           make -j$(nproc)
           make install
           echo "HOST_PYTHON=/tmp/host-python/bin/python3" >> "$GITHUB_ENV"
-
-      - name: Clone BeeWare Patches
-        run: |
-          git clone --depth 1 https://github.com/beeware/cpython-android-source-deps.git /tmp/beeware-deps
-          PATCHES_DIR=$(find /tmp/beeware-deps -type d -path "*/3.11*" 2>/dev/null | head -1)
-          if [ -z "$PATCHES_DIR" ]; then
-            echo "Cannot find patches for Python 3.11"
-            find /tmp/beeware-deps -type d
-            exit 1
-          fi
-          echo "PATCHES_DIR=$PATCHES_DIR"
-          echo "PATCHES_DIR=$PATCHES_DIR" >> "$GITHUB_ENV"
 
       - name: Export Cross-Compile Environment
         run: |
@@ -152,7 +146,9 @@ jobs:
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
           echo "LDFLAGS=-L$DEPS_INSTALL/lib" >> "$GITHUB_ENV"
 
+      # ==========================================================
       # SECTION 4: CROSS-COMPILE DEPENDENCIES
+      # ==========================================================
       - name: Cross-Compile zlib
         run: |
           cd /tmp
@@ -182,7 +178,7 @@ jobs:
             --openssldir="$DEPS_INSTALL/ssl" \
             shared no-engine no-tests no-async \
             -D__ANDROID_API__=${{ env.ANDROID_API }}
-          make -j$(nproc) SHLIB_VERSION_NUMBER=
+          make -j$(nproc)
           make install_sw
 
       - name: Cross-Compile SQLite3
@@ -208,21 +204,14 @@ jobs:
           ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
           make -j$(nproc) install
 
-      # SECTION 5: CROSS-COMPILE CPYTHON
+      # ==========================================================
+      # SECTION 5: CROSS-COMPILE CPYTHON 3.13 (không cần patches)
+      # ==========================================================
       - name: Cross-Compile CPython
         run: |
           cd /tmp
           tar -xf "/tmp/build-host/Python-${{ env.PYTHON_VERSION }}.tar.xz"
           cd "Python-${{ env.PYTHON_VERSION }}"
-
-          echo "Applying BeeWare patches from: $PATCHES_DIR"
-          APPLIED=0
-          for p in "$PATCHES_DIR"/*.patch; do
-            if [ -f "$p" ]; then
-              patch -p1 < "$p" && APPLIED=$((APPLIED+1)) || echo "Skip: $p"
-            fi
-          done
-          echo "Applied $APPLIED patches"
 
           printf '%s\n' \
             '*disabled*' \
@@ -255,6 +244,7 @@ jobs:
             --enable-shared \
             --disable-ipv6 \
             --without-ensurepip \
+            --with-openssl="$DEPS_INSTALL" \
             ac_cv_file__dev_ptmx=no \
             ac_cv_file__dev_ptc=no \
             ac_cv_buggy_getaddrinfo=no \
@@ -264,12 +254,14 @@ jobs:
           make install
 
           echo "Critical modules:"
-          ls "$GITHUB_WORKSPACE/python-android/lib/python3.11/lib-dynload/" | grep -E "_ssl|_sqlite|_ctypes|_lzma" || true
+          ls "$GITHUB_WORKSPACE/python-android/lib/python3.13/lib-dynload/" | grep -E "_ssl|_sqlite|_ctypes|_lzma" || true
 
+      # ==========================================================
       # SECTION 6: BOOTSTRAP WHEELS + PATCH PATHS
+      # ==========================================================
       - name: Bootstrap Pure-Python Wheels
         run: |
-          TARGET_SITE="$GITHUB_WORKSPACE/python-android/lib/python3.11/site-packages"
+          TARGET_SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
           mkdir -p /tmp/wheels "$TARGET_SITE"
 
           "$HOST_PYTHON" -m pip download \
@@ -285,21 +277,23 @@ jobs:
         run: |
           find "$GITHUB_WORKSPACE/python-android" -name "*.so*" \
             -exec "$STRIP" --strip-unneeded {} \; 2>/dev/null || true
-          "$STRIP" --strip-unneeded "$GITHUB_WORKSPACE/python-android/bin/python3.11" 2>/dev/null || true
+          "$STRIP" --strip-unneeded "$GITHUB_WORKSPACE/python-android/bin/python3.13" 2>/dev/null || true
 
           find "$GITHUB_WORKSPACE/python-android" -type f \
             \( -name "_sysconfigdata*.py" -o -name "*.pc" -o -name "*-config" -o -name "Makefile" \) \
             -exec sed -i "s|$GITHUB_WORKSPACE/python-android|/data/data/com.nam2006.y2mate/files/python|g" {} \;
 
+      # ==========================================================
       # SECTION 7: COLLECT jniLibs + PATCH NEEDED + RPATH
+      # ==========================================================
       - name: Collect and Process Native Libraries
         run: |
           JNI="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-          DYNLIB="$GITHUB_WORKSPACE/python-android/lib/python3.11/lib-dynload"
+          DYNLIB="$GITHUB_WORKSPACE/python-android/lib/python3.13/lib-dynload"
           PY_LIB="$GITHUB_WORKSPACE/python-android/lib"
           mkdir -p "$JNI"
 
-          cp "$PY_LIB/libpython3.11.so" "$JNI/"
+          cp "$PY_LIB/libpython3.13.so" "$JNI/"
           find "$DEPS_INSTALL/lib" -maxdepth 1 -name "*.so*" -exec cp {} "$JNI/" \; 2>/dev/null || true
 
           echo "Before rename:"
@@ -315,7 +309,7 @@ jobs:
           done
 
           PATCHED=0
-          for so in "$JNI/libpython3.11.so" "$PY_LIB/libpython3.11.so" "$DYNLIB"/*.so; do
+          for so in "$JNI/libpython3.13.so" "$PY_LIB/libpython3.13.so" "$DYNLIB"/*.so; do
             [ -f "$so" ] || continue
             for needed in $(readelf -d "$so" 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/'); do
               new_needed=$(echo "$needed" | sed -E 's/(\.so)\.[0-9]+(\.[0-9]+)*$/\1/')
@@ -327,7 +321,7 @@ jobs:
           done
           echo "Patched $PATCHED NEEDED entries"
 
-          for so in "$JNI/libpython3.11.so" "$JNI/libssl.so" "$JNI/libcrypto.so"; do
+          for so in "$JNI/libpython3.13.so" "$JNI/libssl.so" "$JNI/libcrypto.so"; do
             [ -f "$so" ] && patchelf --force-rpath --set-rpath '$ORIGIN' "$so" 2>/dev/null || true
           done
 
@@ -345,7 +339,9 @@ jobs:
           echo "Final jniLibs:"
           ls -lh "$JNI/"
 
+      # ==========================================================
       # SECTION 8: PACKAGE RUNTIME TAR
+      # ==========================================================
       - name: Package Python Runtime into Assets
         run: |
           mkdir -p "$GITHUB_WORKSPACE/app/src/main/assets"
@@ -355,7 +351,7 @@ jobs:
           echo "yt_dlp_bridge.py copied"
 
           cd "$GITHUB_WORKSPACE/python-android"
-          tar -czvf "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar.gz" lib/python3.11
+          tar -czvf "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar.gz" lib/python3.13
 
           cd "$GITHUB_WORKSPACE"
           SIZE=$(stat -c%s app/src/main/assets/python-runtime.tar.gz)
@@ -371,7 +367,9 @@ jobs:
           echo "Assets:"
           ls -lh app/src/main/assets/
 
+      # ==========================================================
       # SECTION 9: FFMPEG FROM TERMUX
+      # ==========================================================
       - name: Download FFmpeg from Termux
         run: |
           set -e
@@ -400,7 +398,9 @@ jobs:
           echo "jniLibs final:"
           ls -lh app/src/main/jniLibs/arm64-v8a/
 
+      # ==========================================================
       # SECTION 10: BUILD APK
+      # ==========================================================
       - name: Setup debug keystore
         run: |
           mkdir -p "$HOME/.android"
