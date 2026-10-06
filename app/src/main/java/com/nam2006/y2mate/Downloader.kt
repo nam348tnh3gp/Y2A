@@ -3,10 +3,10 @@ package com.nam2006.y2mate
 import android.app.Application
 import android.content.ContentValues
 import android.content.Intent
+import android.os.Build
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
-import com.artheanica.ffmpegkit.FFmpegKit
 import com.chaquo.python.Python
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileOutputStream
 
 object Downloader {
     private const val PROCESS_ID = "y2m-current"
@@ -30,12 +31,28 @@ object Downloader {
     val ready = MutableStateFlow(false)
     val initError = MutableStateFlow<String?>(null)
 
+    // JNI methods
+    private external fun nativeChmod(path: String): Boolean
+    private external fun nativeExecFfmpeg(binaryPath: String, args: Array<String>): Int
+    private external fun nativeCanExecute(path: String): Boolean
+
+    companion object {
+        init {
+            System.loadLibrary("ffmpeg_jni")
+        }
+    }
+
     fun init(application: Application) {
         app = application
         scope.launch {
             try {
+                // Khởi tạo Python
                 val py = Python.getInstance()
                 py.getModule("yt_dlp_bridge")
+                
+                // Chuẩn bị FFmpeg
+                prepareFfmpeg()
+                
                 ready.value = true
             } catch (t: Throwable) {
                 val root = t.cause ?: t
@@ -44,7 +61,82 @@ object Downloader {
         }
     }
 
-    // ---------------------------------------------------------------- điều khiển
+    /** Chuẩn bị FFmpeg: copy từ jniLibs, chmod, và extract các thư viện phụ thuộc. */
+    private fun prepareFfmpeg() {
+        // 1. Lấy đường dẫn FFmpeg từ nativeLibraryDir (đã có quyền thực thi)
+        val nativeLibDir = app.applicationInfo.nativeLibraryDir
+        val ffmpegInLib = File(nativeLibDir, "libffmpeg.so")
+        
+        if (!ffmpegInLib.exists()) {
+            // Fallback: copy từ assets sang filesDir
+            extractFfmpegFromAssets()
+            return
+        }
+
+        // 2. Copy sang filesDir để có thể chmod và thực thi
+        val destDir = File(app.filesDir, "ffmpeg")
+        destDir.mkdirs()
+        val destFfmpeg = File(destDir, "ffmpeg")
+        
+        if (!destFfmpeg.exists()) {
+            ffmpegInLib.copyTo(destFfmpeg, overwrite = true)
+        }
+
+        // 3. Cấp quyền thực thi qua JNI (không dùng Runtime.exec)
+        val chmodOk = nativeChmod(destFfmpeg.absolutePath)
+        
+        // 4. Extract các thư viện phụ thuộc từ assets
+        extractLibsFromAssets(destDir)
+        
+        // 5. Set LD_LIBRARY_PATH cho Python (nếu cần)
+        // Các thư viện .so phải nằm cùng thư mục với ffmpeg
+    }
+
+    /** Fallback: extract FFmpeg từ assets nếu jniLibs không khả dụng. */
+    private fun extractFfmpegFromAssets() {
+        val destDir = File(app.filesDir, "ffmpeg")
+        destDir.mkdirs()
+        val destFfmpeg = File(destDir, "ffmpeg")
+        
+        try {
+            app.assets.open("ffmpeg/ffmpeg").use { input ->
+                FileOutputStream(destFfmpeg).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            nativeChmod(destFfmpeg.absolutePath)
+            extractLibsFromAssets(destDir)
+        } catch (e: Exception) {
+            initError.value = "Không extract được FFmpeg: ${e.message}"
+        }
+    }
+
+    /** Extract các thư viện .so phụ thuộc của FFmpeg từ assets. */
+    private fun extractLibsFromAssets(destDir: File) {
+        try {
+            val libFiles = app.assets.list("ffmpeg/lib") ?: return
+            for (libName in libFiles) {
+                val destLib = File(destDir, libName)
+                if (!destLib.exists()) {
+                    app.assets.open("ffmpeg/lib/$libName").use { input ->
+                        FileOutputStream(destLib).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Không có thư viện phụ thuộc (FFmpeg static) - bỏ qua
+        }
+    }
+
+    /** Lấy đường dẫn FFmpeg đã sẵn sàng. */
+    fun getFfmpegPath(): String? {
+        val destFfmpeg = File(app.filesDir, "ffmpeg/ffmpeg")
+        return if (destFfmpeg.exists() && nativeCanExecute(destFfmpeg.absolutePath)) {
+            destFfmpeg.absolutePath
+        } else null
+    }
 
     fun start(url: String, o: Options) {
         if (state.value is DlState.Running) return
@@ -76,16 +168,15 @@ object Downloader {
     private suspend fun waitReady() {
         while (!ready.value) {
             val err = initError.value
-            if (err != null) throw IllegalStateException("Không khởi tạo được Python: $err")
+            if (err != null) throw IllegalStateException("Không khởi tạo được: $err")
             delay(200)
         }
     }
 
-    /** Xem trước thông tin video — gọi hàm Python get_info. */
     fun fetchInfo(url: String): PreviewInfo {
         var waited = 0
         while (!ready.value) {
-            if (initError.value != null || waited > 40_000) throw IllegalStateException("Python chưa sẵn sàng")
+            if (initError.value != null || waited > 40_000) throw IllegalStateException("Chưa sẵn sàng")
             Thread.sleep(200)
             waited += 200
         }
@@ -100,7 +191,6 @@ object Downloader {
         return PreviewInfo(title, uploader, duration, thumb)
     }
 
-    /** Kiểm tra phiên bản yt-dlp — gọi từ SettingsDialog. */
     fun checkYtDlpUpdate(): String {
         return try {
             val py = Python.getInstance()
@@ -110,16 +200,14 @@ object Downloader {
             if (latest.startsWith("Error")) {
                 "Không thể kiểm tra: $latest"
             } else if (installed != latest) {
-                "Có bản cập nhật: $installed → $latest. Hãy build lại app với version mới."
+                "Có bản cập nhật: $installed → $latest"
             } else {
-                "yt-dlp đã là bản mới nhất ($installed)."
+                "yt-dlp đã là bản mới nhất ($installed)"
             }
         } catch (e: Exception) {
             "Lỗi kiểm tra: ${e.message}"
         }
     }
-
-    // ---------------------------------------------------------------- tải
 
     private fun formatSelector(o: Options): String {
         if (o.audioOnly) return "bestaudio/best"
@@ -134,16 +222,6 @@ object Downloader {
         }
     }
 
-    /** Lấy đường dẫn ffmpeg từ FFmpegKit. */
-    private fun getFfmpegPath(): String? {
-        return try {
-            // FFmpegKit cung cấp đường dẫn đến binary ffmpeg đã đóng gói
-            FFmpegKit.getFFmpegPath()
-        } catch (e: Exception) {
-            null
-        }
-    }
-
     private fun runDownload(url: String, o: Options): List<SavedFile> {
         val root = app.getExternalFilesDir("tmp") ?: File(app.filesDir, "tmp")
         val dir = File(root, Integer.toHexString((url + o.toString()).hashCode()))
@@ -154,8 +232,7 @@ object Downloader {
             val py = Python.getInstance()
             val module = py.getModule("yt_dlp_bridge")
 
-            // Khai báo tường minh HashMap<String, Any>
-            val pyOptions: HashMap<String, Any> = HashMap()
+            val pyOptions = HashMap<String, Any>()
             pyOptions["format"] = formatSelector(o)
             pyOptions["output_dir"] = dir.absolutePath
             pyOptions["output_template"] = if (o.playlist) {
@@ -168,25 +245,20 @@ object Downloader {
             pyOptions["audio_format"] = o.audioFormat
             pyOptions["audio_bitrate"] = o.audioBitrate.toString()
 
-            // Đường dẫn ffmpeg từ FFmpegKit
+            // Truyền đường dẫn FFmpeg cho yt-dlp
             getFfmpegPath()?.let { pyOptions["ffmpeg_path"] = it }
 
             if (CookieStore.has(app)) {
                 pyOptions["cookies_file"] = CookieStore.file(app).absolutePath
             }
 
-            // Gọi hàm download trong Python
             val result = module.callAttr("download", url, pyOptions).asMap()
             val success = result["success"]?.toJava(Boolean::class.java) ?: false
             val error = result["error"]?.toString()
 
-            if (!success) {
-                throw IllegalStateException(error ?: "Tải thất bại")
-            }
-
+            if (!success) throw IllegalStateException(error ?: "Tải thất bại")
             if (cancelled) throw IllegalStateException("cancelled")
 
-            // Quét file đã tải và lưu vào Download/Mini-Y2mate
             val files = dir.walkTopDown().filter { it.isFile && !isTemp(it.name) }.toList()
             if (files.isEmpty()) throw IllegalStateException("Không tìm thấy file đã tải")
             val saved = ArrayList<SavedFile>()
@@ -237,11 +309,11 @@ object Downloader {
             msg.contains("Sign in", ignoreCase = true) || msg.contains("not a bot", ignoreCase = true) ->
                 " — hãy nhập cookies.txt (nút 🍪)"
             msg.contains("page needs to be reloaded", ignoreCase = true) ->
-                " — YouTube đang giới hạn. Chờ vài phút hoặc đổi mạng (WiFi ↔ 4G)."
+                " — YouTube đang giới hạn. Chờ vài phút hoặc đổi mạng."
             msg.contains("403", ignoreCase = true) ->
-                " — bị chặn tạm thời. Thử lại sau vài phút hoặc nhập cookies."
+                " — bị chặn tạm thời. Thử lại sau vài phút."
             msg.contains("ffmpeg", ignoreCase = true) ->
-                " — FFmpeg không tìm thấy. Kiểm tra dependency ffmpeg-kit-full."
+                " — cần FFmpeg để ghép/chuyển đổi."
             else -> ""
         }
         return line.take(280) + hint
