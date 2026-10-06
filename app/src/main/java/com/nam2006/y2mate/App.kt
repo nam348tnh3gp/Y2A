@@ -5,9 +5,8 @@ import android.app.Application
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
-        // Khởi tạo Python runtime (thay Chaquopy)
-        PythonBridge.init(this)
-        // Khởi tạo Downloader (FFmpeg + các thứ khác)
+        // KHÔNG chạy việc nặng trên main thread: giải nén site-packages + Py_Initialize
+        // + giải nén FFmpeg đều nằm trong Downloader.init (chạy nền, Dispatchers.IO).
         Downloader.init(this)
     }
 }
