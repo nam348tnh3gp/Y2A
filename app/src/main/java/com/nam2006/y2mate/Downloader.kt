@@ -157,7 +157,6 @@ object Downloader {
         val module = py.getModule("yt_dlp_bridge")
         val cookiesFile = if (CookieStore.has(app)) CookieStore.file(app).absolutePath else ""
 
-        // Python trả JSON string → parse bằng org.json
         val jsonStr = module.callAttr("get_info", url, cookiesFile).toString()
         val json = JSONObject(jsonStr)
         return PreviewInfo(
@@ -223,6 +222,10 @@ object Downloader {
                 put("audio_format", o.audioFormat)
                 put("audio_bitrate", o.audioBitrate.toString())
 
+                // THÊM 2 DÒNG NÀY:
+                put("video_format", o.videoFormat)
+                put("iphone", o.iphone)
+
                 getFfmpegPath()?.let { put("ffmpeg_path", it) }
 
                 if (CookieStore.has(app)) {
@@ -230,7 +233,6 @@ object Downloader {
                 }
             }.toString()
 
-            // Gọi Python — trả về JSON string
             val resultJson = module.callAttr("download", url, optionsJson).toString()
             val result = JSONObject(resultJson)
 
