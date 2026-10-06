@@ -69,258 +69,197 @@ jobs:
           fi
 
       # ==========================================================
-      # Lấy latest release của flet-dev/python-build
+      # ALL-IN-ONE: Download + Extract + Install + Integrate
       # ==========================================================
-      - name: Get latest python-build release tag
-        id: python-release
+      - name: Setup Python runtime (all-in-one)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
+          set -ex
+
+          WORKSPACE="$GITHUB_WORKSPACE"
+          PY_VERSION="3.14"
+          ABI="arm64-v8a"
+          RUNTIME_DIR="$WORKSPACE/_python_runtime"
+
+          echo "═══════════════════════════════════════════"
+          echo "STEP 1: Xác định release"
+          echo "═══════════════════════════════════════════"
+          cd "$WORKSPACE"
+
           LATEST_TAG=$(curl -sL \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/flet-dev/python-build/releases?per_page=30" \
             | jq -r '[.[].tag_name | select(test("^[0-9]{8}$"))][0]')
 
-          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-            echo "⚠️ Không tìm được tag, dùng fallback"
-            LATEST_TAG="20260921"
-          fi
-          echo "✅ Latest release: $LATEST_TAG"
-          echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ] && LATEST_TAG="20260921"
+          echo "✅ Release tag: $LATEST_TAG"
 
-      # ==========================================================
-      # Download Python runtime (với verification đầy đủ)
-      # ==========================================================
-      - name: Download Python runtime
-        id: python-runtime
-        env:
-          PY_BUILD_RELEASE: ${{ steps.python-release.outputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          PY_VERSION="3.14"
-          ABI="arm64-v8a"
+          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "STEP 2: Tải manifest"
+          echo "═══════════════════════════════════════════"
+          MANIFEST_URL="https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/manifest.json"
+          echo "URL: $MANIFEST_URL"
 
-          # ---- 1. Tải manifest.json ----
-          MANIFEST_URL="https://github.com/flet-dev/python-build/releases/download/${PY_BUILD_RELEASE}/manifest.json"
-          echo "📥 Manifest URL: $MANIFEST_URL"
+          rm -f manifest.json
           wget -q -O manifest.json "$MANIFEST_URL"
 
-          # Verify manifest không phải HTML
-          if head -c 100 manifest.json | grep -q "<!DOCTYPE\|<html"; then
-            echo "❌ Manifest là HTML (404?) — nội dung:"
-            head -20 manifest.json
-            exit 1
-          fi
-
-          echo "✅ Manifest OK ($(wc -c < manifest.json) bytes)"
-          echo "Nội dung:"
-          cat manifest.json | head -30
+          echo "Manifest content:"
+          cat manifest.json
           echo ""
 
-          # ---- 2. Lấy full_version ----
           FULL_VERSION=$(jq -r --arg pv "$PY_VERSION" '.pythons[$pv].full_version // empty' manifest.json)
           if [ -z "$FULL_VERSION" ]; then
-            echo "❌ Không có full_version cho $PY_VERSION"
-            echo "Keys có sẵn:"
+            echo "❌ Không có full_version"
             jq -r '.pythons | keys[]' manifest.json
             exit 1
           fi
-          echo "🐍 Full Python version: $FULL_VERSION"
+          echo "✅ Full version: $FULL_VERSION"
 
-          # ---- 3. Tải tarball ----
+          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "STEP 3: Tải tarball"
+          echo "═══════════════════════════════════════════"
           TARBALL="python-android-dart-${FULL_VERSION}-${ABI}.tar.gz"
-          URL="https://github.com/flet-dev/python-build/releases/download/${PY_BUILD_RELEASE}/${TARBALL}"
-          echo "📥 Tarball URL: $URL"
+          URL="https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/${TARBALL}"
+          echo "URL: $URL"
 
-          mkdir -p _python_runtime
-          cd _python_runtime
+          rm -rf "$RUNTIME_DIR"
+          mkdir -p "$RUNTIME_DIR"
+          cd "$RUNTIME_DIR"
 
-          if ! wget -q --show-progress -O "$TARBALL" "$URL"; then
-            echo "❌ wget fail. Assets có sẵn:"
-            curl -sL -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              "https://api.github.com/repos/flet-dev/python-build/releases/tags/${PY_BUILD_RELEASE}" \
-              | jq -r '.assets[].name' | grep -i "android.*arm64" || true
-            exit 1
-          fi
+          wget -q -O "$TARBALL" "$URL"
+          ls -la "$RUNTIME_DIR"
 
-          # ---- 4. Verify tarball ----
-          SIZE=$(stat -c%s "$TARBALL" 2>/dev/null || stat -f%z "$TARBALL")
-          echo "📦 Tarball size: $SIZE bytes (~$((SIZE/1024/1024)) MB)"
+          SIZE=$(stat -c%s "$TARBALL")
+          echo "📦 Tarball size: $SIZE bytes"
 
           if [ "$SIZE" -lt 1000000 ]; then
-            echo "❌ Tarball quá nhỏ (<1MB) — không phải file thật"
-            echo "Nội dung (100 bytes đầu):"
-            head -c 100 "$TARBALL"
-            echo ""
-            file "$TARBALL"
+            echo "❌ Tarball quá nhỏ"
+            head -c 500 "$TARBALL"
             exit 1
           fi
 
           echo "File type:"
           file "$TARBALL"
-          echo ""
 
-          # ---- 5. Xem nội dung tarball trước extract ----
-          echo "🔍 Contents (10 entry đầu):"
-          tar -tzf "$TARBALL" 2>&1 | head -10
           echo ""
-          echo "Tổng entries: $(tar -tzf "$TARBALL" 2>/dev/null | wc -l)"
-          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "STEP 4: Extract tarball"
+          echo "═══════════════════════════════════════════"
+          tar -xzf "$TARBALL"
 
-          echo "Tìm trong tarball:"
-          echo "  os.py:     $(tar -tzf "$TARBALL" 2>/dev/null | grep 'os\.py$' | head -3)"
-          echo "  libpython: $(tar -tzf "$TARBALL" 2>/dev/null | grep 'libpython.*\.so' | head -3)"
-          echo "  Python.h:  $(tar -tzf "$TARBALL" 2>/dev/null | grep 'Python\.h$' | head -3)"
-          echo ""
+          echo "After extract:"
+          ls -la "$RUNTIME_DIR"
 
-          # ---- 6. Extract ----
-          echo "📦 Extracting..."
-          if ! tar -xzf "$TARBALL" 2>&1; then
-            echo "❌ tar extract fail"
+          echo ""
+          echo "Full directory tree (depth 3):"
+          find "$RUNTIME_DIR" -maxdepth 3 -type d | sort | head -40
+
+          echo ""
+          echo "Tìm os.py:"
+          find "$RUNTIME_DIR" -name "os.py" | head -5
+
+          echo ""
+          echo "Tìm libpython:"
+          find "$RUNTIME_DIR" -name "libpython*.so" | head -5
+
+          echo ""
+          echo "Tìm Python.h:"
+          find "$RUNTIME_DIR" -name "Python.h" | head -5
+
+          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "STEP 5: Tìm stdlib"
+          echo "═══════════════════════════════════════════"
+          STDLIB_DIR=$(find "$RUNTIME_DIR" -type f -name "os.py" -exec dirname {} \; | head -1)
+
+          if [ -z "$STDLIB_DIR" ]; then
+            echo "❌ Không có stdlib. Nội dung runtime:"
+            find "$RUNTIME_DIR" -type f | head -30
             exit 1
           fi
 
-          # ---- 7. Verify sau extract ----
+          echo "✅ Stdlib dir: $STDLIB_DIR"
+          echo "Content:"
+          ls "$STDLIB_DIR" | head -20
+
           echo ""
-          echo "📂 ls -la sau extract:"
-          ls -la
-          echo ""
-
-          echo "🌳 Cấu trúc thư mục (max depth 3):"
-          find . -maxdepth 3 -type d | sort | head -30
-          echo ""
-
-          echo "🔍 File quan trọng:"
-          echo "  libpython: $(find . -name 'libpython*.so' | head -3)"
-          echo "  os.py:     $(find . -name 'os.py' | head -3)"
-          echo "  Python.h:  $(find . -name 'Python.h' | head -3)"
-          echo ""
-
-          echo "📊 Size: $(du -sh . | cut -f1)"
-
-      # ==========================================================
-      # Install pip + yt-dlp
-      # ==========================================================
-      - name: Install pip and yt-dlp
-        env:
-          PY_VERSION: "3.14"
-        run: |
-          set -e
-          cd _python_runtime
-
-          # Tìm stdlib ở MỌI cấp thư mục
-          STDLIB_DIR=""
-
-          # Cách 1: tìm os.py trong python3.14
-          STDLIB_DIR=$(find . -type f -name "os.py" -path "*python${PY_VERSION}*" -exec dirname {} \; 2>/dev/null | head -1)
-          echo "Cách 1: '$STDLIB_DIR'"
-
-          # Cách 2: tìm folder tên python3.14
-          if [ -z "$STDLIB_DIR" ]; then
-            STDLIB_DIR=$(find . -type d -name "python${PY_VERSION}" 2>/dev/null | head -1)
-            echo "Cách 2: '$STDLIB_DIR'"
-          fi
-
-          # Cách 3: tìm BẤT KỲ os.py nào
-          if [ -z "$STDLIB_DIR" ]; then
-            STDLIB_DIR=$(find . -type f -name "os.py" -exec dirname {} \; 2>/dev/null | head -1)
-            echo "Cách 3: '$STDLIB_DIR'"
-          fi
-
-          # Cách 4: tìm BẤT KỲ folder nào tên python3.x
-          if [ -z "$STDLIB_DIR" ]; then
-            STDLIB_DIR=$(find . -type d -name "python3*" 2>/dev/null | head -1)
-            echo "Cách 4: '$STDLIB_DIR'"
-          fi
-
-          if [ -z "$STDLIB_DIR" ]; then
-            echo "❌ Không tìm được stdlib sau 4 cách. Cấu trúc thực:"
-            find . -type d | sort | head -50
-            echo ""
-            echo "Danh sách file .py (20 đầu):"
-            find . -name "*.py" | head -20
-            echo ""
-            echo "Danh sách folder chứa lib:"
-            find . -type d -name "lib*" | head -20
-            exit 1
-          fi
-
-          echo "📁 Stdlib tìm được: $STDLIB_DIR"
+          echo "═══════════════════════════════════════════"
+          echo "STEP 6: Cài pip + yt-dlp"
+          echo "═══════════════════════════════════════════"
           SITE_PACKAGES="$STDLIB_DIR/site-packages"
           mkdir -p "$SITE_PACKAGES"
 
-          echo ""
-          echo "📥 Cài pip + yt-dlp + certifi..."
           python3 -m pip install --upgrade pip
           python3 -m pip install --target="$SITE_PACKAGES" \
             --no-compile --only-binary=:all: --no-deps \
             yt-dlp certifi
 
+          echo "✅ Đã cài:"
+          ls -la "$SITE_PACKAGES/"
+
           echo ""
-          echo "✅ Đã cài vào $SITE_PACKAGES:"
-          ls -la "$SITE_PACKAGES/" | head -20
-          echo "Size: $(du -sh "$SITE_PACKAGES" | cut -f1)"
+          echo "═══════════════════════════════════════════"
+          echo "STEP 7: Copy vào Android project"
+          echo "═══════════════════════════════════════════"
 
-          echo "STDLIB_PATH=$STDLIB_DIR" >> "$GITHUB_ENV"
-
-      # ==========================================================
-      # Integrate runtime vào Android project
-      # ==========================================================
-      - name: Integrate runtime
-        env:
-          PY_VERSION: "3.14"
-        run: |
-          set -e
-          cd _python_runtime
-
-          # 1. libpython → jniLibs
-          LIBPY=$(find . -name "libpython${PY_VERSION}.so" 2>/dev/null | head -1)
+          # 7a. libpython → jniLibs
+          LIBPY=$(find "$RUNTIME_DIR" -name "libpython*.so" | head -1)
           if [ -z "$LIBPY" ]; then
-            LIBPY=$(find . -name "libpython*.so" 2>/dev/null | head -1)
+            echo "❌ Không có libpython"
+            find "$RUNTIME_DIR" -name "*.so" | head -20
+            exit 1
           fi
-          [ -z "$LIBPY" ] && { echo "❌ Không có libpython"; find . -name "*.so" | head -20; exit 1; }
-          mkdir -p ../app/src/main/jniLibs/arm64-v8a
-          cp "$LIBPY" ../app/src/main/jniLibs/arm64-v8a/libpython3.14.so
-          echo "✅ libpython: $LIBPY"
 
-          # 2. stdlib → assets
-          STDLIB_DIR=$(find . -type f -name "os.py" -exec dirname {} \; 2>/dev/null | head -1)
-          [ -z "$STDLIB_DIR" ] && { echo "❌ Không có stdlib"; exit 1; }
+          mkdir -p "$WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+          cp "$LIBPY" "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/libpython3.14.so"
+          echo "✅ libpython → jniLibs"
+
+          # 7b. stdlib → assets
           STDLIB_NAME=$(basename "$STDLIB_DIR")
-          echo "📁 Stdlib: $STDLIB_DIR (name: $STDLIB_NAME)"
+          mkdir -p "$WORKSPACE/app/src/main/assets/python"
+          cp -r "$STDLIB_DIR" "$WORKSPACE/app/src/main/assets/python/"
+          echo "✅ stdlib → assets/python/$STDLIB_NAME"
 
-          mkdir -p ../app/src/main/assets/python
-          cp -r "$STDLIB_DIR" ../app/src/main/assets/python/
-          echo "✅ Copy → assets/python/$STDLIB_NAME"
-
-          # 3. Headers → cpp/include
-          INCLUDE_DIR=$(find . -name "Python.h" -exec dirname {} \; 2>/dev/null | head -1)
+          # 7c. Headers → cpp/include
+          INCLUDE_DIR=$(find "$RUNTIME_DIR" -name "Python.h" -exec dirname {} \; | head -1)
           if [ -n "$INCLUDE_DIR" ]; then
-            mkdir -p ../app/src/main/cpp/include
-            cp -r "$INCLUDE_DIR"/* ../app/src/main/cpp/include/
-            echo "✅ Headers: $INCLUDE_DIR"
+            mkdir -p "$WORKSPACE/app/src/main/cpp/include"
+            cp -r "$INCLUDE_DIR"/* "$WORKSPACE/app/src/main/cpp/include/"
+            echo "✅ Headers → cpp/include/"
           else
             echo "⚠️ Không có Python.h"
           fi
 
-          # 4. Native .so khác → jniLibs
-          find . -name "*.so" ! -name "libpython*.so" 2>/dev/null | while read -r so; do
+          # 7d. Native .so khác → jniLibs
+          find "$RUNTIME_DIR" -name "*.so" ! -name "libpython*.so" | while read -r so; do
             name=$(basename "$so")
             [[ "$name" =~ ^(lib.+\.so)\.[0-9]+$ ]] && name="${BASH_REMATCH[1]}"
-            cp "$so" "../app/src/main/jniLibs/arm64-v8a/$name" 2>/dev/null || true
+            cp "$so" "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/$name" 2>/dev/null || true
             echo "  📚 $name"
           done
 
           echo ""
-          echo "📋 jniLibs:"; ls -lh ../app/src/main/jniLibs/arm64-v8a/
-          echo "📋 assets/python:"; ls -lh ../app/src/main/assets/python/
-          echo "📋 cpp/include:"; ls ../app/src/main/cpp/include/ 2>/dev/null | head -5
-          echo "📊 Sizes:"
-          du -sh ../app/src/main/jniLibs/ ../app/src/main/assets/ ../app/src/main/cpp/include/ 2>/dev/null || true
+          echo "═══════════════════════════════════════════"
+          echo "STEP 8: Verify"
+          echo "═══════════════════════════════════════════"
+          echo "jniLibs:"
+          ls -lh "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
+          echo ""
+          echo "assets/python:"
+          ls -lh "$WORKSPACE/app/src/main/assets/python/"
+          echo ""
+          echo "cpp/include:"
+          ls "$WORKSPACE/app/src/main/cpp/include/" 2>/dev/null | head -5
+          echo ""
+          echo "Sizes:"
+          du -sh "$WORKSPACE/app/src/main/jniLibs/"
+          du -sh "$WORKSPACE/app/src/main/assets/"
+          echo ""
+          echo "✅ HOÀN TẤT"
 
       # ==========================================================
       # Setup debug keystore
