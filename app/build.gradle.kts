@@ -5,6 +5,18 @@ plugins {
     id("com.chaquo.python")
 }
 
+// Đọc version code từ versioncode.txt ở root repo.
+// CI workflow sẽ tự động bump file này mỗi lần build.
+// Nếu file chưa tồn tại (build local lần đầu), dùng mặc định là 1.
+val versionCodeFromFile: Int = run {
+    val f = rootProject.file("versioncode.txt")
+    if (f.exists()) {
+        f.readText().trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
+    } else {
+        1
+    }
+}
+
 android {
     namespace = "com.nam2006.y2mate"
     compileSdk = 35
@@ -13,8 +25,11 @@ android {
         applicationId = "com.nam2006.y2mate"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+
+        // Version code đọc từ file, được CI bump tự động
+        versionCode = versionCodeFromFile
+        // versionName theo versionCode để dễ nhìn trong Settings → About
+        versionName = "1.0.$versionCodeFromFile"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
