@@ -16,29 +16,55 @@ current_progress = DownloadProgress()
 
 def _to_py_dict(java_map):
     """
-    Convert Java Map (LinkedHashMap/HashMap từ Kotlin) thành Python dict.
-    Chaquopy không cho iterate Java Map trực tiếp nên phải dùng entrySet().
-    Nếu đối tượng đã là Python dict rồi thì trả về nguyên trạng.
+    Convert Java Map (LinkedHashMap/HashMap) → Python dict.
+    
+    Chaquopy không cho Python iterate Java collection trực tiếp.
+    Phải dùng Java Iterator: hasNext() / next().
     """
     if java_map is None:
         return {}
-    # Nếu đã là dict Python
+
+    # Đã là Python dict
     if isinstance(java_map, dict):
         return java_map
-    # Nếu là Java Map → dùng entrySet()
+
+    # Nếu là Java Map → dùng entrySet().iterator()
     if hasattr(java_map, 'entrySet'):
         result = {}
-        for entry in java_map.entrySet():
-            key = entry.getKey()
+        entry_set = java_map.entrySet()
+        it = entry_set.iterator()
+        while it.hasNext():
+            entry = it.next()
+            key = str(entry.getKey())
             value = entry.getValue()
-            # Convert key sang str, value giữ nguyên
-            result[str(key)] = value
+            result[key] = value
         return result
-    # Fallback
+
+    # Fallback: thử dict() trực tiếp
     try:
         return dict(java_map)
     except Exception:
         return {}
+
+def _to_py_list(java_list):
+    """
+    Convert Java List → Python list bằng Iterator.
+    Dùng cho trường hợp sau này cần truyền List từ Kotlin.
+    """
+    if java_list is None:
+        return []
+    if isinstance(java_list, list):
+        return java_list
+    if hasattr(java_list, 'iterator'):
+        result = []
+        it = java_list.iterator()
+        while it.hasNext():
+            result.append(it.next())
+        return result
+    try:
+        return list(java_list)
+    except Exception:
+        return []
 
 def progress_hook(d):
     global current_progress
@@ -95,7 +121,7 @@ def get_info(url, cookies_file=""):
         return {'title': '', 'uploader': '', 'duration': 0, 'thumbnail': None}
 
 def download(url, options):
-    # ⚠️ Convert Java Map → Python dict TRƯỚC KHI dùng
+    # ⚠️ Convert Java Map → Python dict bằng Iterator (không dùng dict())
     options = _to_py_dict(options)
 
     global current_progress
