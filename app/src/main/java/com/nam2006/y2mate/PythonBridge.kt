@@ -18,8 +18,14 @@ object PythonBridge {
         System.loadLibrary("python_jni")
     }
 
+    /** Lỗi khởi tạo gần nhất (null nếu chưa lỗi). */
+    fun lastError(): String? = initError
+
+    /** PHẢI gọi từ thread nền (giải nén asset + Py_Initialize rất nặng). */
+    @Synchronized
     fun init(app: Application): Boolean {
         if (initialized) return true
+        initError = null
         try {
             // nativeLibDir chứa libpython3.14.so (Android tự extract)
             val nativeLibDir = app.applicationInfo.nativeLibraryDir
@@ -35,16 +41,15 @@ object PythonBridge {
                 marker.writeText("ok")
             }
 
-            // Copy yt_dlp_bridge.py vào filesDir
+            // Copy yt_dlp_bridge.py vào filesDir — luôn ghi đè để bản cập nhật có hiệu lực
             val scriptFile = File(app.filesDir, "yt_dlp_bridge.py")
-            if (!scriptFile.exists()) {
-                app.assets.open("yt_dlp_bridge.py").use { input ->
-                    scriptFile.outputStream().use { input.copyTo(it) }
-                }
+            app.assets.open("yt_dlp_bridge.py").use { input ->
+                scriptFile.outputStream().use { input.copyTo(it) }
             }
 
             // Init Python
             initialized = nativeInit(nativeLibDir, sitePackages.absolutePath)
+            if (!initialized) initError = "nativeInit thất bại (xem logcat tag PythonJNI)"
 
             if (initialized) {
                 // Thêm filesDir vào sys.path để import yt_dlp_bridge
