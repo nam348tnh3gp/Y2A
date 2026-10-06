@@ -30,9 +30,15 @@ typedef void     (*PyErr_Print_t)();
 typedef const char* (*Py_GetVersion_t)();
 typedef void     (*Py_DecRef_t)(PyObject);
 typedef int      (*PyRun_SimpleFile_t)(void*, const char*);
+typedef int      (*PyGILState_Ensure_t)();
+typedef void     (*PyGILState_Release_t)(int);
+typedef void*    (*PyEval_SaveThread_t)();
+typedef void     (*PyEval_RestoreThread_t)(void*);
+typedef void     (*PyErr_Clear_t)();
 
 static void* g_libpython = nullptr;
 static bool  g_initialized = false;
+static void* g_mainTState = nullptr;   // thread state được PyEval_SaveThread trả về (GIL đã nhả)
 
 static Py_Initialize_t           p_Py_Initialize = nullptr;
 static Py_Finalize_t             p_Py_Finalize = nullptr;
@@ -47,6 +53,12 @@ static PyObject_Str_t            p_PyObject_Str = nullptr;
 static PyUnicode_AsUTF8_t        p_PyUnicode_AsUTF8 = nullptr;
 static PyErr_Print_t             p_PyErr_Print = nullptr;
 static Py_GetVersion_t           p_Py_GetVersion = nullptr;
+static Py_DecRef_t               p_Py_DecRef = nullptr;
+static PyGILState_Ensure_t       p_PyGILState_Ensure = nullptr;
+static PyGILState_Release_t      p_PyGILState_Release = nullptr;
+static PyEval_SaveThread_t       p_PyEval_SaveThread = nullptr;
+static PyEval_RestoreThread_t    p_PyEval_RestoreThread = nullptr;
+static PyErr_Clear_t             p_PyErr_Clear = nullptr;
 
 extern "C" {
 
@@ -96,10 +108,18 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     LOAD(PyUnicode_AsUTF8)
     LOAD(PyErr_Print)
     LOAD(Py_GetVersion)
+    LOAD(Py_DecRef)
+    LOAD(PyGILState_Ensure)
+    LOAD(PyGILState_Release)
+    LOAD(PyEval_SaveThread)
+    LOAD(PyEval_RestoreThread)
+    LOAD(PyErr_Clear)
 
     #undef LOAD
 
-    if (!p_Py_Initialize || !p_PyRun_SimpleString) {
+    if (!p_Py_Initialize || !p_PyRun_SimpleString ||
+        !p_PyGILState_Ensure || !p_PyGILState_Release ||
+        !p_PyEval_SaveThread || !p_PyEval_RestoreThread) {
         LOGE("Thiếu symbol bắt buộc");
         env->ReleaseStringUTFChars(nativeLibDir, libDir);
         env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
@@ -119,6 +139,10 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     code += "sys.path.insert(0, r'" + std::string(libDir) + "')\n";
     p_PyRun_SimpleString(code.c_str());
 
+    // QUAN TRỌNG: Py_Initialize khiến thread hiện tại GIỮ GIL. Nếu không nhả thì mọi thread khác
+    // gọi vào Python sẽ treo vĩnh viễn / crash. Nhả GIL ở đây, các lần gọi sau dùng PyGILState_Ensure.
+    g_mainTState = p_PyEval_SaveThread();
+
     g_initialized = true;
 
     env->ReleaseStringUTFChars(nativeLibDir, libDir);
@@ -131,59 +155,74 @@ Java_com_nam2006_y2mate_PythonBridge_nativeCallFunction(
         JNIEnv *env, jobject, jstring moduleName, jstring funcName, jstring argJson) {
 
     if (!g_initialized || !p_PyImport_ImportModule) {
-        return env->NewStringUTF("{\"success\":false,\"error\":\"Python chưa init\"}");
+        return env->NewStringUTF("{\"success\":false,\"error\":\"Python chua init\"}");
     }
 
     const char *mod = env->GetStringUTFChars(moduleName, nullptr);
     const char *fn = env->GetStringUTFChars(funcName, nullptr);
     const char *arg = env->GetStringUTFChars(argJson, nullptr);
 
-    PyObject pModule = p_PyImport_ImportModule(mod);
-    if (!pModule) {
-        if (p_PyErr_Print) p_PyErr_Print();
-        std::string err = "{\"success\":false,\"error\":\"Import failed: ";
-        err += mod; err += "\"}";
-        env->ReleaseStringUTFChars(moduleName, mod);
-        env->ReleaseStringUTFChars(funcName, fn);
-        env->ReleaseStringUTFChars(argJson, arg);
-        return env->NewStringUTF(err.c_str());
-    }
+    std::string out;
 
-    PyObject pFunc = p_PyObject_GetAttrString(pModule, fn);
-    if (!pFunc || (p_PyCallable_Check && !p_PyCallable_Check(pFunc))) {
-        if (p_PyErr_Print) p_PyErr_Print();
-        std::string err = "{\"success\":false,\"error\":\"Func not found: ";
-        err += fn; err += "\"}";
-        env->ReleaseStringUTFChars(moduleName, mod);
-        env->ReleaseStringUTFChars(funcName, fn);
-        env->ReleaseStringUTFChars(argJson, arg);
-        return env->NewStringUTF(err.c_str());
-    }
+    // Mọi thao tác với Python API phải nằm trong cặp Ensure/Release (an toàn khi nhiều thread gọi)
+    int gstate = p_PyGILState_Ensure();
+    {
+        PyObject pModule = p_PyImport_ImportModule(mod);
+        if (!pModule) {
+            if (p_PyErr_Print) p_PyErr_Print();
+            out = std::string("{\"success\":false,\"error\":\"Import failed: ") + mod + "\"}";
+        } else {
+            PyObject pFunc = p_PyObject_GetAttrString(pModule, fn);
+            if (!pFunc || (p_PyCallable_Check && !p_PyCallable_Check(pFunc))) {
+                if (p_PyErr_Print) p_PyErr_Print();
+                out = std::string("{\"success\":false,\"error\":\"Func not found: ") + fn + "\"}";
+            } else {
+                PyObject pyArg = p_PyUnicode_FromString(arg);
+                PyObject pArgs = pyArg ? p_PyTuple_Pack(1, pyArg) : nullptr;
+                PyObject pResult = pArgs ? p_PyObject_CallObject(pFunc, pArgs) : nullptr;
 
-    PyObject pyArg = p_PyUnicode_FromString(arg);
-    PyObject pArgs = p_PyTuple_Pack(1, pyArg);
-    PyObject pResult = p_PyObject_CallObject(pFunc, pArgs);
+                if (!pResult) {
+                    if (p_PyErr_Print) p_PyErr_Print();
+                    out = "{\"success\":false,\"error\":\"Call failed\"}";
+                } else {
+                    PyObject pStr = p_PyObject_Str(pResult);
+                    if (pStr) {
+                        const char *r = p_PyUnicode_AsUTF8 ? p_PyUnicode_AsUTF8(pStr) : nullptr;
+                        if (r) out = r;          // copy trước khi DecRef
+                        else if (p_PyErr_Clear) p_PyErr_Clear();
+                        if (p_Py_DecRef) p_Py_DecRef(pStr);
+                    }
+                    if (p_Py_DecRef) p_Py_DecRef(pResult);
+                }
+                if (p_Py_DecRef) {
+                    if (pArgs) p_Py_DecRef(pArgs);
+                    if (pyArg) p_Py_DecRef(pyArg);
+                }
+            }
+            if (p_Py_DecRef) {
+                if (pFunc) p_Py_DecRef(pFunc);
+                p_Py_DecRef(pModule);
+            }
+        }
+    }
+    p_PyGILState_Release(gstate);
 
     env->ReleaseStringUTFChars(moduleName, mod);
     env->ReleaseStringUTFChars(funcName, fn);
     env->ReleaseStringUTFChars(argJson, arg);
 
-    if (!pResult) {
-        if (p_PyErr_Print) p_PyErr_Print();
-        return env->NewStringUTF("{\"success\":false,\"error\":\"Call failed\"}");
-    }
-
-    PyObject pStr = p_PyObject_Str(pResult);
-    const char *result = p_PyUnicode_AsUTF8 ? p_PyUnicode_AsUTF8(pStr) : "";
-
-    jstring ret = env->NewStringUTF(result ? result : "");
-    return ret;
+    return env->NewStringUTF(out.c_str());
 }
 
 JNIEXPORT void JNICALL
 Java_com_nam2006_y2mate_PythonBridge_nativeFinalize(
         JNIEnv *env, jobject) {
     if (g_initialized && p_Py_Finalize) {
+        // Py_Finalize cần giữ GIL → lấy lại thread state đã nhả lúc init
+        if (g_mainTState && p_PyEval_RestoreThread) {
+            p_PyEval_RestoreThread(g_mainTState);
+            g_mainTState = nullptr;
+        }
         p_Py_Finalize();
         g_initialized = false;
     }
