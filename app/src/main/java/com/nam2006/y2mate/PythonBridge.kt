@@ -11,7 +11,7 @@ object PythonBridge {
     @Volatile private var libLoaded = false
     private var initError: String? = null
 
-    // Khai báo external — chỉ gọi sau khi libLoaded = true
+    // JNI declarations — chỉ gọi sau khi libLoaded = true
     private external fun nativeInit(
         nativeLibDir: String,
         sitePackagesDir: String,
@@ -21,13 +21,14 @@ object PythonBridge {
     private external fun nativeCallFunction(module: String, func: String, argJson: String): String
     private external fun nativeFinalize()
 
-    // KHÔNG có init { System.loadLibrary } — load lazy
+    /** Load python_jni.so an toàn — không crash nếu thiếu. */
+    @Synchronized
     private fun ensureLib(): Boolean {
         if (libLoaded) return true
         return try {
             System.loadLibrary("python_jni")
             libLoaded = true
-            Log.i(TAG, "✅ loadLibrary python_jni OK")
+            Log.i(TAG, "✅ Load python_jni.so OK")
             true
         } catch (t: Throwable) {
             initError = "Không load được python_jni: ${t.message}"
@@ -39,6 +40,7 @@ object PythonBridge {
     fun lastError(): String? = initError
     fun isInitialized(): Boolean = initialized
 
+    /** PHẢI gọi từ thread nền. */
     @Synchronized
     fun init(app: Application): Boolean {
         if (initialized) return true
