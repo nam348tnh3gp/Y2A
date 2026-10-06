@@ -38,7 +38,7 @@ typedef void     (*PyErr_Clear_t)();
 
 static void* g_libpython = nullptr;
 static bool  g_initialized = false;
-static void* g_mainTState = nullptr;   // thread state được PyEval_SaveThread trả về (GIL đã nhả)
+static void* g_mainTState = nullptr;
 
 static Py_Initialize_t           p_Py_Initialize = nullptr;
 static Py_Finalize_t             p_Py_Finalize = nullptr;
@@ -64,33 +64,46 @@ extern "C" {
 
 JNIEXPORT jboolean JNICALL
 Java_com_nam2006_y2mate_PythonBridge_nativeInit(
-        JNIEnv *env, jobject, jstring nativeLibDir, jstring sitePackagesDir) {
+        JNIEnv *env, jobject,
+        jstring nativeLibDir, jstring sitePackagesDir, jstring filesDir) {
 
     if (g_initialized) return JNI_TRUE;
 
     const char *libDir = env->GetStringUTFChars(nativeLibDir, nullptr);
     const char *siteDir = env->GetStringUTFChars(sitePackagesDir, nullptr);
+    const char *filesDirC = env->GetStringUTFChars(filesDir, nullptr);
 
     LOGI("nativeLibDir: %s", libDir);
     LOGI("sitePackages: %s", siteDir);
+    LOGI("filesDir:    %s", filesDirC);
 
-    // Set env vars cho Python
-    setenv("PYTHONHOME", libDir, 1);
+    // ========================================================
+    // KHÔNG set PYTHONHOME (vì flet-dev runtime không có
+    // lib/python3.14/ folder riêng — stdlib nằm trong bundle)
+    // ========================================================
+    unsetenv("PYTHONHOME");
     setenv("PYTHONPATH", siteDir, 1);
     setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
+    setenv("LD_LIBRARY_PATH", libDir, 1);
+    setenv("PATH", libDir, 1);
 
+    // ========================================================
     // Load libpython3.14.so
+    // ========================================================
     std::string libPath = std::string(libDir) + "/libpython3.14.so";
     g_libpython = dlopen(libPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (!g_libpython) {
-        LOGE("dlopen fail: %s", dlerror());
+        LOGE("❌ dlopen fail: %s", dlerror());
         env->ReleaseStringUTFChars(nativeLibDir, libDir);
         env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
+        env->ReleaseStringUTFChars(filesDir, filesDirC);
         return JNI_FALSE;
     }
     LOGI("✅ dlopen libpython OK");
 
+    // ========================================================
     // Load symbols
+    // ========================================================
     #define LOAD(name) \
         p_##name = (name##_t) dlsym(g_libpython, #name); \
         if (!p_##name) { LOGE("Thiếu symbol: %s", #name); }
@@ -120,33 +133,69 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     if (!p_Py_Initialize || !p_PyRun_SimpleString ||
         !p_PyGILState_Ensure || !p_PyGILState_Release ||
         !p_PyEval_SaveThread || !p_PyEval_RestoreThread) {
-        LOGE("Thiếu symbol bắt buộc");
+        LOGE("❌ Thiếu symbol bắt buộc");
         env->ReleaseStringUTFChars(nativeLibDir, libDir);
         env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
+        env->ReleaseStringUTFChars(filesDir, filesDirC);
         return JNI_FALSE;
     }
 
+    // ========================================================
     // Init Python
+    // ========================================================
     p_Py_Initialize();
 
     if (p_Py_GetVersion) {
         LOGI("✅ Python: %s", p_Py_GetVersion());
     }
 
-    // Thêm site-packages vào sys.path
+    // ========================================================
+    // TEST: import os — kiểm tra stdlib có load không
+    // ========================================================
+    int rc_test = p_PyRun_SimpleString("import os; print('STDLIB_OS_OK')");
+    LOGI("Test import os: rc=%d", rc_test);
+
+    if (rc_test != 0) {
+        LOGE("❌ Stdlib không load được — runtime không tương thích");
+        if (p_PyErr_Print) p_PyErr_Print();
+        env->ReleaseStringUTFChars(nativeLibDir, libDir);
+        env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
+        env->ReleaseStringUTFChars(filesDir, filesDirC);
+        return JNI_FALSE;
+    }
+
+    // ========================================================
+    // Thêm sys.path: filesDir, site-packages, nativeLibDir
+    // ========================================================
     std::string code = "import sys\n";
+    code += "sys.path.insert(0, r'" + std::string(filesDirC) + "')\n";
     code += "sys.path.insert(0, r'" + std::string(siteDir) + "')\n";
     code += "sys.path.insert(0, r'" + std::string(libDir) + "')\n";
-    p_PyRun_SimpleString(code.c_str());
+    code += "print('sys.path:', sys.path[:5])\n";
 
-    // QUAN TRỌNG: Py_Initialize khiến thread hiện tại GIỮ GIL. Nếu không nhả thì mọi thread khác
-    // gọi vào Python sẽ treo vĩnh viễn / crash. Nhả GIL ở đây, các lần gọi sau dùng PyGILState_Ensure.
+    int rc_path = p_PyRun_SimpleString(code.c_str());
+    LOGI("Set sys.path: rc=%d", rc_path);
+
+    // ========================================================
+    // TEST: import yt_dlp
+    // ========================================================
+    int rc_ytdlp = p_PyRun_SimpleString("import yt_dlp; print('YTDLP_OK', yt_dlp.version.__version__)");
+    LOGI("Test import yt_dlp: rc=%d", rc_ytdlp);
+
+    if (rc_ytdlp != 0) {
+        LOGE("⚠️ yt_dlp không import được (nhưng Python vẫn chạy)");
+        if (p_PyErr_Print) p_PyErr_Print();
+    }
+
+    // ========================================================
+    // Nhả GIL — bắt buộc để các thread khác gọi được Python
+    // ========================================================
     g_mainTState = p_PyEval_SaveThread();
-
     g_initialized = true;
 
     env->ReleaseStringUTFChars(nativeLibDir, libDir);
     env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
+    env->ReleaseStringUTFChars(filesDir, filesDirC);
     return JNI_TRUE;
 }
 
@@ -164,7 +213,6 @@ Java_com_nam2006_y2mate_PythonBridge_nativeCallFunction(
 
     std::string out;
 
-    // Mọi thao tác với Python API phải nằm trong cặp Ensure/Release (an toàn khi nhiều thread gọi)
     int gstate = p_PyGILState_Ensure();
     {
         PyObject pModule = p_PyImport_ImportModule(mod);
@@ -188,7 +236,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeCallFunction(
                     PyObject pStr = p_PyObject_Str(pResult);
                     if (pStr) {
                         const char *r = p_PyUnicode_AsUTF8 ? p_PyUnicode_AsUTF8(pStr) : nullptr;
-                        if (r) out = r;          // copy trước khi DecRef
+                        if (r) out = r;
                         else if (p_PyErr_Clear) p_PyErr_Clear();
                         if (p_Py_DecRef) p_Py_DecRef(pStr);
                     }
@@ -218,7 +266,6 @@ JNIEXPORT void JNICALL
 Java_com_nam2006_y2mate_PythonBridge_nativeFinalize(
         JNIEnv *env, jobject) {
     if (g_initialized && p_Py_Finalize) {
-        // Py_Finalize cần giữ GIL → lấy lại thread state đã nhả lúc init
         if (g_mainTState && p_PyEval_RestoreThread) {
             p_PyEval_RestoreThread(g_mainTState);
             g_mainTState = nullptr;
