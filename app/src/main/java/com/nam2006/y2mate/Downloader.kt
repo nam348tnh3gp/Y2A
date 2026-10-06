@@ -6,7 +6,6 @@ import android.content.Intent
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
-import com.chaquo.python.Python
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -31,6 +30,7 @@ object Downloader {
     val ready = MutableStateFlow(false)
     val initError = MutableStateFlow<String?>(null)
 
+    // FFmpeg JNI
     private external fun nativeChmod(path: String): Boolean
     private external fun nativeExecFfmpeg(binaryPath: String, args: Array<String>): Int
     private external fun nativeCanExecute(path: String): Boolean
@@ -43,9 +43,20 @@ object Downloader {
         app = application
         scope.launch {
             try {
-                val py = Python.getInstance()
-                py.getModule("yt_dlp_bridge")
                 prepareFfmpeg()
+
+                // Chờ PythonBridge init xong
+                var waited = 0
+                while (!PythonBridge.isInitialized() && waited < 60_000) {
+                    delay(200)
+                    waited += 200
+                }
+
+                if (!PythonBridge.isInitialized()) {
+                    initError.value = "Python không khởi tạo được trong 60s"
+                    return@launch
+                }
+
                 ready.value = true
             } catch (t: Throwable) {
                 val root = t.cause ?: t
@@ -57,20 +68,16 @@ object Downloader {
     private fun prepareFfmpeg() {
         val nativeLibDir = app.applicationInfo.nativeLibraryDir
         val ffmpegInLib = File(nativeLibDir, "libffmpeg.so")
-
         if (!ffmpegInLib.exists()) {
             extractFfmpegFromAssets()
             return
         }
-
         val destDir = File(app.filesDir, "ffmpeg")
         destDir.mkdirs()
         val destFfmpeg = File(destDir, "ffmpeg")
-
         if (!destFfmpeg.exists()) {
             ffmpegInLib.copyTo(destFfmpeg, overwrite = true)
         }
-
         nativeChmod(destFfmpeg.absolutePath)
         extractLibsFromAssets(destDir)
     }
@@ -150,15 +157,20 @@ object Downloader {
         var waited = 0
         while (!ready.value) {
             if (initError.value != null || waited > 40_000) throw IllegalStateException("Chưa sẵn sàng")
-            Thread.sleep(200)
-            waited += 200
+            Thread.sleep(200); waited += 200
         }
-        val py = Python.getInstance()
-        val module = py.getModule("yt_dlp_bridge")
+
         val cookiesFile = if (CookieStore.has(app)) CookieStore.file(app).absolutePath else ""
 
-        val jsonStr = module.callAttr("get_info", url, cookiesFile).toString()
-        val json = JSONObject(jsonStr)
+        // Build JSON cho get_info
+        val argsJson = JSONObject().apply {
+            put("url", url)
+            put("cookies_file", cookiesFile)
+        }.toString()
+
+        val resultJson = PythonBridge.callFunction("yt_dlp_bridge", "get_info_json", argsJson)
+        val json = JSONObject(resultJson)
+
         return PreviewInfo(
             title = json.optString("title", "(không có tiêu đề)"),
             uploader = json.optString("uploader", ""),
@@ -169,17 +181,13 @@ object Downloader {
 
     fun checkYtDlpUpdate(): String {
         return try {
-            val py = Python.getInstance()
-            val module = py.getModule("yt_dlp_bridge")
-            val installed = module.callAttr("get_installed_version").toString()
-            val latest = module.callAttr("get_latest_version").toString()
-            if (latest.startsWith("Error")) {
-                "Không thể kiểm tra: $latest"
-            } else if (installed != latest) {
-                "Có bản cập nhật: $installed → $latest"
-            } else {
-                "yt-dlp đã là bản mới nhất ($installed)"
-            }
+            val resultJson = PythonBridge.callFunction("yt_dlp_bridge", "check_versions_json", "{}")
+            val json = JSONObject(resultJson)
+            val installed = json.optString("installed", "?")
+            val latest = json.optString("latest", "?")
+            if (latest.startsWith("Error")) "Không kiểm tra được: $latest"
+            else if (installed != latest) "Có bản cập nhật: $installed → $latest"
+            else "yt-dlp đã là bản mới nhất ($installed)"
         } catch (e: Exception) {
             "Lỗi kiểm tra: ${e.message}"
         }
@@ -205,11 +213,8 @@ object Downloader {
         try {
             if (cancelled) throw IllegalStateException("cancelled")
 
-            val py = Python.getInstance()
-            val module = py.getModule("yt_dlp_bridge")
-
-            // Xây options thành JSON string — tránh hoàn toàn Java Map bridging
             val optionsJson = JSONObject().apply {
+                put("url", url)
                 put("format", formatSelector(o))
                 put("output_dir", dir.absolutePath)
                 put("output_template", if (o.playlist) {
@@ -221,19 +226,16 @@ object Downloader {
                 put("audio_only", o.audioOnly)
                 put("audio_format", o.audioFormat)
                 put("audio_bitrate", o.audioBitrate.toString())
-
-                // THÊM 2 DÒNG NÀY:
                 put("video_format", o.videoFormat)
                 put("iphone", o.iphone)
-
                 getFfmpegPath()?.let { put("ffmpeg_path", it) }
-
                 if (CookieStore.has(app)) {
                     put("cookies_file", CookieStore.file(app).absolutePath)
                 }
             }.toString()
 
-            val resultJson = module.callAttr("download", url, optionsJson).toString()
+            // Gọi Python qua JNI
+            val resultJson = PythonBridge.callFunction("yt_dlp_bridge", "download_json", optionsJson)
             val result = JSONObject(resultJson)
 
             val success = result.optBoolean("success", false)
@@ -252,17 +254,15 @@ object Downloader {
             }
             dir.deleteRecursively()
             return saved
-
         } catch (t: Throwable) {
             if (cancelled) dir.deleteRecursively()
             throw t
         }
     }
 
-    private fun isTemp(name: String): Boolean {
-        return name.endsWith(".part") || name.endsWith(".ytdl") || name.endsWith(".temp") ||
+    private fun isTemp(name: String): Boolean =
+        name.endsWith(".part") || name.endsWith(".ytdl") || name.endsWith(".temp") ||
             name.contains(".part-") || Regex("\\.f\\d+\\.\\w+$").containsMatchIn(name)
-    }
 
     private fun saveToDownloads(file: File, relativePath: String): SavedFile {
         val resolver = app.contentResolver
@@ -274,9 +274,9 @@ object Downloader {
         values.put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
         values.put(MediaStore.Downloads.IS_PENDING, 1)
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            ?: throw IllegalStateException("Không tạo được file trong thư mục Download")
+            ?: throw IllegalStateException("Không tạo được file trong Download")
         val out = resolver.openOutputStream(uri)
-            ?: throw IllegalStateException("Không ghi được file vào thư mục Download")
+            ?: throw IllegalStateException("Không ghi được file")
         out.use { o -> file.inputStream().use { it.copyTo(o) } }
         val done = ContentValues()
         done.put(MediaStore.Downloads.IS_PENDING, 0)
@@ -289,14 +289,11 @@ object Downloader {
         val lines = msg.lines()
         val line = lines.lastOrNull { it.contains("ERROR", ignoreCase = true) } ?: lines.lastOrNull().orEmpty()
         val hint = when {
-            msg.contains("Sign in", ignoreCase = true) || msg.contains("not a bot", ignoreCase = true) ->
-                " — hãy nhập cookies.txt (nút 🍪)"
-            msg.contains("page needs to be reloaded", ignoreCase = true) ->
-                " — YouTube đang giới hạn. Chờ vài phút hoặc đổi mạng."
-            msg.contains("403", ignoreCase = true) ->
-                " — bị chặn tạm thời. Thử lại sau vài phút."
-            msg.contains("ffmpeg", ignoreCase = true) ->
-                " — cần FFmpeg để ghép/chuyển đổi."
+            msg.contains("Sign in", true) || msg.contains("not a bot", true) -> " — nhập cookies.txt (🍪)"
+            msg.contains("page needs to be reloaded", true) -> " — YouTube giới hạn. Chờ hoặc đổi mạng."
+            msg.contains("403", true) -> " — bị chặn tạm thời."
+            msg.contains("ffmpeg", true) -> " — cần FFmpeg."
+            msg.contains("CANNOT LINK", true) -> " — thiếu thư viện phụ thuộc."
             else -> ""
         }
         return line.take(280) + hint
