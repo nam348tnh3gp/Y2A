@@ -11,7 +11,6 @@ object PythonBridge {
     @Volatile private var libLoaded = false
     private var initError: String? = null
 
-    // JNI declarations — chỉ gọi sau khi libLoaded = true
     private external fun nativeInit(
         nativeLibDir: String,
         sitePackagesDir: String,
@@ -21,18 +20,17 @@ object PythonBridge {
     private external fun nativeCallFunction(module: String, func: String, argJson: String): String
     private external fun nativeFinalize()
 
-    /** Load python_jni.so an toàn — không crash nếu thiếu. */
     @Synchronized
     private fun ensureLib(): Boolean {
         if (libLoaded) return true
         return try {
             System.loadLibrary("python_jni")
             libLoaded = true
-            Log.i(TAG, "✅ Load python_jni.so OK")
+            Log.i(TAG, "✅ python_jni loaded")
             true
         } catch (t: Throwable) {
             initError = "Không load được python_jni: ${t.message}"
-            Log.e(TAG, "❌ loadLibrary fail", t)
+            Log.e(TAG, "loadLibrary fail", t)
             false
         }
     }
@@ -40,18 +38,17 @@ object PythonBridge {
     fun lastError(): String? = initError
     fun isInitialized(): Boolean = initialized
 
-    /** PHẢI gọi từ thread nền. */
     @Synchronized
     fun init(app: Application): Boolean {
         if (initialized) return true
         initError = null
-
         if (!ensureLib()) return false
 
         try {
             val nativeLibDir = app.applicationInfo.nativeLibraryDir
             Log.i(TAG, "nativeLibDir: $nativeLibDir")
 
+            // Extract site-packages folder (không phải zip)
             val sitePackages = File(app.filesDir, "site-packages")
             val marker = File(sitePackages, ".extracted")
             if (!marker.exists()) {
@@ -59,9 +56,9 @@ object PythonBridge {
                 sitePackages.mkdirs()
                 copyAssetDir(app, "python/site-packages", sitePackages)
                 marker.writeText("ok")
-                Log.i(TAG, "✅ Extract xong")
+                Log.i(TAG, "✅ site-packages extracted")
             } else {
-                Log.i(TAG, "✅ site-packages đã có sẵn")
+                Log.i(TAG, "✅ site-packages cached")
             }
 
             // Copy yt_dlp_bridge.py
@@ -70,9 +67,9 @@ object PythonBridge {
                 app.assets.open("yt_dlp_bridge.py").use { input ->
                     scriptFile.outputStream().use { input.copyTo(it) }
                 }
-                Log.i(TAG, "✅ yt_dlp_bridge.py → ${scriptFile.absolutePath}")
+                Log.i(TAG, "✅ yt_dlp_bridge.py copied")
             } catch (e: Exception) {
-                Log.w(TAG, "Không copy được yt_dlp_bridge.py", e)
+                Log.w(TAG, "Copy bridge failed", e)
             }
 
             Log.i(TAG, "⏳ nativeInit...")
@@ -82,15 +79,12 @@ object PythonBridge {
                 app.filesDir.absolutePath,
                 app.assets
             )
-            Log.i(TAG, "✅ nativeInit kết quả: $initialized")
-
-            if (!initialized) {
-                initError = "nativeInit trả false (xem logcat tag PythonJNI)"
-            }
+            Log.i(TAG, "✅ nativeInit: $initialized")
+            if (!initialized) initError = "nativeInit failed"
             return initialized
         } catch (t: Throwable) {
             initError = t.message
-            Log.e(TAG, "❌ Init fail", t)
+            Log.e(TAG, "Init fail", t)
             return false
         }
     }
