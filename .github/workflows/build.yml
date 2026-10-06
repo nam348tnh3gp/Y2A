@@ -32,7 +32,9 @@ jobs:
       TARGET_HOST: "aarch64-linux-android"
 
     steps:
+      # ==========================================================
       # SECTION 1: ENVIRONMENT SETUP
+      # ==========================================================
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -77,7 +79,9 @@ jobs:
           fi
           echo "Bridge script found"
 
+      # ==========================================================
       # SECTION 2: VERSION BUMP
+      # ==========================================================
       - name: Bump version code
         id: bump
         run: |
@@ -107,7 +111,9 @@ jobs:
             git push origin "HEAD:${{ github.ref_name }}"
           fi
 
+      # ==========================================================
       # SECTION 3: HOST PYTHON
+      # ==========================================================
       - name: Build Host Python
         run: |
           mkdir -p /tmp/build-host
@@ -139,8 +145,10 @@ jobs:
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
           echo "LDFLAGS=-L$DEPS_INSTALL/lib" >> "$GITHUB_ENV"
 
+      # ==========================================================
       # SECTION 4: CROSS-COMPILE DEPENDENCIES
-      # KHÔNG cross-compile zlib — NDK đã có sẵn libz.so + zlib.h trong sysroot
+      # KHÔNG cross-compile zlib — NDK đã có libz.so + zlib.h trong sysroot
+      # ==========================================================
 
       - name: Cross-Compile libffi
         run: |
@@ -157,11 +165,21 @@ jobs:
           wget -q "https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
           tar -xf "openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
           cd "openssl-${{ env.OPENSSL_VERSION }}"
+
+          export ANDROID_NDK_ROOT="$NDK"
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+
           ./Configure android-arm64 \
+            -D__ANDROID_API__=${{ env.ANDROID_API }} \
             --prefix="$DEPS_INSTALL" \
             --openssldir="$DEPS_INSTALL/ssl" \
             shared no-engine no-tests no-async \
-            -D__ANDROID_API__=${{ env.ANDROID_API }}
+            CC="$CC" \
+            CXX="$CXX" \
+            AR="$AR" \
+            RANLIB="$RANLIB" \
+            STRIP="$STRIP"
+
           make -j$(nproc)
           make install_sw
 
@@ -188,7 +206,9 @@ jobs:
           ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
           make -j$(nproc) install
 
+      # ==========================================================
       # SECTION 5: CROSS-COMPILE CPYTHON 3.13
+      # ==========================================================
       - name: Cross-Compile CPython
         run: |
           cd /tmp
@@ -236,7 +256,9 @@ jobs:
           echo "Critical modules:"
           ls "$GITHUB_WORKSPACE/python-android/lib/python3.13/lib-dynload/" | grep -E "_ssl|_sqlite|_ctypes|_lzma|zlib" || true
 
+      # ==========================================================
       # SECTION 6: BOOTSTRAP WHEELS + PATCH PATHS
+      # ==========================================================
       - name: Bootstrap Pure-Python Wheels
         run: |
           TARGET_SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
@@ -261,7 +283,9 @@ jobs:
             \( -name "_sysconfigdata*.py" -o -name "*.pc" -o -name "*-config" -o -name "Makefile" \) \
             -exec sed -i "s|$GITHUB_WORKSPACE/python-android|/data/data/com.nam2006.y2mate/files/python|g" {} \;
 
+      # ==========================================================
       # SECTION 7: COLLECT jniLibs + PATCH NEEDED + RPATH
+      # ==========================================================
       - name: Collect and Process Native Libraries
         run: |
           JNI="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
@@ -315,7 +339,9 @@ jobs:
           echo "Final jniLibs:"
           ls -lh "$JNI/"
 
+      # ==========================================================
       # SECTION 8: PACKAGE RUNTIME TAR
+      # ==========================================================
       - name: Package Python Runtime into Assets
         run: |
           mkdir -p "$GITHUB_WORKSPACE/app/src/main/assets"
@@ -341,7 +367,9 @@ jobs:
           echo "Assets:"
           ls -lh app/src/main/assets/
 
+      # ==========================================================
       # SECTION 9: FFMPEG FROM TERMUX
+      # ==========================================================
       - name: Download FFmpeg from Termux
         run: |
           set -e
@@ -370,7 +398,9 @@ jobs:
           echo "jniLibs final:"
           ls -lh app/src/main/jniLibs/arm64-v8a/
 
+      # ==========================================================
       # SECTION 10: BUILD APK
+      # ==========================================================
       - name: Setup debug keystore
         run: |
           mkdir -p "$HOME/.android"
