@@ -35,7 +35,9 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      # ---------- Bump version ----------
+      # ==========================================================
+      # Bump version code
+      # ==========================================================
       - name: Bump version code
         id: bump
         run: |
@@ -66,7 +68,9 @@ jobs:
             git push origin HEAD:${{ github.ref_name }}
           fi
 
-      # ---------- Get latest python-build release ----------
+      # ==========================================================
+      # Lấy latest release của flet-dev/python-build
+      # ==========================================================
       - name: Get latest python-build release tag
         id: python-release
         env:
@@ -86,7 +90,9 @@ jobs:
           echo "✅ Latest release: $LATEST_TAG"
           echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
 
-      # ---------- Download Python runtime ----------
+      # ==========================================================
+      # Download Python runtime
+      # ==========================================================
       - name: Download Python runtime
         id: python-runtime
         env:
@@ -129,16 +135,21 @@ jobs:
           echo "📦 Extracting..."
           tar -xzf "$TARBALL"
 
-          echo "📂 Structure:"
+          echo ""
+          echo "📂 Cấu trúc sau extract:"
           find . -maxdepth 4 -type d | head -30
           echo ""
-          echo "🔍 Tìm libpython và stdlib:"
-          find . -name "libpython*.so" -o -name "os.py" | head -10
+          echo "🔍 Tìm các file quan trọng:"
+          echo "  libpython:  $(find . -name 'libpython*.so' | head -3)"
+          echo "  os.py:      $(find . -name 'os.py' | head -3)"
+          echo "  Python.h:   $(find . -name 'Python.h' | head -3)"
           echo ""
           echo "📊 Size:"
           du -sh .
 
-      # ---------- Install pip + yt-dlp ----------
+      # ==========================================================
+      # Install pip + yt-dlp vào site-packages
+      # ==========================================================
       - name: Install pip and yt-dlp
         env:
           PY_VERSION: "3.14"
@@ -146,13 +157,27 @@ jobs:
           set -e
           cd _python_runtime
 
-          STDLIB_DIR=$(find . -type d -name "python${PY_VERSION}" -path "*/lib/*" | head -1)
+          # Tìm stdlib bằng nhiều cách fallback
+          STDLIB_DIR=$(find . -type f -name "os.py" -path "*python${PY_VERSION}*" -exec dirname {} \; 2>/dev/null | head -1)
+
           if [ -z "$STDLIB_DIR" ]; then
-            echo "❌ Không tìm thấy stdlib"
-            find . -name "os.py" | head -5
+            STDLIB_DIR=$(find . -type d \( -name "python${PY_VERSION}" -o -name "${PY_VERSION}" \) 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$STDLIB_DIR" ]; then
+            STDLIB_DIR=$(find . -type f -name "os.py" -exec dirname {} \; 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$STDLIB_DIR" ]; then
+            echo "❌ Không tìm được stdlib. Cấu trúc đầy đủ:"
+            find . -type d | head -50
+            echo ""
+            echo "Tìm bất kỳ .py file:"
+            find . -name "*.py" | head -10
             exit 1
           fi
-          echo "📁 Stdlib: $STDLIB_DIR"
+
+          echo "📁 Stdlib dir: $STDLIB_DIR"
 
           SITE_PACKAGES="$STDLIB_DIR/site-packages"
           mkdir -p "$SITE_PACKAGES"
@@ -166,7 +191,12 @@ jobs:
           ls -la "$SITE_PACKAGES/"
           du -sh "$SITE_PACKAGES"
 
-      # ---------- Integrate runtime into Android project ----------
+          # Lưu path cho bước sau
+          echo "STDLIB_PATH=$STDLIB_DIR" >> "$GITHUB_ENV"
+
+      # ==========================================================
+      # Copy runtime vào Android project
+      # ==========================================================
       - name: Integrate runtime
         env:
           PY_VERSION: "3.14"
@@ -175,28 +205,32 @@ jobs:
           cd _python_runtime
 
           # 1. libpython → jniLibs
-          LIBPY=$(find . -name "libpython${PY_VERSION}.so" | head -1)
-          [ -z "$LIBPY" ] && { echo "❌ Không có libpython"; exit 1; }
+          LIBPY=$(find . -name "libpython${PY_VERSION}.so" 2>/dev/null | head -1)
+          [ -z "$LIBPY" ] && { echo "❌ Không có libpython"; find . -name "*.so" | head -20; exit 1; }
           mkdir -p ../app/src/main/jniLibs/arm64-v8a
           cp "$LIBPY" ../app/src/main/jniLibs/arm64-v8a/libpython3.14.so
-          echo "✅ libpython → jniLibs"
+          echo "✅ libpython: $LIBPY"
 
           # 2. stdlib → assets
-          STDLIB_DIR=$(find . -type d -name "python${PY_VERSION}" -path "*/lib/*" | head -1)
-          STDLIB_PARENT=$(dirname "$STDLIB_DIR")
-          mkdir -p ../app/src/main/assets/python
-          cp -r "$STDLIB_PARENT/python${PY_VERSION}" ../app/src/main/assets/python/
-          echo "✅ stdlib → assets/python/python3.14/"
+          STDLIB_DIR=$(find . -type f -name "os.py" -exec dirname {} \; 2>/dev/null | head -1)
+          [ -z "$STDLIB_DIR" ] && { echo "❌ Không có stdlib"; exit 1; }
+          echo "📁 Stdlib source: $STDLIB_DIR"
 
-          # 3. Header files → cpp/include (chỉ dùng lúc compile)
-          INCLUDE_DIR=$(find . -type d -name "python${PY_VERSION}" -path "*/include/*" | head -1)
+          STDLIB_NAME=$(basename "$STDLIB_DIR")
+          echo "📁 Stdlib name: $STDLIB_NAME"
+
+          mkdir -p ../app/src/main/assets/python
+          cp -r "$STDLIB_DIR" ../app/src/main/assets/python/
+          echo "✅ stdlib → assets/python/$STDLIB_NAME"
+
+          # 3. Headers → cpp/include
+          INCLUDE_DIR=$(find . -name "Python.h" -exec dirname {} \; 2>/dev/null | head -1)
           if [ -n "$INCLUDE_DIR" ]; then
             mkdir -p ../app/src/main/cpp/include
             cp -r "$INCLUDE_DIR"/* ../app/src/main/cpp/include/
-            echo "✅ Headers → cpp/include/"
+            echo "✅ Headers: $INCLUDE_DIR"
           else
-            echo "⚠️ Không tìm thấy include/"
-            find . -name "Python.h" | head -3
+            echo "⚠️ Không có Python.h — JNI sẽ fail nếu thiếu"
           fi
 
           # 4. Native .so khác → jniLibs
@@ -209,9 +243,17 @@ jobs:
 
           echo ""
           echo "📋 jniLibs:"; ls -lh ../app/src/main/jniLibs/arm64-v8a/
-          echo "📋 assets:"; du -sh ../app/src/main/assets/
+          echo ""
+          echo "📋 assets/python:"; ls -lh ../app/src/main/assets/python/
+          echo ""
+          echo "📋 cpp/include:"; ls ../app/src/main/cpp/include/ | head -5
+          echo ""
+          echo "📊 Total size:"
+          du -sh ../app/src/main/jniLibs/ ../app/src/main/assets/
 
-      # ---------- Setup debug keystore ----------
+      # ==========================================================
+      # Setup debug keystore
+      # ==========================================================
       - name: Setup debug keystore
         run: |
           set -e
@@ -226,7 +268,9 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      # ---------- Build APK ----------
+      # ==========================================================
+      # Build APK
+      # ==========================================================
       - name: Build release APK
         run: gradle :app:assembleRelease --stacktrace
 
