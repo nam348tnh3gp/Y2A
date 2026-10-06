@@ -4,6 +4,7 @@
 #include <dlfcn.h>
 #include <cstring>
 #include <cstdlib>
+#include <sys/stat.h>
 
 #define LOG_TAG "PythonJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -11,92 +12,115 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 
 // ============================================================
-// Function pointer typedefs (thay vì Python.h)
+// Python C API typedefs (không cần Python.h)
 // ============================================================
 typedef void* PyObject;
+typedef int   PyGILState_STATE;
 
-typedef void     (*Py_Initialize_t)();
-typedef void     (*Py_Finalize_t)();
-typedef int      (*PyRun_SimpleString_t)(const char*);
-typedef PyObject (*PyImport_ImportModule_t)(const char*);
-typedef PyObject (*PyObject_GetAttrString_t)(PyObject, const char*);
-typedef int      (*PyCallable_Check_t)(PyObject);
-typedef PyObject (*PyObject_CallObject_t)(PyObject, PyObject);
-typedef PyObject (*PyTuple_Pack_t)(long, ...);
-typedef PyObject (*PyUnicode_FromString_t)(const char*);
-typedef PyObject (*PyObject_Str_t)(PyObject);
-typedef const char* (*PyUnicode_AsUTF8_t)(PyObject);
-typedef void     (*PyErr_Print_t)();
+typedef void        (*Py_Initialize_t)();
+typedef void        (*Py_Finalize_t)();
+typedef int         (*PyRun_SimpleString_t)(const char*);
+typedef PyObject*   (*PyImport_ImportModule_t)(const char*);
+typedef PyObject*   (*PyObject_GetAttrString_t)(PyObject*, const char*);
+typedef int         (*PyCallable_Check_t)(PyObject*);
+typedef PyObject*   (*PyObject_CallObject_t)(PyObject*, PyObject*);
+typedef PyObject*   (*PyTuple_Pack_t)(long long, ...);
+typedef PyObject*   (*PyUnicode_FromString_t)(const char*);
+typedef PyObject*   (*PyObject_Str_t)(PyObject*);
+typedef const char* (*PyUnicode_AsUTF8_t)(PyObject*);
+typedef void        (*PyErr_Print_t)();
 typedef const char* (*Py_GetVersion_t)();
-typedef void     (*Py_DecRef_t)(PyObject);
-typedef int      (*PyGILState_Ensure_t)();
-typedef void     (*PyGILState_Release_t)(int);
-typedef void*    (*PyEval_SaveThread_t)();
-typedef void     (*PyEval_RestoreThread_t)(void*);
-typedef void     (*PyErr_Clear_t)();
+typedef void        (*Py_DecRef_t)(PyObject*);
+typedef PyGILState_STATE (*PyGILState_Ensure_t)();
+typedef void        (*PyGILState_Release_t)(PyGILState_STATE);
+typedef void*       (*PyEval_SaveThread_t)();
+typedef void        (*PyEval_RestoreThread_t)(void*);
+typedef void        (*PyErr_Clear_t)();
 
 static void* g_libpython = nullptr;
 static bool  g_initialized = false;
 static void* g_mainTState = nullptr;
 
-static Py_Initialize_t           p_Py_Initialize = nullptr;
-static Py_Finalize_t             p_Py_Finalize = nullptr;
-static PyRun_SimpleString_t      p_PyRun_SimpleString = nullptr;
-static PyImport_ImportModule_t   p_PyImport_ImportModule = nullptr;
-static PyObject_GetAttrString_t  p_PyObject_GetAttrString = nullptr;
-static PyCallable_Check_t        p_PyCallable_Check = nullptr;
-static PyObject_CallObject_t     p_PyObject_CallObject = nullptr;
-static PyTuple_Pack_t            p_PyTuple_Pack = nullptr;
-static PyUnicode_FromString_t    p_PyUnicode_FromString = nullptr;
-static PyObject_Str_t            p_PyObject_Str = nullptr;
-static PyUnicode_AsUTF8_t        p_PyUnicode_AsUTF8 = nullptr;
-static PyErr_Print_t             p_PyErr_Print = nullptr;
-static Py_GetVersion_t           p_Py_GetVersion = nullptr;
-static Py_DecRef_t               p_Py_DecRef = nullptr;
-static PyGILState_Ensure_t       p_PyGILState_Ensure = nullptr;
-static PyGILState_Release_t      p_PyGILState_Release = nullptr;
-static PyEval_SaveThread_t       p_PyEval_SaveThread = nullptr;
-static PyEval_RestoreThread_t    p_PyEval_RestoreThread = nullptr;
-static PyErr_Clear_t             p_PyErr_Clear = nullptr;
+static Py_Initialize_t         p_Py_Initialize = nullptr;
+static Py_Finalize_t           p_Py_Finalize = nullptr;
+static PyRun_SimpleString_t    p_PyRun_SimpleString = nullptr;
+static PyImport_ImportModule_t p_PyImport_ImportModule = nullptr;
+static PyObject_GetAttrString_t p_PyObject_GetAttrString = nullptr;
+static PyCallable_Check_t      p_PyCallable_Check = nullptr;
+static PyObject_CallObject_t   p_PyObject_CallObject = nullptr;
+static PyTuple_Pack_t          p_PyTuple_Pack = nullptr;
+static PyUnicode_FromString_t  p_PyUnicode_FromString = nullptr;
+static PyObject_Str_t          p_PyObject_Str = nullptr;
+static PyUnicode_AsUTF8_t      p_PyUnicode_AsUTF8 = nullptr;
+static PyErr_Print_t           p_PyErr_Print = nullptr;
+static Py_GetVersion_t         p_Py_GetVersion = nullptr;
+static Py_DecRef_t             p_Py_DecRef = nullptr;
+static PyGILState_Ensure_t     p_PyGILState_Ensure = nullptr;
+static PyGILState_Release_t    p_PyGILState_Release = nullptr;
+static PyEval_SaveThread_t     p_PyEval_SaveThread = nullptr;
+static PyEval_RestoreThread_t  p_PyEval_RestoreThread = nullptr;
+static PyErr_Clear_t           p_PyErr_Clear = nullptr;
 
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
 Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         JNIEnv *env, jobject,
-        jstring nativeLibDir, jstring sitePackagesDir, jstring filesDir,
-        jobject assetManager) {
+        jstring jNativeLibDir,
+        jstring jPythonHome,
+        jstring jFilesDir) {
 
     if (g_initialized) return JNI_TRUE;
 
-    const char *libDir = env->GetStringUTFChars(nativeLibDir, nullptr);
-    const char *siteDir = env->GetStringUTFChars(sitePackagesDir, nullptr);
-    const char *filesDirC = env->GetStringUTFChars(filesDir, nullptr);
+    const char *nativeLibDir = env->GetStringUTFChars(jNativeLibDir, nullptr);
+    const char *pythonHome   = env->GetStringUTFChars(jPythonHome, nullptr);
+    const char *filesDir     = env->GetStringUTFChars(jFilesDir, nullptr);
 
-    LOGI("nativeLibDir: %s", libDir);
-    LOGI("sitePackages: %s", siteDir);
-    LOGI("filesDir:    %s", filesDirC);
+    LOGI("nativeLibDir: %s", nativeLibDir);
+    LOGI("pythonHome:   %s", pythonHome);
+    LOGI("filesDir:     %s", filesDir);
 
     // ========================================================
-    // Set env vars cho Python
+    // Set env vars TRƯỚC Py_Initialize
     // ========================================================
-    // Đặt PYTHONHOME trỏ đến thư mục chứa stdlib (sẽ được extract từ assets)
-    std::string pythonHome = std::string(filesDirC) + "/python3.12";
-    setenv("PYTHONHOME", pythonHome.c_str(), 1);
-    setenv("PYTHONPATH", siteDir, 1);
+    setenv("PYTHONHOME", pythonHome, 1);
+
+    std::string stdlib = std::string(pythonHome) + "/lib/python3.11";
+    std::string dynload = stdlib + "/lib-dynload";
+    std::string sitePkgs = stdlib + "/site-packages";
+    std::string pythonPath = stdlib + ":" + dynload + ":" + sitePkgs + ":" + filesDir;
+    setenv("PYTHONPATH", pythonPath.c_str(), 1);
+
+    // Loader path cho libssl/libcrypto/etc.
+    std::string ldPath = std::string(nativeLibDir) + ":" + stdlib;
+    setenv("LD_LIBRARY_PATH", ldPath.c_str(), 1);
+
+    // SSL certs
+    std::string caBundle = sitePkgs + "/certifi/cacert.pem";
+    setenv("SSL_CERT_FILE", caBundle.c_str(), 1);
+    setenv("REQUESTS_CA_BUNDLE", caBundle.c_str(), 1);
+    setenv("CURL_CA_BUNDLE", caBundle.c_str(), 1);
+
+    // Temp dir (Android không có /tmp)
+    std::string tmpDir = std::string(filesDir) + "/tmp";
+    mkdir(tmpDir.c_str(), 0700);
+    setenv("TMPDIR", tmpDir.c_str(), 1);
+    setenv("TEMP", tmpDir.c_str(), 1);
+    setenv("TMP", tmpDir.c_str(), 1);
+
     setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
-    setenv("LD_LIBRARY_PATH", libDir, 1);
+    setenv("PYTHONUNBUFFERED", "1", 1);
 
     // ========================================================
-    // Load libpython3.12.so
+    // dlopen libpython3.11.so
     // ========================================================
-    std::string libPath = std::string(libDir) + "/libpython3.12.so";
+    std::string libPath = std::string(nativeLibDir) + "/libpython3.11.so";
     g_libpython = dlopen(libPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (!g_libpython) {
         LOGE("❌ dlopen fail: %s", dlerror());
-        env->ReleaseStringUTFChars(nativeLibDir, libDir);
-        env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
-        env->ReleaseStringUTFChars(filesDir, filesDirC);
+        env->ReleaseStringUTFChars(jNativeLibDir, nativeLibDir);
+        env->ReleaseStringUTFChars(jPythonHome, pythonHome);
+        env->ReleaseStringUTFChars(jFilesDir, filesDir);
         return JNI_FALSE;
     }
     LOGI("✅ dlopen libpython OK");
@@ -127,16 +151,15 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     LOAD(PyEval_SaveThread)
     LOAD(PyEval_RestoreThread)
     LOAD(PyErr_Clear)
-
     #undef LOAD
 
     if (!p_Py_Initialize || !p_PyRun_SimpleString ||
         !p_PyGILState_Ensure || !p_PyGILState_Release ||
         !p_PyEval_SaveThread || !p_PyEval_RestoreThread) {
         LOGE("❌ Thiếu symbol bắt buộc");
-        env->ReleaseStringUTFChars(nativeLibDir, libDir);
-        env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
-        env->ReleaseStringUTFChars(filesDir, filesDirC);
+        env->ReleaseStringUTFChars(jNativeLibDir, nativeLibDir);
+        env->ReleaseStringUTFChars(jPythonHome, pythonHome);
+        env->ReleaseStringUTFChars(jFilesDir, filesDir);
         return JNI_FALSE;
     }
 
@@ -149,92 +172,94 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         LOGI("✅ Python: %s", p_Py_GetVersion());
     }
 
-    // ========================================================
-    // TEST: import os
-    // ========================================================
-    int rc_test = p_PyRun_SimpleString("import os; print('STDLIB_OS_OK')");
-    LOGI("Test import os: rc=%d", rc_test);
-
-    if (rc_test != 0) {
+    // Test import os
+    int rc = p_PyRun_SimpleString("import os; print('STDLIB_OS_OK')");
+    LOGI("Test import os: rc=%d", rc);
+    if (rc != 0) {
         LOGE("❌ Stdlib không load được");
         if (p_PyErr_Print) p_PyErr_Print();
-        env->ReleaseStringUTFChars(nativeLibDir, libDir);
-        env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
-        env->ReleaseStringUTFChars(filesDir, filesDirC);
+        env->ReleaseStringUTFChars(jNativeLibDir, nativeLibDir);
+        env->ReleaseStringUTFChars(jPythonHome, pythonHome);
+        env->ReleaseStringUTFChars(jFilesDir, filesDir);
         return JNI_FALSE;
     }
 
-    // ========================================================
-    // Thêm sys.path: filesDir, site-packages, nativeLibDir
-    // ========================================================
-    std::string code = "import sys\n";
-    code += "sys.path.insert(0, r'" + std::string(filesDirC) + "')\n";
-    code += "sys.path.insert(0, r'" + std::string(siteDir) + "')\n";
-    code += "sys.path.insert(0, r'" + std::string(libDir) + "')\n";
-    code += "print('sys.path:', sys.path[:6])\n";
-
-    int rc_path = p_PyRun_SimpleString(code.c_str());
-    LOGI("Set sys.path: rc=%d", rc_path);
-
-    // ========================================================
-    // TEST: import yt_dlp
-    // ========================================================
-    int rc_ytdlp = p_PyRun_SimpleString("import yt_dlp; print('YTDLP_OK', yt_dlp.version.__version__)");
-    LOGI("Test import yt_dlp: rc=%d", rc_ytdlp);
-
-    if (rc_ytdlp != 0) {
-        LOGW("⚠️ yt_dlp không import được (nhưng Python vẫn chạy)");
+    // Test import ssl
+    rc = p_PyRun_SimpleString("import ssl; print('SSL_OK', ssl.OPENSSL_VERSION)");
+    LOGI("Test import ssl: rc=%d", rc);
+    if (rc != 0) {
+        LOGW("⚠️ _ssl không load được — HTTPS sẽ fail");
         if (p_PyErr_Print) p_PyErr_Print();
     }
 
-    // ========================================================
-    // Nhả GIL — bắt buộc để các thread khác gọi được Python
-    // ========================================================
+    // Test import sqlite3
+    rc = p_PyRun_SimpleString("import sqlite3; print('SQLITE_OK')");
+    LOGI("Test import sqlite3: rc=%d", rc);
+    if (rc != 0) {
+        LOGW("⚠️ _sqlite3 không load được");
+        if (p_PyErr_Print) p_PyErr_Print();
+    }
+
+    // Test import yt_dlp
+    rc = p_PyRun_SimpleString("import yt_dlp; print('YTDLP_OK', yt_dlp.version.__version__)");
+    LOGI("Test import yt_dlp: rc=%d", rc);
+    if (rc != 0) {
+        LOGW("⚠️ yt_dlp không load được");
+        if (p_PyErr_Print) p_PyErr_Print();
+    }
+
+    // Thêm filesDir vào sys.path cho yt_dlp_bridge
+    std::string code = "import sys\n";
+    code += "if r'" + std::string(filesDir) + "' not in sys.path:\n";
+    code += "    sys.path.insert(0, r'" + std::string(filesDir) + "')\n";
+    p_PyRun_SimpleString(code.c_str());
+
+    // Nhả GIL — bắt buộc để các thread khác dùng
     g_mainTState = p_PyEval_SaveThread();
     g_initialized = true;
 
-    env->ReleaseStringUTFChars(nativeLibDir, libDir);
-    env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
-    env->ReleaseStringUTFChars(filesDir, filesDirC);
+    env->ReleaseStringUTFChars(jNativeLibDir, nativeLibDir);
+    env->ReleaseStringUTFChars(jPythonHome, pythonHome);
+    env->ReleaseStringUTFChars(jFilesDir, filesDir);
     return JNI_TRUE;
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_nam2006_y2mate_PythonBridge_nativeCallFunction(
         JNIEnv *env, jobject,
-        jstring moduleName, jstring funcName, jstring argJson) {
+        jstring jModule, jstring jFunc, jstring jArg) {
 
     if (!g_initialized || !p_PyImport_ImportModule) {
-        return env->NewStringUTF("{\"success\":false,\"error\":\"Python chua init\"}");
+        return env->NewStringUTF("{\"success\":false,\"error\":\"Python chưa init\"}");
     }
 
-    const char *mod = env->GetStringUTFChars(moduleName, nullptr);
-    const char *fn = env->GetStringUTFChars(funcName, nullptr);
-    const char *arg = env->GetStringUTFChars(argJson, nullptr);
+    const char *module = env->GetStringUTFChars(jModule, nullptr);
+    const char *func   = env->GetStringUTFChars(jFunc, nullptr);
+    const char *arg    = env->GetStringUTFChars(jArg, nullptr);
 
     std::string out;
 
-    int gstate = p_PyGILState_Ensure();
+    PyGILState_STATE gstate = p_PyGILState_Ensure();
     {
-        PyObject pModule = p_PyImport_ImportModule(mod);
+        PyObject *pModule = p_PyImport_ImportModule(module);
         if (!pModule) {
             if (p_PyErr_Print) p_PyErr_Print();
-            out = std::string("{\"success\":false,\"error\":\"Import failed: ") + mod + "\"}";
+            out = std::string("{\"success\":false,\"error\":\"Import failed: ") + module + "\"}";
         } else {
-            PyObject pFunc = p_PyObject_GetAttrString(pModule, fn);
+            PyObject *pFunc = p_PyObject_GetAttrString(pModule, func);
             if (!pFunc || (p_PyCallable_Check && !p_PyCallable_Check(pFunc))) {
                 if (p_PyErr_Print) p_PyErr_Print();
-                out = std::string("{\"success\":false,\"error\":\"Func not found: ") + fn + "\"}";
+                out = std::string("{\"success\":false,\"error\":\"Func not found: ") + func + "\"}";
             } else {
-                PyObject pyArg = p_PyUnicode_FromString(arg);
-                PyObject pArgs = pyArg ? p_PyTuple_Pack(1, pyArg) : nullptr;
-                PyObject pResult = pArgs ? p_PyObject_CallObject(pFunc, pArgs) : nullptr;
+                PyObject *pyArg = p_PyUnicode_FromString(arg);
+                PyObject *pArgs = pyArg ? p_PyTuple_Pack(1, pyArg) : nullptr;
+                PyObject *pResult = pArgs ? p_PyObject_CallObject(pFunc, pArgs) : nullptr;
 
                 if (!pResult) {
                     if (p_PyErr_Print) p_PyErr_Print();
                     out = "{\"success\":false,\"error\":\"Call failed\"}";
                 } else {
-                    PyObject pStr = p_PyObject_Str(pResult);
+                    PyObject *pStr = p_PyObject_Str(pResult);
                     if (pStr) {
                         const char *r = p_PyUnicode_AsUTF8 ? p_PyUnicode_AsUTF8(pStr) : nullptr;
                         if (r) out = r;
@@ -256,9 +281,9 @@ Java_com_nam2006_y2mate_PythonBridge_nativeCallFunction(
     }
     p_PyGILState_Release(gstate);
 
-    env->ReleaseStringUTFChars(moduleName, mod);
-    env->ReleaseStringUTFChars(funcName, fn);
-    env->ReleaseStringUTFChars(argJson, arg);
+    env->ReleaseStringUTFChars(jModule, module);
+    env->ReleaseStringUTFChars(jFunc, func);
+    env->ReleaseStringUTFChars(jArg, arg);
 
     return env->NewStringUTF(out.c_str());
 }
