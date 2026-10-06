@@ -3,6 +3,7 @@ package com.nam2006.y2mate
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -12,8 +13,17 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+@Immutable
+data class UiState(
+    val hasCookies: Boolean = false,
+    val history: List<HistoryItem> = emptyList(),
+    val historyLoaded: Boolean = false,
+)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val ctx: Context = application
@@ -23,10 +33,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var opts by mutableStateOf(loadOpts())
     var preview by mutableStateOf<PreviewInfo?>(null)
     var previewLoading by mutableStateOf(false)
-    var hasCookies by mutableStateOf(CookieStore.has(application))
-    var history by mutableStateOf<List<HistoryItem>>(emptyList())
+
+    // UiState dùng StateFlow để tránh recompose không cần thiết
+    private val _ui = MutableStateFlow(UiState(hasCookies = CookieStore.has(application)))
+    val ui = _ui.asStateFlow()
 
     private var previewJob: Job? = null
+
+    init {
+        // Load history 1 lần khi khởi tạo, không load lại mỗi lần mở dialog
+        refreshHistory()
+    }
 
     private fun loadOpts(): Options {
         val p = try {
@@ -111,21 +128,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importCookies(uri: Uri): Boolean {
         val ok = CookieStore.import(ctx, uri)
-        hasCookies = CookieStore.has(ctx)
+        _ui.value = _ui.value.copy(hasCookies = CookieStore.has(ctx))
         return ok
     }
 
     fun clearCookies() {
         CookieStore.clear(ctx)
-        hasCookies = false
+        _ui.value = _ui.value.copy(hasCookies = false)
     }
 
     fun refreshHistory() {
-        history = HistoryStore.load(ctx)
+        viewModelScope.launch(Dispatchers.IO) {
+            val list = HistoryStore.load(ctx)
+            _ui.value = _ui.value.copy(history = list, historyLoaded = true)
+        }
     }
 
     fun clearHistory() {
         HistoryStore.clear(ctx)
-        history = emptyList()
+        _ui.value = _ui.value.copy(history = emptyList())
     }
 }
