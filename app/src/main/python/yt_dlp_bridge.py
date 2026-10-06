@@ -52,12 +52,10 @@ def get_info(url, cookies_file=""):
     }
     if cookies_file and os.path.exists(cookies_file):
         ydl_opts['cookiefile'] = cookies_file
-
     if 'youtube.com' in url or 'youtu.be' in url:
         ydl_opts['extractor_args'] = {
             'youtube': {'player_client': ['web', 'mweb', 'android', 'tv']}
         }
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -67,7 +65,7 @@ def get_info(url, cookies_file=""):
                 'duration': info.get('duration', 0) or 0,
                 'thumbnail': info.get('thumbnail'),
             }
-    except Exception as e:
+    except Exception:
         return {'title': '', 'uploader': '', 'duration': 0, 'thumbnail': None}
 
 def download(url, options):
@@ -86,7 +84,7 @@ def download(url, options):
             ),
         }
 
-        # ffmpeg_location: đường dẫn binary FFmpeg từ FFmpegKit
+        # FFmpeg location từ JNI
         ffmpeg_path = options.get('ffmpeg_path')
         if ffmpeg_path:
             ydl_opts['ffmpeg_location'] = ffmpeg_path
