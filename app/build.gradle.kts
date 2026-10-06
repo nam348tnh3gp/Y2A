@@ -4,7 +4,6 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// Version code từ file, CI bump tự động
 val versionCodeFromFile: Int = run {
     val f = rootProject.file("versioncode.txt")
     if (f.exists()) f.readText().trim().toIntOrNull()?.coerceAtLeast(1) ?: 1 else 1
@@ -21,14 +20,10 @@ android {
         versionCode = versionCodeFromFile
         versionName = "1.0.$versionCodeFromFile"
 
-        ndk {
-            abiFilters += listOf("arm64-v8a")
-        }
+        ndk { abiFilters += listOf("arm64-v8a") }
 
         externalNativeBuild {
-            cmake {
-                cppFlags += "-std=c++17"
-            }
+            cmake { cppFlags += "-std=c++17" }
         }
     }
 
@@ -46,7 +41,6 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
 
-    // Build JNI từ CMake (FFmpeg + Python)
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -67,15 +61,21 @@ android {
             pickFirsts += listOf(
                 "**/libffmpeg.so",
                 "**/libffprobe.so",
-                "**/libpython3.12.so",
+                "**/libpython3.11.so",
+                "**/libssl.so",
+                "**/libcrypto.so",
+                "**/libffi.so",
+                "**/libsqlite3.so",
+                "**/liblzma.so",
+                "**/libz.so",
                 "**/libc++_shared.so"
             )
         }
     }
 
     androidResources {
-        // Không nén .py, .so, .zip để Python đọc được từ assets
-        noCompress += listOf("py", "pyc", "so", "zip", "dat")
+        // Không nén tar.gz và .so để extract nhanh
+        noCompress += listOf("tar.gz", "so", "py", "pyc")
     }
 
     lint {
@@ -95,4 +95,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
+
+    // Tar extraction
+    implementation("org.apache.commons:commons-compress:1.27.1")
 }
