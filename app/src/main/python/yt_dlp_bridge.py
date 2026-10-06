@@ -44,6 +44,7 @@ def get_latest_version():
         return f"Error: {e}"
 
 def get_info(url, cookies_file=""):
+    # Không cần convert vì get_info nhận tham số riêng lẻ
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -69,6 +70,10 @@ def get_info(url, cookies_file=""):
         return {'title': '', 'uploader': '', 'duration': 0, 'thumbnail': None}
 
 def download(url, options):
+    # ⚠️ QUAN TRỌNG: convert Java Map (LinkedHashMap) thành Python dict
+    # để có thể dùng .get(key, default) đúng chuẩn Python
+    options = dict(options)
+
     global current_progress
     current_progress = DownloadProgress()
     try:
@@ -84,7 +89,6 @@ def download(url, options):
             ),
         }
 
-        # FFmpeg location từ JNI
         ffmpeg_path = options.get('ffmpeg_path')
         if ffmpeg_path:
             ydl_opts['ffmpeg_location'] = ffmpeg_path
