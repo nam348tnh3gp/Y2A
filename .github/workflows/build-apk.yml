@@ -1,303 +1,86 @@
-name: Build APK
+# ==========================================================
+# Setup Python runtime (flet-dev/python-build)
+# ==========================================================
+- name: Setup Python runtime
+  env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  run: |
+    set -ex
+    WORKSPACE="$GITHUB_WORKSPACE"
+    PY_VERSION="3.14"
+    ABI="arm64-v8a"
 
-on:
-  workflow_dispatch:
+    # ---- 1. Lấy release tag ----
+    LATEST_TAG=$(curl -sL \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $GH_TOKEN" \
+      "https://api.github.com/repos/flet-dev/python-build/releases?per_page=30" \
+      | jq -r '[.[].tag_name | select(test("^[0-9]{8}$"))][0]')
+    [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ] && LATEST_TAG="20260921"
+    echo "✅ Release: $LATEST_TAG"
 
-concurrency:
-  group: version-bump
-  cancel-in-progress: false
+    # ---- 2. Manifest ----
+    wget -q -O manifest.json "https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/manifest.json"
+    FULL_VERSION=$(jq -r --arg pv "$PY_VERSION" '.pythons[$pv].full_version' manifest.json)
+    echo "✅ Full version: $FULL_VERSION"
 
-permissions:
-  contents: write
+    # ---- 3. Tải tarball ----
+    TARBALL="python-android-dart-${FULL_VERSION}-${ABI}.tar.gz"
+    URL="https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/${TARBALL}"
+    rm -rf "$WORKSPACE/_python_runtime"
+    mkdir -p "$WORKSPACE/_python_runtime"
+    cd "$WORKSPACE/_python_runtime"
+    wget -q -O "$TARBALL" "$URL"
+    tar -xzf "$TARBALL"
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+    echo "Runtime files:"
+    ls -la
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
+    # ---- 4. Copy .so vào jniLibs ----
+    mkdir -p "$WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+    for so in libpython3.14.so libpythonbundle.so libcrypto_python.so libsqlite3_python.so libssl_python.so; do
+      if [ -f "$so" ]; then
+        cp "$so" "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
+        echo "  ✅ $so"
+      fi
+    done
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+    # ---- 5. Tải yt-dlp và tạo libpythonsitepackages.so ----
+    echo "📥 Downloading yt-dlp wheel..."
+    mkdir -p "$WORKSPACE/_wheels"
+    cd "$WORKSPACE/_wheels"
+    python3 -m pip download yt-dlp certifi \
+      --no-deps --only-binary=:all: -d .
 
-      - uses: android-actions/setup-android@v4
+    echo "📦 Tạo site-packages.zip..."
+    SITE_PACKAGES="$WORKSPACE/_wheels/site-packages"
+    mkdir -p "$SITE_PACKAGES"
+    for whl in *.whl; do
+      unzip -q "$whl" -d "$SITE_PACKAGES"
+    done
 
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.10.2"
+    # Nén site-packages thành sitepackages.zip
+    cd "$SITE_PACKAGES"
+    zip -r "$WORKSPACE/_wheels/sitepackages.zip" . -x "*.dist-info/*" -q
+    cd "$WORKSPACE/_wheels"
 
-      # ==========================================================
-      # Bump version code
-      # ==========================================================
-      - name: Bump version code
-        id: bump
-        run: |
-          set -e
-          if [ -f versioncode.txt ]; then
-            CURRENT=$(cat versioncode.txt | tr -d '[:space:]')
-            CURRENT=${CURRENT:-0}
-          else
-            CURRENT=0
-          fi
-          if ! [[ "$CURRENT" =~ ^[0-9]+$ ]]; then CURRENT=0; fi
-          NEW=$((CURRENT + 1))
-          echo "$NEW" > versioncode.txt
-          echo "🔢 Version: $CURRENT → $NEW"
-          echo "new_version=$NEW" >> "$GITHUB_OUTPUT"
+    # Đặt sitepackages.zip vào assets (sẽ được JNI trích xuất)
+    mkdir -p "$WORKSPACE/app/src/main/assets/python"
+    cp "$WORKSPACE/_wheels/sitepackages.zip" "$WORKSPACE/app/src/main/assets/python/"
 
-      - name: Commit version bump
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add versioncode.txt
-          if git diff --staged --quiet; then
-            echo "⚠️ Không có thay đổi"
-          else
-            git commit -m "chore: bump version code to ${{ steps.bump.outputs.new_version }} [skip ci]"
-            git pull --rebase origin ${{ github.ref_name }} || true
-            git push origin HEAD:${{ github.ref_name }}
-          fi
+    # ---- 6. Đặt stdlib.zip vào assets (nếu tìm thấy) ----
+    STDLIB_ZIP=$(find "$WORKSPACE/_python_runtime" -name "stdlib.zip" | head -1)
+    if [ -n "$STDLIB_ZIP" ]; then
+      cp "$STDLIB_ZIP" "$WORKSPACE/app/src/main/assets/python/"
+      echo "✅ stdlib.zip → assets/python/"
+    else
+      echo "⚠️ Không tìm thấy stdlib.zip trong tarball"
+    fi
 
-      # ==========================================================
-      # Download FFmpeg from Termux
-      # ==========================================================
-      - name: Download FFmpeg from Termux
-        run: |
-          set -e
+    # ---- 7. Copy yt_dlp_bridge.py vào assets ----
+    cp "$WORKSPACE/app/src/main/python/yt_dlp_bridge.py" \
+       "$WORKSPACE/app/src/main/assets/yt_dlp_bridge.py"
 
-          FFMPEG_VERSION="8.1.3"
-          ARCH="aarch64"
-          DEB_URL="https://packages.termux.dev/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
-
-          echo "📥 Downloading FFmpeg ${FFMPEG_VERSION} (${ARCH})..."
-          wget -q --show-progress -O ffmpeg.deb "${DEB_URL}" || {
-            echo "❌ Không tải được từ URL chính, thử mirror..."
-            wget -q -O ffmpeg.deb "https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
-          }
-
-          echo "📦 Extracting .deb..."
-          mkdir -p ffmpeg-extracted
-          dpkg-deb -xv ffmpeg.deb ./ffmpeg-extracted
-
-          TERMUX_BIN="./ffmpeg-extracted/data/data/com.termux/files/usr/bin"
-          TERMUX_LIB="./ffmpeg-extracted/data/data/com.termux/files/usr/lib"
-
-          if [ ! -f "${TERMUX_BIN}/ffmpeg" ]; then
-            echo "❌ Không tìm thấy ffmpeg binary!"
-            ls -la "${TERMUX_BIN}/" || true
-            exit 1
-          fi
-
-          mkdir -p app/src/main/jniLibs/arm64-v8a
-          mkdir -p app/src/main/assets/ffmpeg/lib
-
-          cp "${TERMUX_BIN}/ffmpeg" app/src/main/jniLibs/arm64-v8a/libffmpeg.so
-          if [ -f "${TERMUX_BIN}/ffprobe" ]; then
-            cp "${TERMUX_BIN}/ffprobe" app/src/main/jniLibs/arm64-v8a/libffprobe.so
-          fi
-
-          if [ -d "${TERMUX_LIB}" ]; then
-            echo "📚 Copying dependent libraries..."
-            find "${TERMUX_LIB}" -maxdepth 1 -type f \
-              \( -name "libav*.so*" -o -name "libsw*.so*" -o -name "libpostproc*.so*" \) \
-              -exec cp {} app/src/main/assets/ffmpeg/lib/ \;
-            ls -la app/src/main/assets/ffmpeg/lib/ | head -20
-          else
-            echo "⚠️ Không có thư mục lib"
-          fi
-
-          chmod 755 app/src/main/jniLibs/arm64-v8a/libffmpeg.so
-
-          echo "✅ FFmpeg setup hoàn tất:"
-          ls -la app/src/main/jniLibs/arm64-v8a/
-          du -sh app/src/main/jniLibs/arm64-v8a/
-          du -sh app/src/main/assets/ffmpeg/lib/ 2>/dev/null || true
-
-      # ==========================================================
-      # Setup Python runtime + yt-dlp (all-in-one)
-      # ==========================================================
-      - name: Setup Python runtime
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -ex
-          WORKSPACE="$GITHUB_WORKSPACE"
-          PY_VERSION="3.14"
-          ABI="arm64-v8a"
-
-          echo "═══════════════════════════════════════════"
-          echo "STEP 1: Xác định release"
-          echo "═══════════════════════════════════════════"
-          LATEST_TAG=$(curl -sL \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/flet-dev/python-build/releases?per_page=30" \
-            | jq -r '[.[].tag_name | select(test("^[0-9]{8}$"))][0]')
-          [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ] && LATEST_TAG="20260921"
-          echo "✅ Release tag: $LATEST_TAG"
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 2: Tải manifest.json"
-          echo "═══════════════════════════════════════════"
-          wget -q -O manifest.json "https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/manifest.json"
-          cat manifest.json
-          echo ""
-
-          FULL_VERSION=$(jq -r --arg pv "$PY_VERSION" '.pythons[$pv].full_version // empty' manifest.json)
-          if [ -z "$FULL_VERSION" ]; then
-            echo "❌ Không có full_version cho $PY_VERSION"
-            jq -r '.pythons | keys[]' manifest.json
-            exit 1
-          fi
-          echo "✅ Full version: $FULL_VERSION"
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 3: Tải tarball Python runtime"
-          echo "═══════════════════════════════════════════"
-          TARBALL="python-android-dart-${FULL_VERSION}-${ABI}.tar.gz"
-          URL="https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/${TARBALL}"
-          echo "URL: $URL"
-
-          rm -rf "$WORKSPACE/_python_runtime"
-          mkdir -p "$WORKSPACE/_python_runtime"
-          cd "$WORKSPACE/_python_runtime"
-
-          wget -q --show-progress -O "$TARBALL" "$URL"
-          tar -xzf "$TARBALL"
-
-          echo ""
-          echo "📂 Nội dung sau extract:"
-          ls -la
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 4: Copy .so vào jniLibs"
-          echo "═══════════════════════════════════════════"
-          mkdir -p "$WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-
-          # Copy TẤT CẢ .so có trong runtime (giữ nguyên tên vì chúng link với nhau)
-          for so in *.so; do
-            if [ -f "$so" ]; then
-              cp "$so" "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
-              echo "  ✅ $so"
-            fi
-          done
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 5: Tải yt-dlp wheel (pure Python)"
-          echo "═══════════════════════════════════════════"
-          rm -rf "$WORKSPACE/_wheels"
-          mkdir -p "$WORKSPACE/_wheels"
-          cd "$WORKSPACE/_wheels"
-
-          python3 -m pip download yt-dlp certifi \
-            --no-deps --only-binary=:all: -d .
-
-          ls -la
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 6: Extract wheels vào site-packages"
-          echo "═══════════════════════════════════════════"
-          SITE_PACKAGES="$WORKSPACE/app/src/main/assets/python/site-packages"
-          rm -rf "$SITE_PACKAGES"
-          mkdir -p "$SITE_PACKAGES"
-
-          for whl in *.whl; do
-            echo "  Extracting: $whl"
-            unzip -q "$whl" -d "$SITE_PACKAGES"
-          done
-
-          echo ""
-          echo "site-packages contents:"
-          ls "$SITE_PACKAGES" | head -20
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 7: Copy yt_dlp_bridge.py vào assets"
-          echo "═══════════════════════════════════════════"
-          if [ -f "$WORKSPACE/app/src/main/python/yt_dlp_bridge.py" ]; then
-            cp "$WORKSPACE/app/src/main/python/yt_dlp_bridge.py" \
-               "$WORKSPACE/app/src/main/assets/yt_dlp_bridge.py"
-            echo "✅ yt_dlp_bridge.py → assets/"
-          else
-            echo "⚠️ Không tìm thấy app/src/main/python/yt_dlp_bridge.py"
-            find "$WORKSPACE/app" -name "yt_dlp_bridge.py" | head -5
-          fi
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 8: Verify"
-          echo "═══════════════════════════════════════════"
-          echo "📋 jniLibs:"
-          ls -lh "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
-          echo ""
-          echo "📋 assets/python:"
-          find "$WORKSPACE/app/src/main/assets/python" -maxdepth 2 -type d | head -10
-          echo ""
-          echo "📋 assets root:"
-          ls -lh "$WORKSPACE/app/src/main/assets/" | head -10
-          echo ""
-          echo "📊 Sizes:"
-          du -sh "$WORKSPACE/app/src/main/jniLibs/"
-          du -sh "$WORKSPACE/app/src/main/assets/"
-          echo ""
-          echo "✅ Setup Python runtime HOÀN TẤT"
-
-      # ==========================================================
-      # Setup debug keystore
-      # ==========================================================
-      - name: Setup debug keystore
-        run: |
-          set -e
-          mkdir -p ~/.android
-          if [ -f "debug.keystore" ]; then
-            echo "🔐 Copy debug.keystore từ repo"
-            cp debug.keystore ~/.android/debug.keystore
-            keytool -list -keystore ~/.android/debug.keystore -storepass android | head -5
-          else
-            echo "⚠️ Tạo debug keystore tạm"
-            keytool -genkey -v -keystore ~/.android/debug.keystore \
-              -storepass android -alias androiddebugkey -keypass android \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
-      # ==========================================================
-      # Build APK
-      # ==========================================================
-      - name: Build release APK
-        run: gradle :app:assembleRelease --stacktrace
-
-      - name: Rename APK with version
-        run: |
-          set -e
-          VERSION=${{ steps.bump.outputs.new_version }}
-          for f in app/build/outputs/apk/release/*.apk; do
-            if [[ "$f" != *".apk" ]] || [[ "$f" == *"-unaligned"* ]]; then continue; fi
-            DIR=$(dirname "$f")
-            BASE=$(basename "$f" .apk)
-            NEW_NAME="${BASE}-v${VERSION}.apk"
-            mv "$f" "${DIR}/${NEW_NAME}"
-            echo "📦 Renamed: $f → ${DIR}/${NEW_NAME}"
-          done
-          ls -la app/build/outputs/apk/release/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Mini-Y2mate-Pro-v${{ steps.bump.outputs.new_version }}
-          path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
+    echo "✅ Setup Python runtime HOÀN TẤT"
+    ls -lh "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
+    ls -lh "$WORKSPACE/app/src/main/assets/"
