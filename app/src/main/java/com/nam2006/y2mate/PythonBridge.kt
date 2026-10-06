@@ -1,38 +1,40 @@
 package com.nam2006.y2mate
 
 import android.app.Application
-import android.content.res.AssetManager
 import android.util.Log
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import java.io.File
+import java.io.FileOutputStream
 
 object PythonBridge {
     private const val TAG = "PythonBridge"
+    private const val RUNTIME_TAR = "python-runtime.tar.gz"
+    private const val BRIDGE_FILE = "yt_dlp_bridge.py"
+
     @Volatile private var initialized = false
     @Volatile private var libLoaded = false
     private var initError: String? = null
 
-    // JNI declarations — chỉ gọi sau khi libLoaded = true
     private external fun nativeInit(
         nativeLibDir: String,
-        sitePackagesDir: String,
-        filesDir: String,
-        assetManager: AssetManager
+        pythonHome: String,
+        filesDir: String
     ): Boolean
     private external fun nativeCallFunction(module: String, func: String, argJson: String): String
     private external fun nativeFinalize()
 
-    /** Load python_jni.so an toàn — không crash nếu thiếu. */
     @Synchronized
     private fun ensureLib(): Boolean {
         if (libLoaded) return true
         return try {
             System.loadLibrary("python_jni")
             libLoaded = true
-            Log.i(TAG, "✅ Load python_jni.so OK")
+            Log.i(TAG, "✅ python_jni loaded")
             true
         } catch (t: Throwable) {
-            initError = "Không load được python_jni: ${t.message}"
-            Log.e(TAG, "❌ loadLibrary fail", t)
+            initError = "Không load python_jni: ${t.message}"
+            Log.e(TAG, "loadLibrary fail", t)
             false
         }
     }
@@ -40,7 +42,6 @@ object PythonBridge {
     fun lastError(): String? = initError
     fun isInitialized(): Boolean = initialized
 
-    /** PHẢI gọi từ thread nền. */
     @Synchronized
     fun init(app: Application): Boolean {
         if (initialized) return true
@@ -50,37 +51,40 @@ object PythonBridge {
 
         try {
             val nativeLibDir = app.applicationInfo.nativeLibraryDir
-            Log.i(TAG, "nativeLibDir: $nativeLibDir")
+            val pythonHome = File(app.filesDir, "python")
+            val marker = File(pythonHome, ".extracted")
 
-            val sitePackages = File(app.filesDir, "site-packages")
-            val marker = File(sitePackages, ".extracted")
+            // 1. Extract runtime tar lần đầu
             if (!marker.exists()) {
-                Log.i(TAG, "⏳ Extract site-packages...")
-                sitePackages.mkdirs()
-                copyAssetDir(app, "python/site-packages", sitePackages)
-                marker.writeText("ok")
-                Log.i(TAG, "✅ Extract xong")
+                Log.i(TAG, "⏳ Extract Python runtime (~30-60s lần đầu)...")
+                extractRuntimeTar(app, pythonHome)
+                marker.writeText(System.currentTimeMillis().toString())
+                Log.i(TAG, "✅ Python runtime extracted")
             } else {
-                Log.i(TAG, "✅ site-packages đã có sẵn")
+                Log.i(TAG, "✅ Python runtime đã có sẵn")
             }
 
-            // Copy yt_dlp_bridge.py
-            val scriptFile = File(app.filesDir, "yt_dlp_bridge.py")
+            // 2. Copy yt_dlp_bridge.py
+            val bridgeFile = File(app.filesDir, BRIDGE_FILE)
             try {
-                app.assets.open("yt_dlp_bridge.py").use { input ->
-                    scriptFile.outputStream().use { input.copyTo(it) }
+                app.assets.open(BRIDGE_FILE).use { input ->
+                    FileOutputStream(bridgeFile).use { output -> input.copyTo(output) }
                 }
-                Log.i(TAG, "✅ yt_dlp_bridge.py → ${scriptFile.absolutePath}")
+                Log.i(TAG, "✅ ${BRIDGE_FILE} → ${bridgeFile.absolutePath}")
             } catch (e: Exception) {
-                Log.w(TAG, "Không copy được yt_dlp_bridge.py", e)
+                Log.w(TAG, "Không copy được $BRIDGE_FILE", e)
             }
 
+            // 3. Call nativeInit
             Log.i(TAG, "⏳ nativeInit...")
+            Log.i(TAG, "  nativeLibDir = $nativeLibDir")
+            Log.i(TAG, "  pythonHome   = ${pythonHome.absolutePath}")
+            Log.i(TAG, "  filesDir     = ${app.filesDir.absolutePath}")
+
             initialized = nativeInit(
                 nativeLibDir,
-                sitePackages.absolutePath,
-                app.filesDir.absolutePath,
-                app.assets
+                pythonHome.absolutePath,
+                app.filesDir.absolutePath
             )
             Log.i(TAG, "✅ nativeInit kết quả: $initialized")
 
@@ -95,18 +99,49 @@ object PythonBridge {
         }
     }
 
-    private fun copyAssetDir(app: Application, assetPath: String, dest: File) {
-        val children = app.assets.list(assetPath) ?: return
-        if (children.isEmpty()) {
-            dest.parentFile?.mkdirs()
-            app.assets.open(assetPath).use { input ->
-                dest.outputStream().use { input.copyTo(it) }
+    /**
+     * Extract python-runtime.tar.gz từ assets vào filesDir/python.
+     * Cấu trúc tar:
+     *   ./bin/python3.11
+     *   ./lib/libpython3.11.so
+     *   ./lib/python3.11/os.py
+     *   ./lib/python3.11/lib-dynload/_ssl.*.so
+     *   ./lib/python3.11/site-packages/yt_dlp/...
+     */
+    private fun extractRuntimeTar(app: Application, destDir: File) {
+        destDir.mkdirs()
+
+        app.assets.open(RUNTIME_TAR).use { input ->
+            GzipCompressorInputStream(input).use { gzip ->
+                TarArchiveInputStream(gzip).use { tar ->
+                    var entry = tar.nextEntry
+                    var fileCount = 0
+
+                    while (entry != null) {
+                        val name = entry.name.removePrefix("./")
+                        if (name.isNotEmpty()) {
+                            val outFile = File(destDir, name)
+
+                            if (entry.isDirectory) {
+                                outFile.mkdirs()
+                            } else {
+                                outFile.parentFile?.mkdirs()
+                                FileOutputStream(outFile).use { output ->
+                                    tar.copyTo(output)
+                                }
+                                // Preserve executable bit
+                                if (entry.mode and 0b001_000_000 != 0) {
+                                    outFile.setExecutable(true)
+                                }
+                                fileCount++
+                            }
+                        }
+                        entry = tar.nextEntry
+                    }
+
+                    Log.i(TAG, "Extracted $fileCount files")
+                }
             }
-            return
-        }
-        dest.mkdirs()
-        for (child in children) {
-            copyAssetDir(app, "$assetPath/$child", File(dest, child))
         }
     }
 
