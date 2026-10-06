@@ -15,7 +15,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-        
+
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -49,17 +49,28 @@ android {
         }
     }
 
+    // Đảm bảo Gradle pick up jniLibs và assets
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDirs("src/main/jniLibs")
+            assets.srcDirs("src/main/assets")
+        }
+    }
+
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            // Không nén thư viện FFmpeg
-            keepDebugSymbols += "**/libffmpeg.so"
+            // Tránh conflict nếu có nhiều lib cùng tên
+            pickFirsts += listOf(
+                "**/libffmpeg.so",
+                "**/libffprobe.so"
+            )
         }
     }
 
     androidResources {
-        // Không nén các file binary trong assets
-        noCompress += listOf("zip", "so")
+        // Không nén các file binary trong assets (cần cho extract runtime)
+        noCompress += listOf("zip", "so", "ffmpeg", "ffprobe")
     }
 
     lint {
