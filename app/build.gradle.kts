@@ -28,8 +28,6 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
-                // Truyền đường dẫn tới Python runtime trong project
-                arguments += "-DPYTHON_RUNTIME_DIR=${projectDir}/src/main/assets/python"
             }
         }
     }
