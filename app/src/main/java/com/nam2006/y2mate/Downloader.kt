@@ -13,6 +13,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 
@@ -78,12 +79,9 @@ object Downloader {
         val destDir = File(app.filesDir, "ffmpeg")
         destDir.mkdirs()
         val destFfmpeg = File(destDir, "ffmpeg")
-
         try {
             app.assets.open("ffmpeg/ffmpeg").use { input ->
-                FileOutputStream(destFfmpeg).use { output ->
-                    input.copyTo(output)
-                }
+                FileOutputStream(destFfmpeg).use { output -> input.copyTo(output) }
             }
             nativeChmod(destFfmpeg.absolutePath)
             extractLibsFromAssets(destDir)
@@ -99,15 +97,11 @@ object Downloader {
                 val destLib = File(destDir, libName)
                 if (!destLib.exists()) {
                     app.assets.open("ffmpeg/lib/$libName").use { input ->
-                        FileOutputStream(destLib).use { output ->
-                            input.copyTo(output)
-                        }
+                        FileOutputStream(destLib).use { output -> input.copyTo(output) }
                     }
                 }
             }
-        } catch (e: Exception) {
-            // Không có thư viện phụ thuộc
-        }
+        } catch (_: Exception) {}
     }
 
     fun getFfmpegPath(): String? {
@@ -163,17 +157,15 @@ object Downloader {
         val module = py.getModule("yt_dlp_bridge")
         val cookiesFile = if (CookieStore.has(app)) CookieStore.file(app).absolutePath else ""
 
-        // PyObject.asMap() trả Map<PyObject, PyObject> → convert sang Map<String, Any>
-        val resultPy = module.callAttr("get_info", url, cookiesFile).asMap()
-        val result: Map<String, Any> = resultPy.entries.associate { entry ->
-            entry.key.toString() to (entry.value.toJava(Any::class.java) ?: "")
-        }
-
-        val title = result["title"]?.toString() ?: "(không có tiêu đề)"
-        val uploader = result["uploader"]?.toString() ?: ""
-        val duration = (result["duration"]?.toString()?.toDoubleOrNull() ?: 0.0).toInt()
-        val thumb = result["thumbnail"]?.toString()
-        return PreviewInfo(title, uploader, duration, thumb)
+        // Python trả JSON string → parse bằng org.json
+        val jsonStr = module.callAttr("get_info", url, cookiesFile).toString()
+        val json = JSONObject(jsonStr)
+        return PreviewInfo(
+            title = json.optString("title", "(không có tiêu đề)"),
+            uploader = json.optString("uploader", ""),
+            duration = json.optInt("duration", 0),
+            thumbnail = json.optString("thumbnail", "").ifEmpty { null },
+        )
     }
 
     fun checkYtDlpUpdate(): String {
@@ -217,36 +209,35 @@ object Downloader {
             val py = Python.getInstance()
             val module = py.getModule("yt_dlp_bridge")
 
-            // Dùng mutableMapOf<String, Any> — type K, V tường minh
-            val pyOptions: MutableMap<String, Any> = mutableMapOf()
-            pyOptions.put("format", formatSelector(o))
-            pyOptions.put("output_dir", dir.absolutePath)
-            pyOptions.put("output_template", if (o.playlist) {
-                "%(playlist_title).80B/%(playlist_index)03d - %(title).100B.%(ext)s"
-            } else {
-                "%(title).100B_%(id)s.%(ext)s"
-            })
-            pyOptions.put("playlist", o.playlist)
-            pyOptions.put("audio_only", o.audioOnly)
-            pyOptions.put("audio_format", o.audioFormat)
-            pyOptions.put("audio_bitrate", o.audioBitrate.toString())
+            // Xây options thành JSON string — tránh hoàn toàn Java Map bridging
+            val optionsJson = JSONObject().apply {
+                put("format", formatSelector(o))
+                put("output_dir", dir.absolutePath)
+                put("output_template", if (o.playlist) {
+                    "%(playlist_title).80B/%(playlist_index)03d - %(title).100B.%(ext)s"
+                } else {
+                    "%(title).100B_%(id)s.%(ext)s"
+                })
+                put("playlist", o.playlist)
+                put("audio_only", o.audioOnly)
+                put("audio_format", o.audioFormat)
+                put("audio_bitrate", o.audioBitrate.toString())
 
-            getFfmpegPath()?.let { pyOptions.put("ffmpeg_path", it) }
+                getFfmpegPath()?.let { put("ffmpeg_path", it) }
 
-            if (CookieStore.has(app)) {
-                pyOptions.put("cookies_file", CookieStore.file(app).absolutePath)
-            }
+                if (CookieStore.has(app)) {
+                    put("cookies_file", CookieStore.file(app).absolutePath)
+                }
+            }.toString()
 
-            // Gọi Python — convert kết quả Map<PyObject, PyObject> → Map<String, Any>
-            val resultPy = module.callAttr("download", url, pyOptions).asMap()
-            val result: Map<String, Any> = resultPy.entries.associate { entry ->
-                entry.key.toString() to (entry.value.toJava(Any::class.java) ?: "")
-            }
+            // Gọi Python — trả về JSON string
+            val resultJson = module.callAttr("download", url, optionsJson).toString()
+            val result = JSONObject(resultJson)
 
-            val success = (result["success"] as? Boolean) ?: false
-            val error = result["error"] as? String
+            val success = result.optBoolean("success", false)
+            val error = result.optString("error", "")
 
-            if (!success) throw IllegalStateException(error ?: "Tải thất bại")
+            if (!success) throw IllegalStateException(error.ifEmpty { "Tải thất bại" })
             if (cancelled) throw IllegalStateException("cancelled")
 
             val files = dir.walkTopDown().filter { it.isFile && !isTemp(it.name) }.toList()
