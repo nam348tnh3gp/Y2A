@@ -35,7 +35,9 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      # Bump version
+      # ==========================================================
+      # Bump version code
+      # ==========================================================
       - name: Bump version code
         id: bump
         run: |
@@ -49,6 +51,7 @@ jobs:
           if ! [[ "$CURRENT" =~ ^[0-9]+$ ]]; then CURRENT=0; fi
           NEW=$((CURRENT + 1))
           echo "$NEW" > versioncode.txt
+          echo "🔢 Version: $CURRENT → $NEW"
           echo "new_version=$NEW" >> "$GITHUB_OUTPUT"
 
       - name: Commit version bump
@@ -57,34 +60,72 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add versioncode.txt
-          if git diff --staged --quiet; then echo "no change"
+          if git diff --staged --quiet; then
+            echo "⚠️ Không có thay đổi"
           else
-            git commit -m "chore: bump to ${{ steps.bump.outputs.new_version }} [skip ci]"
+            git commit -m "chore: bump version code to ${{ steps.bump.outputs.new_version }} [skip ci]"
             git pull --rebase origin ${{ github.ref_name }} || true
             git push origin HEAD:${{ github.ref_name }}
           fi
 
-      # FFmpeg từ Termux
+      # ==========================================================
+      # Download FFmpeg from Termux
+      # ==========================================================
       - name: Download FFmpeg from Termux
         run: |
           set -e
+
           FFMPEG_VERSION="8.1.3"
           ARCH="aarch64"
           DEB_URL="https://packages.termux.dev/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
-          wget -q -O ffmpeg.deb "${DEB_URL}"
+
+          echo "📥 Downloading FFmpeg ${FFMPEG_VERSION} (${ARCH})..."
+          wget -q --show-progress -O ffmpeg.deb "${DEB_URL}" || {
+            echo "❌ Không tải được từ URL chính, thử mirror..."
+            wget -q -O ffmpeg.deb "https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
+          }
+
+          echo "📦 Extracting .deb..."
           mkdir -p ffmpeg-extracted
           dpkg-deb -xv ffmpeg.deb ./ffmpeg-extracted
+
           TERMUX_BIN="./ffmpeg-extracted/data/data/com.termux/files/usr/bin"
           TERMUX_LIB="./ffmpeg-extracted/data/data/com.termux/files/usr/lib"
-          mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/assets/ffmpeg/lib
+
+          if [ ! -f "${TERMUX_BIN}/ffmpeg" ]; then
+            echo "❌ Không tìm thấy ffmpeg binary!"
+            ls -la "${TERMUX_BIN}/" || true
+            exit 1
+          fi
+
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/assets/ffmpeg/lib
+
           cp "${TERMUX_BIN}/ffmpeg" app/src/main/jniLibs/arm64-v8a/libffmpeg.so
-          [ -f "${TERMUX_BIN}/ffprobe" ] && cp "${TERMUX_BIN}/ffprobe" app/src/main/jniLibs/arm64-v8a/libffprobe.so
-          find "${TERMUX_LIB}" -maxdepth 1 -type f \
-            \( -name "libav*.so*" -o -name "libsw*.so*" -o -name "libpostproc*.so*" \) \
-            -exec cp {} app/src/main/assets/ffmpeg/lib/ \;
+          if [ -f "${TERMUX_BIN}/ffprobe" ]; then
+            cp "${TERMUX_BIN}/ffprobe" app/src/main/jniLibs/arm64-v8a/libffprobe.so
+          fi
+
+          if [ -d "${TERMUX_LIB}" ]; then
+            echo "📚 Copying dependent libraries..."
+            find "${TERMUX_LIB}" -maxdepth 1 -type f \
+              \( -name "libav*.so*" -o -name "libsw*.so*" -o -name "libpostproc*.so*" \) \
+              -exec cp {} app/src/main/assets/ffmpeg/lib/ \;
+            ls -la app/src/main/assets/ffmpeg/lib/ | head -20
+          else
+            echo "⚠️ Không có thư mục lib"
+          fi
+
           chmod 755 app/src/main/jniLibs/arm64-v8a/libffmpeg.so
 
-      # Setup Python runtime — CHỈ copy .so + site-packages, KHÔNG tìm stdlib.zip
+          echo "✅ FFmpeg setup hoàn tất:"
+          ls -la app/src/main/jniLibs/arm64-v8a/
+          du -sh app/src/main/jniLibs/arm64-v8a/
+          du -sh app/src/main/assets/ffmpeg/lib/ 2>/dev/null || true
+
+      # ==========================================================
+      # Setup Python runtime (flet-dev/python-build)
+      # ==========================================================
       - name: Setup Python runtime
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -94,40 +135,69 @@ jobs:
           PY_VERSION="3.14"
           ABI="arm64-v8a"
 
-          # Lấy release tag
+          echo "═══════════════════════════════════════════"
+          echo "STEP 1: Xác định release"
+          echo "═══════════════════════════════════════════"
           LATEST_TAG=$(curl -sL \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/flet-dev/python-build/releases?per_page=30" \
             | jq -r '[.[].tag_name | select(test("^[0-9]{8}$"))][0]')
           [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ] && LATEST_TAG="20260921"
-          echo "✅ Release: $LATEST_TAG"
+          echo "✅ Release tag: $LATEST_TAG"
 
-          # Manifest
+          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "STEP 2: Tải manifest.json"
+          echo "═══════════════════════════════════════════"
           wget -q -O manifest.json "https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/manifest.json"
+          cat manifest.json
+          echo ""
+
           FULL_VERSION=$(jq -r --arg pv "$PY_VERSION" '.pythons[$pv].full_version // empty' manifest.json)
+          if [ -z "$FULL_VERSION" ]; then
+            echo "❌ Không có full_version cho $PY_VERSION"
+            jq -r '.pythons | keys[]' manifest.json
+            exit 1
+          fi
           echo "✅ Full version: $FULL_VERSION"
 
-          # Tarball
+          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "STEP 3: Tải tarball Python runtime"
+          echo "═══════════════════════════════════════════"
           TARBALL="python-android-dart-${FULL_VERSION}-${ABI}.tar.gz"
           URL="https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/${TARBALL}"
+          echo "URL: $URL"
+
           rm -rf "$WORKSPACE/_python_runtime"
           mkdir -p "$WORKSPACE/_python_runtime"
           cd "$WORKSPACE/_python_runtime"
-          wget -q -O "$TARBALL" "$URL"
+
+          wget -q --show-progress -O "$TARBALL" "$URL"
           tar -xzf "$TARBALL"
 
-          echo "Runtime files:"
+          echo ""
+          echo "📂 Nội dung sau extract:"
           ls -la
 
-          # Copy .so vào jniLibs
+          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "STEP 4: Copy .so vào jniLibs"
+          echo "═══════════════════════════════════════════"
           mkdir -p "$WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+
           for so in *.so; do
-            cp "$so" "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
-            echo "  ✅ $so"
+            if [ -f "$so" ]; then
+              cp "$so" "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
+              echo "  ✅ $so"
+            fi
           done
 
-          # Tải yt-dlp + certifi
+          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "STEP 5: Tải yt-dlp wheel và tạo sitepackages.zip"
+          echo "═══════════════════════════════════════════"
           rm -rf "$WORKSPACE/_wheels"
           mkdir -p "$WORKSPACE/_wheels"
           cd "$WORKSPACE/_wheels"
@@ -135,8 +205,11 @@ jobs:
           python3 -m pip download yt-dlp certifi \
             --no-deps --only-binary=:all: -d .
 
-          # Extract wheels vào site-packages (dạng folder)
-          SITE_PACKAGES="$WORKSPACE/app/src/main/assets/python/site-packages"
+          echo "Wheels downloaded:"
+          ls -la *.whl
+
+          # Giải nén wheels vào site-packages
+          SITE_PACKAGES="$WORKSPACE/_wheels/site-packages"
           rm -rf "$SITE_PACKAGES"
           mkdir -p "$SITE_PACKAGES"
 
@@ -145,52 +218,171 @@ jobs:
             unzip -q "$whl" -d "$SITE_PACKAGES"
           done
 
-          echo "site-packages:"
+          echo ""
+          echo "site-packages contents:"
           ls "$SITE_PACKAGES" | head -20
 
-          # Copy yt_dlp_bridge.py
-          cp "$WORKSPACE/app/src/main/python/yt_dlp_bridge.py" \
-             "$WORKSPACE/app/src/main/assets/yt_dlp_bridge.py"
-          echo "✅ yt_dlp_bridge.py → assets/"
+          # Nén thành sitepackages.zip
+          echo "📦 Tạo sitepackages.zip..."
+          cd "$SITE_PACKAGES"
+          zip -r "$WORKSPACE/_wheels/sitepackages.zip" . -q
+          cd "$WORKSPACE/_wheels"
 
-          # Verify
+          SITE_ZIP_SIZE=$(du -h sitepackages.zip | cut -f1)
+          echo "✅ sitepackages.zip: $SITE_ZIP_SIZE"
+
+          # Copy sitepackages.zip vào assets
+          mkdir -p "$WORKSPACE/app/src/main/assets/python"
+          cp "$WORKSPACE/_wheels/sitepackages.zip" "$WORKSPACE/app/src/main/assets/python/"
+          echo "✅ sitepackages.zip → assets/python/"
+
           echo ""
-          echo "jniLibs:"
+          echo "═══════════════════════════════════════════"
+          echo "STEP 6: Tìm và copy stdlib.zip"
+          echo "═══════════════════════════════════════════"
+          cd "$WORKSPACE/_python_runtime"
+
+          # Tìm stdlib.zip trong tarball đã extract
+          STDLIB_ZIP=$(find . -name "stdlib.zip" -o -name "python-stdlib.zip" 2>/dev/null | head -1)
+
+          if [ -n "$STDLIB_ZIP" ]; then
+            cp "$STDLIB_ZIP" "$WORKSPACE/app/src/main/assets/python/stdlib.zip"
+            STDLIB_SIZE=$(du -h "$STDLIB_ZIP" | cut -f1)
+            echo "✅ stdlib.zip ($STDLIB_SIZE) → assets/python/"
+          else
+            echo "⚠️ Không tìm thấy stdlib.zip trong tarball"
+            echo "Thử trích xuất từ libpythonbundle.so..."
+
+            # libpythonbundle.so chứa stdlib.zip được nhúng
+            # Dùng python để extract
+            python3 <<'PYEOF'
+import re
+import zipfile
+import io
+import os
+
+bundle_path = "_python_runtime/libpythonbundle.so"
+output_path = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "app/src/main/assets/python/stdlib.zip")
+
+if not os.path.exists(bundle_path):
+    print(f"❌ Không tìm thấy {bundle_path}")
+    exit(1)
+
+with open(bundle_path, "rb") as f:
+    data = f.read()
+
+# Tìm ZIP signature (PK\x03\x04) trong binary
+zip_sig = b"PK\x03\x04"
+positions = []
+idx = 0
+while True:
+    idx = data.find(zip_sig, idx)
+    if idx < 0:
+        break
+    positions.append(idx)
+    idx += 4
+
+print(f"Tìm thấy {len(positions)} vị trí có thể là ZIP")
+
+for pos in positions:
+    try:
+        # Thử parse từ vị trí này
+        bio = io.BytesIO(data[pos:])
+        with zipfile.ZipFile(bio, "r") as zf:
+            names = zf.namelist()
+            # Kiểm tra có phải stdlib không (phải có file .py)
+            py_files = [n for n in names if n.endswith(".py")]
+            if len(py_files) > 100:  # stdlib phải có hàng nghìn .py
+                print(f"✅ Tìm thấy stdlib tại offset {pos}: {len(names)} files, {len(py_files)} .py files")
+                # Ghi ra file
+                with open(output_path, "wb") as out:
+                    out.write(data[pos:])
+                print(f"✅ Đã ghi stdlib.zip ({os.path.getsize(output_path)} bytes)")
+                exit(0)
+    except Exception as e:
+        continue
+
+print("❌ Không tìm thấy stdlib.zip trong libpythonbundle.so")
+exit(1)
+PYEOF
+
+            if [ $? -ne 0 ]; then
+              echo "❌ Không có stdlib.zip — Python sẽ không chạy được"
+              exit 1
+            fi
+          fi
+
+          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "STEP 7: Copy yt_dlp_bridge.py vào assets"
+          echo "═══════════════════════════════════════════"
+          if [ -f "$WORKSPACE/app/src/main/python/yt_dlp_bridge.py" ]; then
+            cp "$WORKSPACE/app/src/main/python/yt_dlp_bridge.py" \
+               "$WORKSPACE/app/src/main/assets/yt_dlp_bridge.py"
+            echo "✅ yt_dlp_bridge.py → assets/"
+          else
+            echo "❌ Không tìm thấy app/src/main/python/yt_dlp_bridge.py"
+            find "$WORKSPACE/app" -name "yt_dlp_bridge.py" | head -5
+            exit 1
+          fi
+
+          echo ""
+          echo "═══════════════════════════════════════════"
+          echo "STEP 8: Verify"
+          echo "═══════════════════════════════════════════"
+          echo "📋 jniLibs:"
           ls -lh "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
           echo ""
-          echo "assets/python/:"
-          find "$WORKSPACE/app/src/main/assets/python" -maxdepth 2 | head -15
+          echo "📋 assets/python/:"
+          ls -lh "$WORKSPACE/app/src/main/assets/python/"
           echo ""
-          echo "Sizes:"
-          du -sh "$WORKSPACE/app/src/main/jniLibs/" "$WORKSPACE/app/src/main/assets/"
+          echo "📋 assets/ root:"
+          ls -lh "$WORKSPACE/app/src/main/assets/" | head -10
+          echo ""
+          echo "📊 Sizes:"
+          du -sh "$WORKSPACE/app/src/main/jniLibs/"
+          du -sh "$WORKSPACE/app/src/main/assets/"
+          echo ""
+          echo "✅ Setup Python runtime HOÀN TẤT"
 
-      # Debug keystore
+      # ==========================================================
+      # Setup debug keystore
+      # ==========================================================
       - name: Setup debug keystore
         run: |
           set -e
           mkdir -p ~/.android
           if [ -f "debug.keystore" ]; then
+            echo "🔐 Copy debug.keystore từ repo"
             cp debug.keystore ~/.android/debug.keystore
+            keytool -list -keystore ~/.android/debug.keystore -storepass android | head -5
           else
+            echo "⚠️ Tạo debug keystore tạm"
             keytool -genkey -v -keystore ~/.android/debug.keystore \
               -storepass android -alias androiddebugkey -keypass android \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      # Build
+      # ==========================================================
+      # Build APK
+      # ==========================================================
       - name: Build release APK
         run: gradle :app:assembleRelease --stacktrace
 
-      - name: Rename APK
+      - name: Rename APK with version
         run: |
           set -e
           VERSION=${{ steps.bump.outputs.new_version }}
           for f in app/build/outputs/apk/release/*.apk; do
-            [[ "$f" != *".apk" ]] || [[ "$f" == *"-unaligned"* ]] && continue
-            DIR=$(dirname "$f"); BASE=$(basename "$f" .apk)
-            mv "$f" "${DIR}/${BASE}-v${VERSION}.apk"
+            if [[ "$f" != *".apk" ]] || [[ "$f" == *"-unaligned"* ]]; then continue; fi
+            DIR=$(dirname "$f")
+            BASE=$(basename "$f" .apk)
+            NEW_NAME="${BASE}-v${VERSION}.apk"
+            mv "$f" "${DIR}/${NEW_NAME}"
+            echo "📦 Renamed: $f → ${DIR}/${NEW_NAME}"
           done
+          ls -la app/build/outputs/apk/release/
 
       - uses: actions/upload-artifact@v4
         with:
