@@ -35,9 +35,7 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      # ==========================================================
       # Bump version
-      # ==========================================================
       - name: Bump version code
         id: bump
         run: |
@@ -60,217 +58,97 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add versioncode.txt
-          if git diff --staged --quiet; then
-            echo "⚠️ Không có thay đổi"
+          if git diff --staged --quiet; then echo "no change"
           else
-            git commit -m "chore: bump version code to ${{ steps.bump.outputs.new_version }} [skip ci]"
+            git commit -m "chore: bump to ${{ steps.bump.outputs.new_version }} [skip ci]"
             git pull --rebase origin ${{ github.ref_name }} || true
             git push origin HEAD:${{ github.ref_name }}
           fi
 
       # ==========================================================
-      # ALL-IN-ONE: Download + Extract + Install + Integrate
+      # Setup Python runtime + yt-dlp (all-in-one)
       # ==========================================================
-      - name: Setup Python runtime (all-in-one)
+      - name: Setup Python runtime
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -ex
-
           WORKSPACE="$GITHUB_WORKSPACE"
           PY_VERSION="3.14"
           ABI="arm64-v8a"
-          RUNTIME_DIR="$WORKSPACE/_python_runtime"
 
-          echo "═══════════════════════════════════════════"
-          echo "STEP 1: Xác định release"
-          echo "═══════════════════════════════════════════"
-          cd "$WORKSPACE"
-
+          # ---- 1. Lấy release tag ----
           LATEST_TAG=$(curl -sL \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/flet-dev/python-build/releases?per_page=30" \
             | jq -r '[.[].tag_name | select(test("^[0-9]{8}$"))][0]')
-
           [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ] && LATEST_TAG="20260921"
-          echo "✅ Release tag: $LATEST_TAG"
+          echo "✅ Release: $LATEST_TAG"
 
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 2: Tải manifest"
-          echo "═══════════════════════════════════════════"
-          MANIFEST_URL="https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/manifest.json"
-          echo "URL: $MANIFEST_URL"
-
-          rm -f manifest.json
-          wget -q -O manifest.json "$MANIFEST_URL"
-
-          echo "Manifest content:"
-          cat manifest.json
-          echo ""
-
-          FULL_VERSION=$(jq -r --arg pv "$PY_VERSION" '.pythons[$pv].full_version // empty' manifest.json)
-          if [ -z "$FULL_VERSION" ]; then
-            echo "❌ Không có full_version"
-            jq -r '.pythons | keys[]' manifest.json
-            exit 1
-          fi
+          # ---- 2. Manifest ----
+          wget -q -O manifest.json "https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/manifest.json"
+          FULL_VERSION=$(jq -r --arg pv "$PY_VERSION" '.pythons[$pv].full_version' manifest.json)
           echo "✅ Full version: $FULL_VERSION"
 
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 3: Tải tarball"
-          echo "═══════════════════════════════════════════"
+          # ---- 3. Tải tarball ----
           TARBALL="python-android-dart-${FULL_VERSION}-${ABI}.tar.gz"
           URL="https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/${TARBALL}"
-          echo "URL: $URL"
-
-          rm -rf "$RUNTIME_DIR"
-          mkdir -p "$RUNTIME_DIR"
-          cd "$RUNTIME_DIR"
-
+          rm -rf "$WORKSPACE/_python_runtime"
+          mkdir -p "$WORKSPACE/_python_runtime"
+          cd "$WORKSPACE/_python_runtime"
           wget -q -O "$TARBALL" "$URL"
-          ls -la "$RUNTIME_DIR"
-
-          SIZE=$(stat -c%s "$TARBALL")
-          echo "📦 Tarball size: $SIZE bytes"
-
-          if [ "$SIZE" -lt 1000000 ]; then
-            echo "❌ Tarball quá nhỏ"
-            head -c 500 "$TARBALL"
-            exit 1
-          fi
-
-          echo "File type:"
-          file "$TARBALL"
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 4: Extract tarball"
-          echo "═══════════════════════════════════════════"
           tar -xzf "$TARBALL"
 
-          echo "After extract:"
-          ls -la "$RUNTIME_DIR"
+          echo "Runtime files:"
+          ls -la
 
-          echo ""
-          echo "Full directory tree (depth 3):"
-          find "$RUNTIME_DIR" -maxdepth 3 -type d | sort | head -40
-
-          echo ""
-          echo "Tìm os.py:"
-          find "$RUNTIME_DIR" -name "os.py" | head -5
-
-          echo ""
-          echo "Tìm libpython:"
-          find "$RUNTIME_DIR" -name "libpython*.so" | head -5
-
-          echo ""
-          echo "Tìm Python.h:"
-          find "$RUNTIME_DIR" -name "Python.h" | head -5
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 5: Tìm stdlib"
-          echo "═══════════════════════════════════════════"
-          STDLIB_DIR=$(find "$RUNTIME_DIR" -type f -name "os.py" -exec dirname {} \; | head -1)
-
-          if [ -z "$STDLIB_DIR" ]; then
-            echo "❌ Không có stdlib. Nội dung runtime:"
-            find "$RUNTIME_DIR" -type f | head -30
-            exit 1
-          fi
-
-          echo "✅ Stdlib dir: $STDLIB_DIR"
-          echo "Content:"
-          ls "$STDLIB_DIR" | head -20
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 6: Cài pip + yt-dlp"
-          echo "═══════════════════════════════════════════"
-          SITE_PACKAGES="$STDLIB_DIR/site-packages"
-          mkdir -p "$SITE_PACKAGES"
-
-          python3 -m pip install --upgrade pip
-          python3 -m pip install --target="$SITE_PACKAGES" \
-            --no-compile --only-binary=:all: --no-deps \
-            yt-dlp certifi
-
-          echo "✅ Đã cài:"
-          ls -la "$SITE_PACKAGES/"
-
-          echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 7: Copy vào Android project"
-          echo "═══════════════════════════════════════════"
-
-          # 7a. libpython → jniLibs
-          LIBPY=$(find "$RUNTIME_DIR" -name "libpython*.so" | head -1)
-          if [ -z "$LIBPY" ]; then
-            echo "❌ Không có libpython"
-            find "$RUNTIME_DIR" -name "*.so" | head -20
-            exit 1
-          fi
-
+          # ---- 4. Copy .so vào jniLibs ----
           mkdir -p "$WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-          cp "$LIBPY" "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/libpython3.14.so"
-          echo "✅ libpython → jniLibs"
+          for so in libpython3.14.so libpythonbundle.so libcrypto_python.so libsqlite3_python.so libssl_python.so; do
+            if [ -f "$so" ]; then
+              cp "$so" "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
+              echo "  ✅ $so"
+            fi
+          done
 
-          # 7b. stdlib → assets
-          STDLIB_NAME=$(basename "$STDLIB_DIR")
-          mkdir -p "$WORKSPACE/app/src/main/assets/python"
-          cp -r "$STDLIB_DIR" "$WORKSPACE/app/src/main/assets/python/"
-          echo "✅ stdlib → assets/python/$STDLIB_NAME"
+          # ---- 5. Tải yt-dlp wheel (pure Python) ----
+          echo "📥 Downloading yt-dlp wheel..."
+          mkdir -p "$WORKSPACE/_wheels"
+          cd "$WORKSPACE/_wheels"
+          python3 -m pip download yt-dlp certifi \
+            --no-deps --only-binary=:all: -d .
 
-          # 7c. Headers → cpp/include
-          INCLUDE_DIR=$(find "$RUNTIME_DIR" -name "Python.h" -exec dirname {} \; | head -1)
-          if [ -n "$INCLUDE_DIR" ]; then
-            mkdir -p "$WORKSPACE/app/src/main/cpp/include"
-            cp -r "$INCLUDE_DIR"/* "$WORKSPACE/app/src/main/cpp/include/"
-            echo "✅ Headers → cpp/include/"
-          else
-            echo "⚠️ Không có Python.h"
-          fi
+          ls -la
 
-          # 7d. Native .so khác → jniLibs
-          find "$RUNTIME_DIR" -name "*.so" ! -name "libpython*.so" | while read -r so; do
-            name=$(basename "$so")
-            [[ "$name" =~ ^(lib.+\.so)\.[0-9]+$ ]] && name="${BASH_REMATCH[1]}"
-            cp "$so" "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/$name" 2>/dev/null || true
-            echo "  📚 $name"
+          # ---- 6. Extract wheels vào assets/python/site-packages ----
+          SITE_PACKAGES="$WORKSPACE/app/src/main/assets/python/site-packages"
+          mkdir -p "$SITE_PACKAGES"
+          cd "$WORKSPACE/_wheels"
+
+          for whl in *.whl; do
+            echo "  Extracting: $whl"
+            unzip -q "$whl" -d "$SITE_PACKAGES"
           done
 
           echo ""
-          echo "═══════════════════════════════════════════"
-          echo "STEP 8: Verify"
-          echo "═══════════════════════════════════════════"
+          echo "site-packages contents:"
+          ls "$SITE_PACKAGES" | head -20
+
+          echo ""
+          echo "=== DONE ==="
           echo "jniLibs:"
           ls -lh "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
-          echo ""
-          echo "assets/python:"
-          ls -lh "$WORKSPACE/app/src/main/assets/python/"
-          echo ""
-          echo "cpp/include:"
-          ls "$WORKSPACE/app/src/main/cpp/include/" 2>/dev/null | head -5
-          echo ""
-          echo "Sizes:"
-          du -sh "$WORKSPACE/app/src/main/jniLibs/"
-          du -sh "$WORKSPACE/app/src/main/assets/"
-          echo ""
-          echo "✅ HOÀN TẤT"
+          echo "site-packages size:"
+          du -sh "$SITE_PACKAGES"
 
-      # ==========================================================
-      # Setup debug keystore
-      # ==========================================================
+      # Setup keystore
       - name: Setup debug keystore
         run: |
           set -e
           mkdir -p ~/.android
           if [ -f "debug.keystore" ]; then
             cp debug.keystore ~/.android/debug.keystore
-            keytool -list -keystore ~/.android/debug.keystore -storepass android | head -5
           else
             keytool -genkey -v -keystore ~/.android/debug.keystore \
               -storepass android -alias androiddebugkey -keypass android \
@@ -278,9 +156,7 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      # ==========================================================
       # Build APK
-      # ==========================================================
       - name: Build release APK
         run: gradle :app:assembleRelease --stacktrace
 
