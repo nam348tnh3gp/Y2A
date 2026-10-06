@@ -10,17 +10,24 @@ import com.chaquo.python.Python
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.abs
 
 object Downloader {
     private const val PROCESS_ID = "y2m-current"
     private val SAFE = setOf("mp4", "mkv", "webm")
     private val LOSSLESS = setOf("flac", "wav", "alac")
+    private const val POLL_INTERVAL_MS = 1000L
+    private const val PROGRESS_DELTA = 0.005f  // 0.5%
 
     private lateinit var app: Application
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -43,9 +50,17 @@ object Downloader {
         app = application
         scope.launch {
             try {
-                val py = Python.getInstance()
-                py.getModule("yt_dlp_bridge")
-                prepareFfmpeg()
+                // Chạy song song: FFmpeg chuẩn bị và Python init cùng lúc
+                coroutineScope {
+                    val jobs = listOf(
+                        async { prepareFfmpeg() },
+                        async {
+                            val py = Python.getInstance()
+                            py.getModule("yt_dlp_bridge")
+                        }
+                    )
+                    jobs.awaitAll()
+                }
                 ready.value = true
             } catch (t: Throwable) {
                 val root = t.cause ?: t
@@ -198,7 +213,7 @@ object Downloader {
         }
     }
 
-    private fun runDownload(url: String, o: Options): List<SavedFile> {
+    private suspend fun runDownload(url: String, o: Options): List<SavedFile> {
         val root = app.getExternalFilesDir("tmp") ?: File(app.filesDir, "tmp")
         val dir = File(root, Integer.toHexString((url + o.toString()).hashCode()))
         dir.mkdirs()
@@ -208,7 +223,6 @@ object Downloader {
             val py = Python.getInstance()
             val module = py.getModule("yt_dlp_bridge")
 
-            // Xây options thành JSON string — tránh hoàn toàn Java Map bridging
             val optionsJson = JSONObject().apply {
                 put("format", formatSelector(o))
                 put("output_dir", dir.absolutePath)
@@ -221,26 +235,31 @@ object Downloader {
                 put("audio_only", o.audioOnly)
                 put("audio_format", o.audioFormat)
                 put("audio_bitrate", o.audioBitrate.toString())
-
-                // THÊM 2 DÒNG NÀY:
                 put("video_format", o.videoFormat)
                 put("iphone", o.iphone)
-
                 getFfmpegPath()?.let { put("ffmpeg_path", it) }
-
                 if (CookieStore.has(app)) {
                     put("cookies_file", CookieStore.file(app).absolutePath)
                 }
             }.toString()
 
-            val resultJson = module.callAttr("download", url, optionsJson).toString()
-            val result = JSONObject(resultJson)
+            // Chạy download + poll progress song song
+            val downloadDeferred = scope.async(Dispatchers.IO) {
+                module.callAttr("download", url, optionsJson).toString()
+            }
+            val pollDeferred = scope.async(Dispatchers.IO) {
+                pollProgress(module)
+            }
 
+            val resultJson = downloadDeferred.await()
+            cancelled = true  // dừng poll
+            pollDeferred.await()
+
+            val result = JSONObject(resultJson)
             val success = result.optBoolean("success", false)
             val error = result.optString("error", "")
 
             if (!success) throw IllegalStateException(error.ifEmpty { "Tải thất bại" })
-            if (cancelled) throw IllegalStateException("cancelled")
 
             val files = dir.walkTopDown().filter { it.isFile && !isTemp(it.name) }.toList()
             if (files.isEmpty()) throw IllegalStateException("Không tìm thấy file đã tải")
@@ -256,6 +275,51 @@ object Downloader {
         } catch (t: Throwable) {
             if (cancelled) dir.deleteRecursively()
             throw t
+        }
+    }
+
+    /**
+     * Poll progress mỗi 1s, chỉ update UI khi delta >= 0.5%.
+     * Tránh recomposition không cần thiết do state thay đổi li ti.
+     */
+    private suspend fun pollProgress(module: com.chaquo.python.PyObject) {
+        var lastPct = -1f
+        var lastLabel = ""
+        while (!cancelled) {
+            try {
+                val progressJson = module.callAttr("get_progress", "{}").toString()
+                val json = JSONObject(progressJson)
+                val pct = json.optDouble("percent", 0.0).toFloat() / 100f
+                val speed = json.optString("speed", "").trim()
+                val eta = json.optLong("eta", -1L)
+                val status = json.optString("status", "idle")
+
+                if (status == "idle") break
+                if (status == "error") break
+
+                if (abs(pct - lastPct) < PROGRESS_DELTA && lastPct >= 0) {
+                    delay(POLL_INTERVAL_MS)
+                    continue
+                }
+
+                val label = when {
+                    pct >= 1f || status == "finished" -> "⚙️ Đang xử lý…"
+                    else -> "⬇️ Đang tải…"
+                }
+
+                if (label != lastLabel || abs(pct - lastPct) >= PROGRESS_DELTA) {
+                    state.update { s ->
+                        if (s is DlState.Running) {
+                            DlState.Running(label, pct.coerceIn(0f, 1f), speed, eta)
+                        } else s
+                    }
+                    lastPct = pct
+                    lastLabel = label
+                }
+            } catch (_: Throwable) {
+                break
+            }
+            delay(POLL_INTERVAL_MS)
         }
     }
 
