@@ -1,7 +1,9 @@
 #include <jni.h>
 #include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>   // <-- THÊM DÒNG NÀY (cho waitpid)
 #include <unistd.h>
+#include <cerrno>       // <-- THÊM (cho errno)
 #include <android/log.h>
 #include <cstdlib>
 #include <cstring>
@@ -23,10 +25,10 @@ Java_com_nam2006_y2mate_Downloader_nativeChmod(JNIEnv *env, jobject /* this */, 
     env->ReleaseStringUTFChars(path, cPath);
 
     if (result == 0) {
-        LOGI("chmod 755 successful: %s", cPath);
+        LOGI("chmod 755 successful");
         return JNI_TRUE;
     } else {
-        LOGE("chmod 755 failed: %s, errno: %d", cPath, errno);
+        LOGE("chmod 755 failed, errno: %d", errno);
         return JNI_FALSE;
     }
 }
@@ -40,13 +42,15 @@ Java_com_nam2006_y2mate_Downloader_nativeExecFfmpeg(JNIEnv *env, jobject /* this
 
     jsize argCount = env->GetArrayLength(args);
     std::vector<const char*> argv;
-    
+    std::vector<jstring> jArgs;
+
     // Dùng linker64 để gọi binary (vượt noexec)
     argv.push_back("/system/bin/linker64");
     argv.push_back(cBinary);
 
     for (jsize i = 0; i < argCount; i++) {
         jstring jArg = (jstring) env->GetObjectArrayElement(args, i);
+        jArgs.push_back(jArg);
         const char *cArg = env->GetStringUTFChars(jArg, nullptr);
         argv.push_back(cArg);
     }
@@ -59,17 +63,20 @@ Java_com_nam2006_y2mate_Downloader_nativeExecFfmpeg(JNIEnv *env, jobject /* this
         LOGE("execv failed: %s", strerror(errno));
         _exit(127);
     } else if (pid > 0) {
-        // Parent process
+        // Parent process: chờ child
         int status;
-        waitpid(pid, &status, 0);
-        
+        if (waitpid(pid, &status, 0) < 0) {
+            LOGE("waitpid failed: %s", strerror(errno));
+            env->ReleaseStringUTFChars(binaryPath, cBinary);
+            return -1;
+        }
+
         // Cleanup
-        for (size_t i = 2; i < argv.size() - 1; i++) {
-            env->ReleaseStringUTFChars(
-                (jstring) env->GetObjectArrayElement(args, i - 2), argv[i]);
+        for (size_t i = 0; i < jArgs.size(); i++) {
+            env->ReleaseStringUTFChars(jArgs[i], argv[i + 2]);
         }
         env->ReleaseStringUTFChars(binaryPath, cBinary);
-        
+
         return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     }
 
