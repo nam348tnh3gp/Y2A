@@ -14,58 +14,6 @@ class DownloadProgress:
 
 current_progress = DownloadProgress()
 
-def _to_py_dict(java_map):
-    """
-    Convert Java Map (LinkedHashMap/HashMap) → Python dict.
-    
-    Chaquopy không cho Python iterate Java collection trực tiếp.
-    Phải dùng Java Iterator: hasNext() / next().
-    """
-    if java_map is None:
-        return {}
-
-    # Đã là Python dict
-    if isinstance(java_map, dict):
-        return java_map
-
-    # Nếu là Java Map → dùng entrySet().iterator()
-    if hasattr(java_map, 'entrySet'):
-        result = {}
-        entry_set = java_map.entrySet()
-        it = entry_set.iterator()
-        while it.hasNext():
-            entry = it.next()
-            key = str(entry.getKey())
-            value = entry.getValue()
-            result[key] = value
-        return result
-
-    # Fallback: thử dict() trực tiếp
-    try:
-        return dict(java_map)
-    except Exception:
-        return {}
-
-def _to_py_list(java_list):
-    """
-    Convert Java List → Python list bằng Iterator.
-    Dùng cho trường hợp sau này cần truyền List từ Kotlin.
-    """
-    if java_list is None:
-        return []
-    if isinstance(java_list, list):
-        return java_list
-    if hasattr(java_list, 'iterator'):
-        result = []
-        it = java_list.iterator()
-        while it.hasNext():
-            result.append(it.next())
-        return result
-    try:
-        return list(java_list)
-    except Exception:
-        return []
-
 def progress_hook(d):
     global current_progress
     status = d.get('status')
@@ -111,18 +59,24 @@ def get_info(url, cookies_file=""):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            return {
+            return json.dumps({
                 'title': info.get('title', ''),
                 'uploader': info.get('uploader', ''),
                 'duration': info.get('duration', 0) or 0,
-                'thumbnail': info.get('thumbnail'),
-            }
+                'thumbnail': info.get('thumbnail') or '',
+            })
     except Exception:
-        return {'title': '', 'uploader': '', 'duration': 0, 'thumbnail': None}
+        return json.dumps({'title': '', 'uploader': '', 'duration': 0, 'thumbnail': ''})
 
-def download(url, options):
-    # ⚠️ Convert Java Map → Python dict bằng Iterator (không dùng dict())
-    options = _to_py_dict(options)
+def download(url, options_json):
+    """
+    Nhận options dưới dạng JSON string từ Kotlin.
+    Không bridge Java Map → tránh mọi lỗi Chaquopy iteration.
+    """
+    try:
+        options = json.loads(options_json)
+    except Exception as e:
+        return json.dumps({'success': False, 'error': f'Invalid options JSON: {e}'})
 
     global current_progress
     current_progress = DownloadProgress()
@@ -172,8 +126,8 @@ def download(url, options):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        return {'success': True, 'error': None}
+        return json.dumps({'success': True, 'error': None})
     except Exception as e:
         current_progress.error = str(e)
         current_progress.status = "error"
-        return {'success': False, 'error': str(e)}
+        return json.dumps({'success': False, 'error': str(e)})
