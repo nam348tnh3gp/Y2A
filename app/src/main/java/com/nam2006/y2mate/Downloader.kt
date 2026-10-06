@@ -30,12 +30,10 @@ object Downloader {
     val ready = MutableStateFlow(false)
     val initError = MutableStateFlow<String?>(null)
 
-    // JNI methods — khai báo trực tiếp trong object, không cần companion
     private external fun nativeChmod(path: String): Boolean
     private external fun nativeExecFfmpeg(binaryPath: String, args: Array<String>): Int
     private external fun nativeCanExecute(path: String): Boolean
 
-    // Init block thay cho companion object
     init {
         System.loadLibrary("ffmpeg_jni")
     }
@@ -55,7 +53,6 @@ object Downloader {
         }
     }
 
-    /** Chuẩn bị FFmpeg: copy từ jniLibs, chmod, và extract các thư viện phụ thuộc. */
     private fun prepareFfmpeg() {
         val nativeLibDir = app.applicationInfo.nativeLibraryDir
         val ffmpegInLib = File(nativeLibDir, "libffmpeg.so")
@@ -165,7 +162,13 @@ object Downloader {
         val py = Python.getInstance()
         val module = py.getModule("yt_dlp_bridge")
         val cookiesFile = if (CookieStore.has(app)) CookieStore.file(app).absolutePath else ""
-        val result = module.callAttr("get_info", url, cookiesFile).asMap()
+
+        // PyObject.asMap() trả Map<PyObject, PyObject> → convert sang Map<String, Any>
+        val resultPy = module.callAttr("get_info", url, cookiesFile).asMap()
+        val result: Map<String, Any> = resultPy.entries.associate { entry ->
+            entry.key.toString() to (entry.value.toJava(Any::class.java) ?: "")
+        }
+
         val title = result["title"]?.toString() ?: "(không có tiêu đề)"
         val uploader = result["uploader"]?.toString() ?: ""
         val duration = (result["duration"]?.toString()?.toDoubleOrNull() ?: 0.0).toInt()
@@ -214,34 +217,34 @@ object Downloader {
             val py = Python.getInstance()
             val module = py.getModule("yt_dlp_bridge")
 
-            // Map<String, Any> tường minh để tránh lỗi type inference
-            val pyOptions: MutableMap<String, Any> = LinkedHashMap()
-            pyOptions["format"] = formatSelector(o)
-            pyOptions["output_dir"] = dir.absolutePath
-            pyOptions["output_template"] = if (o.playlist) {
+            // Dùng mutableMapOf<String, Any> — type K, V tường minh
+            val pyOptions: MutableMap<String, Any> = mutableMapOf()
+            pyOptions.put("format", formatSelector(o))
+            pyOptions.put("output_dir", dir.absolutePath)
+            pyOptions.put("output_template", if (o.playlist) {
                 "%(playlist_title).80B/%(playlist_index)03d - %(title).100B.%(ext)s"
             } else {
                 "%(title).100B_%(id)s.%(ext)s"
-            }
-            pyOptions["playlist"] = o.playlist
-            pyOptions["audio_only"] = o.audioOnly
-            pyOptions["audio_format"] = o.audioFormat
-            pyOptions["audio_bitrate"] = o.audioBitrate.toString()
+            })
+            pyOptions.put("playlist", o.playlist)
+            pyOptions.put("audio_only", o.audioOnly)
+            pyOptions.put("audio_format", o.audioFormat)
+            pyOptions.put("audio_bitrate", o.audioBitrate.toString())
 
-            getFfmpegPath()?.let { pyOptions["ffmpeg_path"] = it }
+            getFfmpegPath()?.let { pyOptions.put("ffmpeg_path", it) }
 
             if (CookieStore.has(app)) {
-                pyOptions["cookies_file"] = CookieStore.file(app).absolutePath
+                pyOptions.put("cookies_file", CookieStore.file(app).absolutePath)
             }
 
-            // Gọi hàm Python — kết quả là PyObject, convert sang Map<String, Any>
-            val resultPy = module.callAttr("download", url, pyOptions)
-            val resultMap: Map<String, Any> = resultPy.asMap().entries.associate { (k, v) ->
-                k.toString() to (v.toJava(Any::class.java) ?: "")
+            // Gọi Python — convert kết quả Map<PyObject, PyObject> → Map<String, Any>
+            val resultPy = module.callAttr("download", url, pyOptions).asMap()
+            val result: Map<String, Any> = resultPy.entries.associate { entry ->
+                entry.key.toString() to (entry.value.toJava(Any::class.java) ?: "")
             }
 
-            val success = (resultMap["success"] as? Boolean) ?: false
-            val error = resultMap["error"] as? String
+            val success = (result["success"] as? Boolean) ?: false
+            val error = result["error"] as? String
 
             if (!success) throw IllegalStateException(error ?: "Tải thất bại")
             if (cancelled) throw IllegalStateException("cancelled")
