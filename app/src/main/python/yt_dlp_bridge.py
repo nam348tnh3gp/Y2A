@@ -6,12 +6,11 @@ import urllib.request
 
 try:
     from yt_dlp.utils import DownloadCancelled as _CancelBase
-except Exception:  # bản yt-dlp cũ
+except Exception:
     _CancelBase = Exception
 
 
 class UserCancelled(_CancelBase):
-    """Người dùng bấm Hủy. Kế thừa DownloadCancelled để yt-dlp không nuốt lỗi khi ignoreerrors (playlist)."""
     def __init__(self, msg="cancelled"):
         super().__init__(msg)
 
@@ -50,17 +49,12 @@ def progress_hook(d):
         current_progress.filename = d.get('filename', '')
 
 
-# ============================================================
-# JSON API cho JNI (Kotlin gọi qua PythonBridge.callFunction)
-# ============================================================
-
 def get_info_json(args_json):
-    """args: {"url": "...", "cookies_file": "..."}"""
     try:
         args = json.loads(args_json)
         url = args.get("url", "")
         cookies_file = args.get("cookies_file", "")
-    except Exception as e:
+    except Exception:
         return json.dumps({'title': '', 'uploader': '', 'duration': 0, 'thumbnail': ''})
 
     ydl_opts = {
@@ -68,7 +62,7 @@ def get_info_json(args_json):
         'no_warnings': True,
         'noplaylist': True,
         'skip_download': True,
-        'socket_timeout': 20,      # tránh treo vô hạn khi mạng chập chờn
+        'socket_timeout': 20,
         'retries': 2,
         'extractor_retries': 1,
     }
@@ -92,7 +86,6 @@ def get_info_json(args_json):
 
 
 def get_progress_json(_args_json="{}"):
-    """Kotlin gọi định kỳ để lấy tiến độ."""
     p = current_progress
     return json.dumps({
         'status': p.status,
@@ -104,13 +97,11 @@ def get_progress_json(_args_json="{}"):
 
 
 def cancel_json(_args_json="{}"):
-    """Đặt cờ hủy; progress_hook sẽ raise ở lần gọi kế tiếp."""
     _cancel.set()
     return json.dumps({'success': True})
 
 
 def check_versions_json(args_json):
-    """args: {} → {"installed": "...", "latest": "..."}"""
     try:
         installed = yt_dlp.version.__version__
     except Exception:
@@ -128,7 +119,6 @@ def check_versions_json(args_json):
 
 
 def download_json(options_json):
-    """args: toàn bộ options từ Kotlin → {"success": bool, "error": str}"""
     try:
         options = json.loads(options_json)
     except Exception as e:
