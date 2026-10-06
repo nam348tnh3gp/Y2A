@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -22,7 +22,75 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      # Tạo sẵn khóa debug để ký APK release (cài trực tiếp, không dùng cho Google Play)
+      # Tải FFmpeg từ Termux và đặt vào đúng vị trí
+      - name: Download FFmpeg from Termux
+        run: |
+          set -e
+          
+          # Phiên bản FFmpeg từ Termux (có thể pin hoặc để latest)
+          FFMPEG_VERSION="8.1.3"
+          ARCH="aarch64"
+          DEB_URL="https://packages.termux.dev/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
+          
+          echo "📥 Downloading FFmpeg ${FFMPEG_VERSION} (${ARCH})..."
+          wget -q --show-progress -O ffmpeg.deb "${DEB_URL}" || {
+            echo "❌ Không tải được từ URL chính, thử mirror..."
+            # Mirror dự phòng
+            wget -q -O ffmpeg.deb "https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
+          }
+          
+          echo "📦 Extracting .deb..."
+          mkdir -p ffmpeg-extracted
+          dpkg-deb -xv ffmpeg.deb ./ffmpeg-extracted
+          
+          # Đường dẫn trong gói .deb của Termux
+          TERMUX_BIN="./ffmpeg-extracted/data/data/com.termux/files/usr/bin"
+          TERMUX_LIB="./ffmpeg-extracted/data/data/com.termux/files/usr/lib"
+          
+          # Kiểm tra binary tồn tại
+          if [ ! -f "${TERMUX_BIN}/ffmpeg" ]; then
+            echo "❌ Không tìm thấy ffmpeg binary!"
+            ls -la "${TERMUX_BIN}/" || true
+            exit 1
+          fi
+          
+          # Tạo thư mục đích
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/assets/ffmpeg/lib
+          
+          # Copy binary ffmpeg -> libffmpeg.so (Android yêu cầu prefix "lib" + suffix ".so" để cài vào nativeLibraryDir)
+          cp "${TERMUX_BIN}/ffmpeg" app/src/main/jniLibs/arm64-v8a/libffmpeg.so
+          
+          # Copy ffprobe (nếu có) -> libffprobe.so
+          if [ -f "${TERMUX_BIN}/ffprobe" ]; then
+            cp "${TERMUX_BIN}/ffprobe" app/src/main/jniLibs/arm64-v8a/libffprobe.so
+          fi
+          
+          # Copy các thư viện .so phụ thuộc vào assets
+          if [ -d "${TERMUX_LIB}" ]; then
+            echo "📚 Copying dependent libraries..."
+            # Chỉ copy các thư viện cần thiết (av*, sw*, postproc, etc.)
+            find "${TERMUX_LIB}" -maxdepth 1 -type f \
+              \( -name "libav*.so*" -o -name "libsw*.so*" -o -name "libpostproc*.so*" \) \
+              -exec cp {} app/src/main/assets/ffmpeg/lib/ \;
+            
+            # Liệt kê để verify
+            ls -la app/src/main/assets/ffmpeg/lib/ | head -20
+          else
+            echo "⚠️ Không có thư mục lib (FFmpeg có thể là static binary)"
+          fi
+          
+          # Cấp quyền thực thi cho binary (không cần thiết trên CI nhưng để chắc chắn)
+          chmod 755 app/src/main/jniLibs/arm64-v8a/libffmpeg.so
+          
+          echo "✅ FFmpeg setup hoàn tất:"
+          ls -la app/src/main/jniLibs/arm64-v8a/
+          echo ""
+          echo "📊 Kích thước:"
+          du -sh app/src/main/jniLibs/arm64-v8a/
+          du -sh app/src/main/assets/ffmpeg/lib/ 2>/dev/null || true
+
+      # Tạo debug keystore để ký APK release
       - name: Create debug keystore
         run: |
           mkdir -p ~/.android
