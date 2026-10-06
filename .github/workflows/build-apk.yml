@@ -109,7 +109,7 @@ jobs:
           ls -la app/src/main/jniLibs/arm64-v8a/
 
       # ==========================================================
-      # Setup Python runtime (flet-dev/python-build)
+      # Setup Python runtime (PBS from flet-dev/python-android)
       # ==========================================================
       - name: Setup Python runtime
         env:
@@ -117,39 +117,29 @@ jobs:
         run: |
           set -ex
           WORKSPACE="$GITHUB_WORKSPACE"
-          PY_VERSION="3.14"
+
+          # ---- STEP 1: Tải Python runtime từ flet-dev/python-android ----
+          # Đây là bản build dựa trên PBS, đã patch cho Android
+          echo "═══ STEP 1: Download Python 3.12 runtime ═══"
+          PYTHON_VERSION="3.12"
+          PYTHON_FULL_VERSION="3.12.14"
           ABI="arm64-v8a"
 
-          # ---- STEP 1: Lấy release ----
-          echo "═══ STEP 1: Tìm release ═══"
-          LATEST_TAG=$(curl -sL \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/flet-dev/python-build/releases?per_page=30" \
-            | jq -r '[.[].tag_name | select(test("^[0-9]{8}$"))][0]')
-          [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ] && LATEST_TAG="20260921"
-          echo "✅ Release: $LATEST_TAG"
+          # URL tarball từ flet-dev/python-android releases
+          TARBALL="python-android-dart-${PYTHON_FULL_VERSION}-${ABI}.tar.gz"
+          URL="https://github.com/flet-dev/python-build/releases/download/20260921/${TARBALL}"
 
-          # ---- STEP 2: Manifest ----
-          echo "═══ STEP 2: Manifest ═══"
-          wget -q -O manifest.json "https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/manifest.json"
-          FULL_VERSION=$(jq -r --arg pv "$PY_VERSION" '.pythons[$pv].full_version // empty' manifest.json)
-          [ -z "$FULL_VERSION" ] && { echo "❌ No full_version"; exit 1; }
-          echo "✅ Full version: $FULL_VERSION"
-
-          # ---- STEP 3: Tải tarball ----
-          echo "═══ STEP 3: Download tarball ═══"
-          TARBALL="python-android-dart-${FULL_VERSION}-${ABI}.tar.gz"
-          URL="https://github.com/flet-dev/python-build/releases/download/${LATEST_TAG}/${TARBALL}"
           rm -rf "$WORKSPACE/_python_runtime"
           mkdir -p "$WORKSPACE/_python_runtime"
           cd "$WORKSPACE/_python_runtime"
-          wget -q -O "$TARBALL" "$URL"
+
+          wget -q --show-progress -O "$TARBALL" "$URL"
           tar -xzf "$TARBALL"
+          echo "Files extracted:"
           ls -la
 
-          # ---- STEP 4: Copy TẤT CẢ .so vào jniLibs ----
-          echo "═══ STEP 4: Copy .so → jniLibs ═══"
+          # ---- STEP 2: Copy .so vào jniLibs ----
+          echo "═══ STEP 2: Copy .so → jniLibs ═══"
           mkdir -p "$WORKSPACE/app/src/main/jniLibs/arm64-v8a"
           for so in *.so; do
             [ -f "$so" ] || continue
@@ -157,8 +147,8 @@ jobs:
             echo "  ✅ $so"
           done
 
-          # ---- STEP 5: Tải yt-dlp + certifi, extract vào assets/python/site-packages ----
-          echo "═══ STEP 5: yt-dlp + certifi → assets/python/site-packages ═══"
+          # ---- STEP 3: Tải yt-dlp + certifi, extract vào assets/python/site-packages ----
+          echo "═══ STEP 3: yt-dlp + certifi → assets/python/site-packages ═══"
           rm -rf "$WORKSPACE/_wheels"
           mkdir -p "$WORKSPACE/_wheels"
           cd "$WORKSPACE/_wheels"
@@ -179,8 +169,8 @@ jobs:
           echo "site-packages contents:"
           ls "$SITE_PACKAGES" | head -20
 
-          # ---- STEP 6: Copy yt_dlp_bridge.py ----
-          echo "═══ STEP 6: yt_dlp_bridge.py → assets/ ═══"
+          # ---- STEP 4: Copy yt_dlp_bridge.py ----
+          echo "═══ STEP 4: yt_dlp_bridge.py → assets/ ═══"
           if [ ! -f "$WORKSPACE/app/src/main/python/yt_dlp_bridge.py" ]; then
             echo "❌ Missing yt_dlp_bridge.py"
             find "$WORKSPACE/app" -name "yt_dlp_bridge.py"
@@ -190,8 +180,8 @@ jobs:
              "$WORKSPACE/app/src/main/assets/yt_dlp_bridge.py"
           echo "✅ Copied"
 
-          # ---- STEP 7: Verify ----
-          echo "═══ STEP 7: Verify ═══"
+          # ---- STEP 5: Verify ----
+          echo "═══ STEP 5: Verify ═══"
           echo "📋 jniLibs:"
           ls -lh "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
           echo ""
