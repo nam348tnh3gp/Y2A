@@ -108,11 +108,30 @@ def download(url, options_json):
             ydl_opts['noplaylist'] = True
 
         if options.get('audio_only', False):
+            # ================= AUDIO MODE =================
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': options.get('audio_format', 'mp3'),
                 'preferredquality': options.get('audio_bitrate', '128'),
             }]
+        else:
+            # ================= VIDEO MODE =================
+            vf = options.get('video_format', 'mp4').lower()
+            iphone = options.get('iphone', False)
+
+            if iphone:
+                # iPhone compatible: luôn mp4 (H.264 + AAC)
+                ydl_opts['merge_output_format'] = 'mp4'
+            elif vf in ('mp4', 'mkv', 'webm'):
+                # Định dạng yt-dlp merge trực tiếp được
+                ydl_opts['merge_output_format'] = vf
+            else:
+                # avi, mov, flv → merge mp4 trước rồi recode bằng FFmpeg
+                ydl_opts['merge_output_format'] = 'mp4'
+                ydl_opts['postprocessors'] = [{
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': vf,   # Lưu ý: API viết thiếu 'r', giữ nguyên
+                }]
 
         ydl_opts['retries'] = 10
         ydl_opts['fragment_retries'] = 20
