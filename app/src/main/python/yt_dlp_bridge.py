@@ -14,6 +14,32 @@ class DownloadProgress:
 
 current_progress = DownloadProgress()
 
+def _to_py_dict(java_map):
+    """
+    Convert Java Map (LinkedHashMap/HashMap từ Kotlin) thành Python dict.
+    Chaquopy không cho iterate Java Map trực tiếp nên phải dùng entrySet().
+    Nếu đối tượng đã là Python dict rồi thì trả về nguyên trạng.
+    """
+    if java_map is None:
+        return {}
+    # Nếu đã là dict Python
+    if isinstance(java_map, dict):
+        return java_map
+    # Nếu là Java Map → dùng entrySet()
+    if hasattr(java_map, 'entrySet'):
+        result = {}
+        for entry in java_map.entrySet():
+            key = entry.getKey()
+            value = entry.getValue()
+            # Convert key sang str, value giữ nguyên
+            result[str(key)] = value
+        return result
+    # Fallback
+    try:
+        return dict(java_map)
+    except Exception:
+        return {}
+
 def progress_hook(d):
     global current_progress
     status = d.get('status')
@@ -44,7 +70,6 @@ def get_latest_version():
         return f"Error: {e}"
 
 def get_info(url, cookies_file=""):
-    # Không cần convert vì get_info nhận tham số riêng lẻ
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -70,9 +95,8 @@ def get_info(url, cookies_file=""):
         return {'title': '', 'uploader': '', 'duration': 0, 'thumbnail': None}
 
 def download(url, options):
-    # ⚠️ QUAN TRỌNG: convert Java Map (LinkedHashMap) thành Python dict
-    # để có thể dùng .get(key, default) đúng chuẩn Python
-    options = dict(options)
+    # ⚠️ Convert Java Map → Python dict TRƯỚC KHI dùng
+    options = _to_py_dict(options)
 
     global current_progress
     current_progress = DownloadProgress()
