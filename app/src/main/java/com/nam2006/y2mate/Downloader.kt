@@ -24,6 +24,7 @@ import java.io.File
 import java.io.FileOutputStream
 
 object Downloader {
+    private const val TAG = "Downloader"
     private const val PROCESS_ID = "y2m-current"
     private val SAFE = setOf("mp4", "mkv", "webm")
     private val LOSSLESS = setOf("flac", "wav", "alac")
@@ -35,7 +36,7 @@ object Downloader {
 
     // Mỗi lần start()/cancel() tăng counter → các tác vụ cũ biết mình đã "hết hiệu lực"
     private val runCounter = AtomicLong(0)
-    // Chỉ cho 1 lần tải chạy tại 1 thời điểm (kể cả khi lần trước vừa bị hủy nhưng Python chưa dừng hẳn)
+    // Chỉ cho 1 lần tải chạy tại 1 thời điểm
     private val runMutex = Mutex()
 
     val state = MutableStateFlow<DlState>(DlState.Idle)
@@ -51,26 +52,37 @@ object Downloader {
         System.loadLibrary("ffmpeg_jni")
     }
 
+    // ==========================================================
+    // INIT — chờ PythonBridge sẵn sàng
+    // ==========================================================
     fun init(application: Application) {
         app = application
         scope.launch {
             try {
+                // 1. Chuẩn bị FFmpeg (copy .so từ nativeLibDir → filesDir, chmod, extract libs)
                 prepareFfmpeg()
 
-                // Giải nén site-packages + Py_Initialize: nặng → chạy ở nền, KHÔNG phải main thread
+                // 2. Khởi tạo Python runtime (giải nén stdlib.zip + sitepackages.zip)
+                Log.i(TAG, "⏳ Khởi tạo Python runtime…")
                 if (!PythonBridge.init(app)) {
                     initError.value = PythonBridge.lastError() ?: "Python không khởi tạo được"
+                    Log.e(TAG, "❌ Python init fail: ${initError.value}")
                     return@launch
                 }
+                Log.i(TAG, "✅ Python runtime sẵn sàng")
 
                 ready.value = true
             } catch (t: Throwable) {
                 val root = t.cause ?: t
                 initError.value = root.message ?: root.toString()
+                Log.e(TAG, "❌ Init fail", t)
             }
         }
     }
 
+    // ==========================================================
+    // FFmpeg
+    // ==========================================================
     private fun prepareFfmpeg() {
         val nativeLibDir = app.applicationInfo.nativeLibraryDir
         val ffmpegInLib = File(nativeLibDir, "libffmpeg.so")
@@ -124,6 +136,9 @@ object Downloader {
         } else null
     }
 
+    // ==========================================================
+    // START / CANCEL
+    // ==========================================================
     fun start(url: String, o: Options) {
         if (state.value is DlState.Running) return
         val myRun = runCounter.incrementAndGet()
@@ -158,12 +173,14 @@ object Downloader {
             try {
                 PythonBridge.callFunction("yt_dlp_bridge", "cancel_json", "{}")
             } catch (t: Throwable) {
-                Log.w("Downloader", "cancel_json fail", t)
+                Log.w(TAG, "cancel_json fail", t)
             }
         }
     }
 
-    /** Đọc tiến độ từ Python mỗi ~0.6s để UI + notification không đứng ở 0%. */
+    // ==========================================================
+    // PROGRESS POLLING
+    // ==========================================================
     private suspend fun pollProgress(run: Long) {
         while (true) {
             delay(600)
@@ -206,6 +223,9 @@ object Downloader {
         }
     }
 
+    // ==========================================================
+    // FETCH INFO (preview)
+    // ==========================================================
     fun fetchInfo(url: String): PreviewInfo {
         var waited = 0
         while (!ready.value) {
@@ -215,7 +235,6 @@ object Downloader {
 
         val cookiesFile = if (CookieStore.has(app)) CookieStore.file(app).absolutePath else ""
 
-        // Build JSON cho get_info
         val argsJson = JSONObject().apply {
             put("url", url)
             put("cookies_file", cookiesFile)
@@ -232,6 +251,9 @@ object Downloader {
         )
     }
 
+    // ==========================================================
+    // CHECK YT-DLP UPDATE
+    // ==========================================================
     fun checkYtDlpUpdate(): String {
         return try {
             val resultJson = PythonBridge.callFunction("yt_dlp_bridge", "check_versions_json", "{}")
@@ -246,6 +268,9 @@ object Downloader {
         }
     }
 
+    // ==========================================================
+    // FORMAT SELECTOR
+    // ==========================================================
     private fun formatSelector(o: Options): String {
         if (o.audioOnly) return "bestaudio/best"
         val h = o.quality.removeSuffix("p")
@@ -259,6 +284,9 @@ object Downloader {
         }
     }
 
+    // ==========================================================
+    // RUN DOWNLOAD
+    // ==========================================================
     private fun runDownload(url: String, o: Options, run: Long): List<SavedFile> {
         val root = app.getExternalFilesDir("tmp") ?: File(app.filesDir, "tmp")
         val dir = File(root, Integer.toHexString((url + o.toString()).hashCode()))
@@ -317,6 +345,9 @@ object Downloader {
         name.endsWith(".part") || name.endsWith(".ytdl") || name.endsWith(".temp") ||
             name.contains(".part-") || Regex("\\.f\\d+\\.\\w+$").containsMatchIn(name)
 
+    // ==========================================================
+    // SAVE TO DOWNLOADS (MediaStore)
+    // ==========================================================
     private fun saveToDownloads(file: File, relativePath: String): SavedFile {
         val resolver = app.contentResolver
         val ext = file.extension.lowercase()
@@ -337,6 +368,9 @@ object Downloader {
         return SavedFile(file.name, uri.toString())
     }
 
+    // ==========================================================
+    // ERROR CLEANUP
+    // ==========================================================
     private fun cleanError(t: Throwable): String {
         val msg = (t.message ?: t.toString()).trim()
         val lines = msg.lines()
