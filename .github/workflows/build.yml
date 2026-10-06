@@ -2,6 +2,12 @@ name: Build APK with Self-Built Python
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [build-apk]
+  push:
+    branches:
+      - nam348tnh3gp-patch-1
+      - main
 
 concurrency:
   group: build-apk
