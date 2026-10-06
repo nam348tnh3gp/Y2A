@@ -3,19 +3,17 @@ name: Build APK
 on:
   workflow_dispatch:
 
-# Tránh 2 workflow chạy song song gây conflict version code
 concurrency:
   group: version-bump
   cancel-in-progress: false
 
-# Cần quyền write để commit versioncode.txt
 permissions:
   contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,148 +25,190 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - uses: android-actions/setup-android@v4
 
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
 
-      # Tự động bump version code
+      # ---------- Bump version ----------
       - name: Bump version code
         id: bump
         run: |
           set -e
-
-          # Đọc version hiện tại, mặc định 0 nếu file chưa tồn tại
           if [ -f versioncode.txt ]; then
             CURRENT=$(cat versioncode.txt | tr -d '[:space:]')
             CURRENT=${CURRENT:-0}
           else
-            echo "📝 Chưa có versioncode.txt, tạo mới với giá trị 1"
             CURRENT=0
           fi
-
-          # Validate số nguyên
-          if ! [[ "$CURRENT" =~ ^[0-9]+$ ]]; then
-            echo "⚠️ versioncode.txt không hợp lệ: '$CURRENT', reset về 0"
-            CURRENT=0
-          fi
-
+          if ! [[ "$CURRENT" =~ ^[0-9]+$ ]]; then CURRENT=0; fi
           NEW=$((CURRENT + 1))
           echo "$NEW" > versioncode.txt
-
-          echo "🔢 Version code: $CURRENT → $NEW"
+          echo "🔢 Version: $CURRENT → $NEW"
           echo "new_version=$NEW" >> "$GITHUB_OUTPUT"
 
-      # Commit và push version mới (cần trước khi build để APK có version đúng)
       - name: Commit version bump
         run: |
           set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add versioncode.txt
-
           if git diff --staged --quiet; then
-            echo "⚠️ Không có thay đổi để commit"
+            echo "⚠️ Không có thay đổi"
           else
             git commit -m "chore: bump version code to ${{ steps.bump.outputs.new_version }} [skip ci]"
+            git pull --rebase origin ${{ github.ref_name }} || true
             git push origin HEAD:${{ github.ref_name }}
-            echo "✅ Đã push version code ${{ steps.bump.outputs.new_version }}"
           fi
 
-      # Tải FFmpeg từ Termux và đặt vào đúng vị trí
-      - name: Download FFmpeg from Termux
+      # ---------- Get latest python-build release ----------
+      - name: Get latest python-build release tag
+        id: python-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
+          LATEST_TAG=$(curl -sL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/flet-dev/python-build/releases/latest" \
+            | jq -r '.tag_name')
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+            LATEST_TAG="20260921"
+          fi
+          echo "✅ Latest python-build release: $LATEST_TAG"
+          echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
 
-          FFMPEG_VERSION="8.1.3"
-          ARCH="aarch64"
-          DEB_URL="https://packages.termux.dev/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
+      # ---------- Download python-build runtime ----------
+      - name: Download Python runtime
+        env:
+          PY_BUILD_RELEASE: ${{ steps.python-release.outputs.tag }}
+        run: |
+          set -e
+          PY_VERSION="3.14"
+          ABI="arm64-v8a"
+          TARBALL="python-android-dart-${PY_VERSION}-${ABI}.tar.gz"
+          URL="https://github.com/flet-dev/python-build/releases/download/${PY_BUILD_RELEASE}/${TARBALL}"
 
-          echo "📥 Downloading FFmpeg ${FFMPEG_VERSION} (${ARCH})..."
-          wget -q --show-progress -O ffmpeg.deb "${DEB_URL}" || {
-            echo "❌ Không tải được từ URL chính, thử mirror..."
-            wget -q -O ffmpeg.deb "https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
-          }
+          echo "📥 Downloading: $URL"
+          mkdir -p _python_runtime
+          cd _python_runtime
 
-          echo "📦 Extracting .deb..."
-          mkdir -p ffmpeg-extracted
-          dpkg-deb -xv ffmpeg.deb ./ffmpeg-extracted
-
-          TERMUX_BIN="./ffmpeg-extracted/data/data/com.termux/files/usr/bin"
-          TERMUX_LIB="./ffmpeg-extracted/data/data/com.termux/files/usr/lib"
-
-          if [ ! -f "${TERMUX_BIN}/ffmpeg" ]; then
-            echo "❌ Không tìm thấy ffmpeg binary!"
-            ls -la "${TERMUX_BIN}/" || true
+          if ! wget -q --show-progress -O "$TARBALL" "$URL"; then
+            echo "❌ Tải thất bại. Liệt kê assets..."
+            curl -sL -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/flet-dev/python-build/releases/tags/${PY_BUILD_RELEASE}" \
+              | jq -r '.assets[].name' || true
             exit 1
           fi
 
-          mkdir -p app/src/main/jniLibs/arm64-v8a
-          mkdir -p app/src/main/assets/ffmpeg/lib
+          tar -xzf "$TARBALL"
+          echo "📂 Structure:"
+          find . -maxdepth 3 -type d | head -20
 
-          cp "${TERMUX_BIN}/ffmpeg" app/src/main/jniLibs/arm64-v8a/libffmpeg.so
-          if [ -f "${TERMUX_BIN}/ffprobe" ]; then
-            cp "${TERMUX_BIN}/ffprobe" app/src/main/jniLibs/arm64-v8a/libffprobe.so
+      # ---------- Install pip + yt-dlp ----------
+      - name: Install pip and yt-dlp
+        env:
+          PY_VERSION: "3.14"
+        run: |
+          set -e
+          cd _python_runtime
+
+          STDLIB_DIR=$(find . -type d -name "python${PY_VERSION}" -path "*/lib/*" | head -1)
+          if [ -z "$STDLIB_DIR" ]; then
+            echo "❌ Không tìm thấy stdlib"
+            find . -name "os.py" | head -5
+            exit 1
           fi
+          echo "📁 Stdlib: $STDLIB_DIR"
 
-          if [ -d "${TERMUX_LIB}" ]; then
-            echo "📚 Copying dependent libraries..."
-            find "${TERMUX_LIB}" -maxdepth 1 -type f \
-              \( -name "libav*.so*" -o -name "libsw*.so*" -o -name "libpostproc*.so*" \) \
-              -exec cp {} app/src/main/assets/ffmpeg/lib/ \;
-            ls -la app/src/main/assets/ffmpeg/lib/ | head -20
-          else
-            echo "⚠️ Không có thư mục lib"
-          fi
+          SITE_PACKAGES="$STDLIB_DIR/site-packages"
+          mkdir -p "$SITE_PACKAGES"
 
-          chmod 755 app/src/main/jniLibs/arm64-v8a/libffmpeg.so
+          # yt-dlp là pure Python → wheel py3-none-any
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --target="$SITE_PACKAGES" \
+            --no-compile --only-binary=:all: --no-deps \
+            yt-dlp certifi
 
-          echo "✅ FFmpeg setup hoàn tất:"
-          ls -la app/src/main/jniLibs/arm64-v8a/
-          du -sh app/src/main/jniLibs/arm64-v8a/
-          du -sh app/src/main/assets/ffmpeg/lib/ 2>/dev/null || true
+          echo "✅ Đã cài:"
+          ls -la "$SITE_PACKAGES/"
+          du -sh "$SITE_PACKAGES"
 
-      # Dùng debug keystore có sẵn trong repo (đã commit)
+      # ---------- Copy runtime vào Android project ----------
+      - name: Integrate runtime
+        env:
+          PY_VERSION: "3.14"
+        run: |
+          set -e
+          cd _python_runtime
+
+          # libpython*.so → jniLibs
+          LIBPY=$(find . -name "libpython${PY_VERSION}.so" | head -1)
+          [ -z "$LIBPY" ] && { echo "❌ Không có libpython"; exit 1; }
+          mkdir -p ../app/src/main/jniLibs/arm64-v8a
+          cp "$LIBPY" ../app/src/main/jniLibs/arm64-v8a/libpython3.14.so
+          echo "✅ $LIBPY → jniLibs"
+
+          # Stdlib → assets
+          STDLIB_DIR=$(find . -type d -name "python${PY_VERSION}" -path "*/lib/*" | head -1)
+          STDLIB_PARENT=$(dirname "$STDLIB_DIR")
+          mkdir -p ../app/src/main/assets/python
+          cp -r "$STDLIB_PARENT/python${PY_VERSION}" ../app/src/main/assets/python/
+          echo "✅ stdlib → assets/python/python3.14/"
+
+          # Native .so khác → jniLibs
+          find . -name "*.so" ! -name "libpython*.so" | while read -r so; do
+            name=$(basename "$so")
+            [[ "$name" =~ ^(lib.+\.so)\.[0-9]+$ ]] && name="${BASH_REMATCH[1]}"
+            cp "$so" "../app/src/main/jniLibs/arm64-v8a/$name"
+            echo "  📚 $name"
+          done
+
+          echo ""
+          echo "📋 jniLibs:"
+          ls -lh ../app/src/main/jniLibs/arm64-v8a/
+          echo "📋 assets:"
+          du -sh ../app/src/main/assets/
+
+      # ---------- Setup debug keystore ----------
       - name: Setup debug keystore
         run: |
           set -e
           mkdir -p ~/.android
-
           if [ -f "debug.keystore" ]; then
-            echo "🔐 Copy debug.keystore từ repo vào ~/.android/"
             cp debug.keystore ~/.android/debug.keystore
-            echo "✅ Keystore đã sẵn sàng:"
-            ls -la ~/.android/debug.keystore
             keytool -list -keystore ~/.android/debug.keystore -storepass android | head -5
           else
-            echo "⚠️ Không tìm thấy debug.keystore trong repo, tạo tạm thời..."
             keytool -genkey -v -keystore ~/.android/debug.keystore \
               -storepass android -alias androiddebugkey -keypass android \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
+      # ---------- Build APK ----------
       - name: Build release APK
         run: gradle :app:assembleRelease --stacktrace
 
-      - name: Rename APK with version code
+      - name: Rename APK
         run: |
           set -e
           VERSION=${{ steps.bump.outputs.new_version }}
           for f in app/build/outputs/apk/release/*.apk; do
-            if [[ "$f" != *".apk" ]] || [[ "$f" == *"-unaligned"* ]]; then continue; fi
-            DIR=$(dirname "$f")
-            BASE=$(basename "$f" .apk)
-            NEW_NAME="${BASE}-v${VERSION}.apk"
-            mv "$f" "${DIR}/${NEW_NAME}"
-            echo "📦 Renamed: $f → ${DIR}/${NEW_NAME}"
+            [[ "$f" != *".apk" ]] || [[ "$f" == *"-unaligned"* ]] && continue
+            DIR=$(dirname "$f"); BASE=$(basename "$f" .apk)
+            mv "$f" "${DIR}/${BASE}-v${VERSION}.apk"
           done
           ls -la app/build/outputs/apk/release/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Mini-Y2mate-Pro-apk-v${{ steps.bump.outputs.new_version }}
+          name: Mini-Y2mate-Pro-v${{ steps.bump.outputs.new_version }}
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
