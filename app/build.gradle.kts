@@ -67,7 +67,7 @@ android {
             pickFirsts += listOf(
                 "**/libffmpeg.so",
                 "**/libffprobe.so",
-                "**/libpython3.14.so",
+                "**/libpython3.12.so",
                 "**/libc++_shared.so"
             )
         }
