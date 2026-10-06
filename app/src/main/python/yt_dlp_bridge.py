@@ -31,19 +31,20 @@ def progress_hook(d):
         current_progress.percent = 100.0
         current_progress.filename = d.get('filename', '')
 
-def get_installed_version():
-    return yt_dlp.version.__version__
 
-def get_latest_version():
+# ============================================================
+# JSON API cho JNI (Kotlin gọi qua PythonBridge.callFunction)
+# ============================================================
+
+def get_info_json(args_json):
+    """args: {"url": "...", "cookies_file": "..."}"""
     try:
-        url = "https://pypi.org/pypi/yt-dlp/json"
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = json.loads(response.read().decode())
-            return data["info"]["version"]
+        args = json.loads(args_json)
+        url = args.get("url", "")
+        cookies_file = args.get("cookies_file", "")
     except Exception as e:
-        return f"Error: {e}"
+        return json.dumps({'title': '', 'uploader': '', 'duration': 0, 'thumbnail': ''})
 
-def get_info(url, cookies_file=""):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -68,19 +69,37 @@ def get_info(url, cookies_file=""):
     except Exception:
         return json.dumps({'title': '', 'uploader': '', 'duration': 0, 'thumbnail': ''})
 
-def download(url, options_json):
-    """
-    Nhận options dưới dạng JSON string từ Kotlin.
-    Không bridge Java Map → tránh mọi lỗi Chaquopy iteration.
-    """
+
+def check_versions_json(args_json):
+    """args: {} → {"installed": "...", "latest": "..."}"""
+    try:
+        installed = yt_dlp.version.__version__
+    except Exception:
+        installed = "unknown"
+
+    try:
+        url = "https://pypi.org/pypi/yt-dlp/json"
+        with urllib.request.urlopen(url, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            latest = data["info"]["version"]
+    except Exception as e:
+        latest = f"Error: {e}"
+
+    return json.dumps({'installed': installed, 'latest': latest})
+
+
+def download_json(options_json):
+    """args: toàn bộ options từ Kotlin → {"success": bool, "error": str}"""
     try:
         options = json.loads(options_json)
     except Exception as e:
-        return json.dumps({'success': False, 'error': f'Invalid options JSON: {e}'})
+        return json.dumps({'success': False, 'error': f'Invalid JSON: {e}'})
 
     global current_progress
     current_progress = DownloadProgress()
+
     try:
+        url = options.get('url', '')
         ydl_opts = {
             'progress_hooks': [progress_hook],
             'quiet': True,
@@ -96,6 +115,7 @@ def download(url, options_json):
         ffmpeg_path = options.get('ffmpeg_path')
         if ffmpeg_path:
             ydl_opts['ffmpeg_location'] = ffmpeg_path
+            os.environ['LD_LIBRARY_PATH'] = os.path.dirname(ffmpeg_path)
 
         cookies_file = options.get('cookies_file')
         if cookies_file and os.path.exists(cookies_file):
@@ -108,29 +128,23 @@ def download(url, options_json):
             ydl_opts['noplaylist'] = True
 
         if options.get('audio_only', False):
-            # ================= AUDIO MODE =================
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': options.get('audio_format', 'mp3'),
                 'preferredquality': options.get('audio_bitrate', '128'),
             }]
         else:
-            # ================= VIDEO MODE =================
             vf = options.get('video_format', 'mp4').lower()
             iphone = options.get('iphone', False)
-
             if iphone:
-                # iPhone compatible: luôn mp4 (H.264 + AAC)
                 ydl_opts['merge_output_format'] = 'mp4'
             elif vf in ('mp4', 'mkv', 'webm'):
-                # Định dạng yt-dlp merge trực tiếp được
                 ydl_opts['merge_output_format'] = vf
             else:
-                # avi, mov, flv → merge mp4 trước rồi recode bằng FFmpeg
                 ydl_opts['merge_output_format'] = 'mp4'
                 ydl_opts['postprocessors'] = [{
                     'key': 'FFmpegVideoConvertor',
-                    'preferedformat': vf,   # Lưu ý: API viết thiếu 'r', giữ nguyên
+                    'preferedformat': vf,
                 }]
 
         ydl_opts['retries'] = 10
