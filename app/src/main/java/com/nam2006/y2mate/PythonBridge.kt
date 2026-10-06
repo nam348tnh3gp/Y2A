@@ -1,92 +1,74 @@
 package com.nam2006.y2mate
 
+import android.app.Application
 import android.util.Log
 import java.io.File
 
-/**
- * Bridge giữa Kotlin và Python runtime (flet-dev/python-build).
- * Thay thế Chaquopy.
- */
 object PythonBridge {
     private const val TAG = "PythonBridge"
-    private const val PY_VERSION = "3.14"
-
     @Volatile private var initialized = false
     private var initError: String? = null
 
-    // JNI methods
-    private external fun nativeInit(pythonHome: String): Boolean
-    private external fun nativeRun(codeOrPath: String): String
+    // JNI — signature mới: (nativeLibDir, sitePackagesDir)
+    private external fun nativeInit(nativeLibDir: String, sitePackagesDir: String): Boolean
     private external fun nativeCallFunction(module: String, func: String, argJson: String): String
     private external fun nativeFinalize()
 
     init {
         System.loadLibrary("python_jni")
-        System.loadLibrary("python3.14")
     }
 
-    /**
-     * Khởi tạo Python. Extract stdlib từ assets ra filesDir nếu chưa có.
-     */
-    fun init(app: android.app.Application): Boolean {
+    fun init(app: Application): Boolean {
         if (initialized) return true
-
         try {
-            val pythonHome = extractRuntime(app)
-            Log.i(TAG, "Python home: $pythonHome")
+            // nativeLibDir chứa libpython3.14.so (Android tự extract)
+            val nativeLibDir = app.applicationInfo.nativeLibraryDir
+            Log.i(TAG, "nativeLibDir: $nativeLibDir")
 
-            // Thêm thư mục chứa yt_dlp_bridge.py vào PYTHONPATH
-            val scriptDir = File(pythonHome, "scripts")
-            scriptDir.mkdirs()
-            // Copy yt_dlp_bridge.py từ assets
-            copyAssetFile(app, "yt_dlp_bridge.py", File(scriptDir, "yt_dlp_bridge.py"))
-
-            initialized = nativeInit(pythonHome)
-
-            if (initialized) {
-                // Thêm script dir vào sys.path
-                nativeRun(
-                    "import sys\n" +
-                    "sys.path.insert(0, r'${scriptDir.absolutePath}')\n"
-                )
+            // Extract site-packages từ assets ra filesDir
+            val sitePackages = File(app.filesDir, "site-packages")
+            val marker = File(sitePackages, ".extracted")
+            if (!marker.exists()) {
+                Log.i(TAG, "Extract site-packages...")
+                sitePackages.mkdirs()
+                copyAssetDir(app, "python/site-packages", sitePackages)
+                marker.writeText("ok")
             }
 
+            // Copy yt_dlp_bridge.py vào filesDir
+            val scriptFile = File(app.filesDir, "yt_dlp_bridge.py")
+            if (!scriptFile.exists()) {
+                app.assets.open("yt_dlp_bridge.py").use { input ->
+                    scriptFile.outputStream().use { input.copyTo(it) }
+                }
+            }
+
+            // Init Python
+            initialized = nativeInit(nativeLibDir, sitePackages.absolutePath)
+
+            if (initialized) {
+                // Thêm filesDir vào sys.path để import yt_dlp_bridge
+                // (Python code tự thêm thông qua sys.path.insert trong nativeInit,
+                //  nhưng ta cần thêm filesDir nữa)
+                // Đã làm trong nativeInit, ở đây không cần
+                Log.i(TAG, "✅ Python initialized")
+            }
             return initialized
         } catch (t: Throwable) {
             initError = t.message
-            Log.e(TAG, "Init failed", t)
+            Log.e(TAG, "Init fail", t)
             return false
         }
     }
 
-    /**
-     * Extract Python runtime từ assets vào filesDir (1 lần duy nhất).
-     */
-    private fun extractRuntime(app: android.app.Application): String {
-        val destDir = File(app.filesDir, "python$PY_VERSION")
-        val marker = File(destDir, ".extracted")
-
-        if (marker.exists()) {
-            return destDir.absolutePath
-        }
-
-        Log.i(TAG, "Đang extract Python runtime lần đầu...")
-        destDir.mkdirs()
-
-        // Extract toàn bộ assets/python/python3.14/ → filesDir/python3.14/
-        copyAssetDir(app, "python/python$PY_VERSION", destDir)
-
-        marker.writeText("ok")
-        Log.i(TAG, "✅ Đã extract Python runtime")
-
-        return destDir.absolutePath
-    }
-
-    private fun copyAssetDir(app: android.app.Application, assetPath: String, dest: File) {
+    private fun copyAssetDir(app: Application, assetPath: String, dest: File) {
         val children = app.assets.list(assetPath) ?: return
         if (children.isEmpty()) {
-            // Là file, không phải dir
-            copyAssetFile(app, assetPath, dest)
+            // Là file
+            dest.parentFile?.mkdirs()
+            app.assets.open(assetPath).use { input ->
+                dest.outputStream().use { input.copyTo(it) }
+            }
             return
         }
         dest.mkdirs()
@@ -95,29 +77,11 @@ object PythonBridge {
         }
     }
 
-    private fun copyAssetFile(app: android.app.Application, assetPath: String, dest: File) {
-        dest.parentFile?.mkdirs()
-        app.assets.open(assetPath).use { input ->
-            dest.outputStream().use { output -> input.copyTo(output) }
-        }
-    }
-
-    /**
-     * Gọi hàm Python với JSON argument, trả về JSON string.
-     */
     fun callFunction(module: String, func: String, argJson: String): String {
         if (!initialized) {
-            return """{"success":false,"error":"Python chưa khởi tạo: ${initError ?: "unknown"}"}"""
+            return """{"success":false,"error":"Python chưa init: ${initError ?: "unknown"}"}"""
         }
         return nativeCallFunction(module, func, argJson)
-    }
-
-    /**
-     * Chạy code Python trực tiếp.
-     */
-    fun run(code: String): String {
-        if (!initialized) return "ERROR: Python chưa khởi tạo"
-        return nativeRun(code)
     }
 
     fun isInitialized(): Boolean = initialized
