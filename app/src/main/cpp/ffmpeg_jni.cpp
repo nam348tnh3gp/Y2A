@@ -1,9 +1,9 @@
 #include <jni.h>
 #include <string>
 #include <sys/stat.h>
-#include <sys/wait.h>   // <-- THÊM DÒNG NÀY (cho waitpid)
+#include <sys/wait.h>
 #include <unistd.h>
-#include <cerrno>       // <-- THÊM (cho errno)
+#include <cerrno>
 #include <android/log.h>
 #include <cstdlib>
 #include <cstring>
