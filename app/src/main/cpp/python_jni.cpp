@@ -14,6 +14,7 @@
 // Function pointer typedefs (thay vì Python.h)
 // ============================================================
 typedef void* PyObject;
+typedef void* PyObject_ptr;
 
 typedef void     (*Py_Initialize_t)();
 typedef void     (*Py_Finalize_t)();
@@ -29,6 +30,7 @@ typedef const char* (*PyUnicode_AsUTF8_t)(PyObject);
 typedef void     (*PyErr_Print_t)();
 typedef const char* (*Py_GetVersion_t)();
 typedef void     (*Py_DecRef_t)(PyObject);
+typedef int      (*PyRun_SimpleFile_t)(void*, const char*);
 typedef int      (*PyGILState_Ensure_t)();
 typedef void     (*PyGILState_Release_t)(int);
 typedef void*    (*PyEval_SaveThread_t)();
@@ -77,11 +79,18 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     LOGI("sitePackages: %s", siteDir);
     LOGI("filesDir:    %s", filesDirC);
 
-    // flet-dev runtime: stdlib frozen trong binary, KHÔNG cần PYTHONHOME
+    // ========================================================
+    // Set env vars cho Python
+    // ========================================================
+    // KHÔNG set PYTHONHOME (vì PBS runtime có stdlib riêng)
+    unsetenv("PYTHONHOME");
+    setenv("PYTHONPATH", siteDir, 1);
     setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
     setenv("LD_LIBRARY_PATH", libDir, 1);
 
+    // ========================================================
     // Load libpython3.14.so
+    // ========================================================
     std::string libPath = std::string(libDir) + "/libpython3.14.so";
     g_libpython = dlopen(libPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (!g_libpython) {
@@ -93,6 +102,9 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     }
     LOGI("✅ dlopen libpython OK");
 
+    // ========================================================
+    // Load symbols
+    // ========================================================
     #define LOAD(name) \
         p_##name = (name##_t) dlsym(g_libpython, #name); \
         if (!p_##name) { LOGE("Thiếu symbol: %s", #name); }
@@ -116,6 +128,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     LOAD(PyEval_SaveThread)
     LOAD(PyEval_RestoreThread)
     LOAD(PyErr_Clear)
+
     #undef LOAD
 
     if (!p_Py_Initialize || !p_PyRun_SimpleString ||
@@ -128,14 +141,18 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         return JNI_FALSE;
     }
 
+    // ========================================================
     // Init Python
+    // ========================================================
     p_Py_Initialize();
 
     if (p_Py_GetVersion) {
         LOGI("✅ Python: %s", p_Py_GetVersion());
     }
 
+    // ========================================================
     // TEST: import os
+    // ========================================================
     int rc_test = p_PyRun_SimpleString("import os; print('STDLIB_OS_OK')");
     LOGI("Test import os: rc=%d", rc_test);
 
@@ -148,16 +165,21 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         return JNI_FALSE;
     }
 
-    // Thêm sys.path: filesDir (cho yt_dlp_bridge.py) + site-packages
+    // ========================================================
+    // Thêm sys.path: filesDir, site-packages, nativeLibDir
+    // ========================================================
     std::string code = "import sys\n";
     code += "sys.path.insert(0, r'" + std::string(filesDirC) + "')\n";
     code += "sys.path.insert(0, r'" + std::string(siteDir) + "')\n";
-    code += "print('sys.path:', sys.path[:5])\n";
+    code += "sys.path.insert(0, r'" + std::string(libDir) + "')\n";
+    code += "print('sys.path:', sys.path[:6])\n";
 
     int rc_path = p_PyRun_SimpleString(code.c_str());
     LOGI("Set sys.path: rc=%d", rc_path);
 
+    // ========================================================
     // TEST: import yt_dlp
+    // ========================================================
     int rc_ytdlp = p_PyRun_SimpleString("import yt_dlp; print('YTDLP_OK', yt_dlp.version.__version__)");
     LOGI("Test import yt_dlp: rc=%d", rc_ytdlp);
 
@@ -166,7 +188,9 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         if (p_PyErr_Print) p_PyErr_Print();
     }
 
-    // Nhả GIL
+    // ========================================================
+    // Nhả GIL — bắt buộc để các thread khác gọi được Python
+    // ========================================================
     g_mainTState = p_PyEval_SaveThread();
     g_initialized = true;
 
