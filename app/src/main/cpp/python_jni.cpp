@@ -1,210 +1,195 @@
 #include <jni.h>
 #include <string>
 #include <android/log.h>
-#include <Python.h>
+#include <dlfcn.h>
 #include <cstring>
 #include <cstdlib>
-#include <unistd.h>
-#include <sys/stat.h>
 
 #define LOG_TAG "PythonJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-static bool g_python_initialized = false;
+// ============================================================
+// Function pointer typedefs (thay vì Python.h)
+// ============================================================
+typedef void* PyObject;
+typedef void* PyObject_ptr;
+
+typedef void     (*Py_Initialize_t)();
+typedef void     (*Py_Finalize_t)();
+typedef int      (*PyRun_SimpleString_t)(const char*);
+typedef PyObject (*PyImport_ImportModule_t)(const char*);
+typedef PyObject (*PyObject_GetAttrString_t)(PyObject, const char*);
+typedef int      (*PyCallable_Check_t)(PyObject);
+typedef PyObject (*PyObject_CallObject_t)(PyObject, PyObject);
+typedef PyObject (*PyTuple_Pack_t)(long, ...);
+typedef PyObject (*PyUnicode_FromString_t)(const char*);
+typedef PyObject (*PyObject_Str_t)(PyObject);
+typedef const char* (*PyUnicode_AsUTF8_t)(PyObject);
+typedef void     (*PyErr_Print_t)();
+typedef const char* (*Py_GetVersion_t)();
+typedef void     (*Py_DecRef_t)(PyObject);
+typedef int      (*PyRun_SimpleFile_t)(void*, const char*);
+
+static void* g_libpython = nullptr;
+static bool  g_initialized = false;
+
+static Py_Initialize_t           p_Py_Initialize = nullptr;
+static Py_Finalize_t             p_Py_Finalize = nullptr;
+static PyRun_SimpleString_t      p_PyRun_SimpleString = nullptr;
+static PyImport_ImportModule_t   p_PyImport_ImportModule = nullptr;
+static PyObject_GetAttrString_t  p_PyObject_GetAttrString = nullptr;
+static PyCallable_Check_t        p_PyCallable_Check = nullptr;
+static PyObject_CallObject_t     p_PyObject_CallObject = nullptr;
+static PyTuple_Pack_t            p_PyTuple_Pack = nullptr;
+static PyUnicode_FromString_t    p_PyUnicode_FromString = nullptr;
+static PyObject_Str_t            p_PyObject_Str = nullptr;
+static PyUnicode_AsUTF8_t        p_PyUnicode_AsUTF8 = nullptr;
+static PyErr_Print_t             p_PyErr_Print = nullptr;
+static Py_GetVersion_t           p_Py_GetVersion = nullptr;
 
 extern "C" {
 
-/**
- * Khởi tạo Python interpreter với PYTHONHOME chỉ định.
- * @param pythonHome đường dẫn tới thư mục chứa stdlib (filesDir/python3.14)
- */
 JNIEXPORT jboolean JNICALL
 Java_com_nam2006_y2mate_PythonBridge_nativeInit(
-        JNIEnv *env, jobject /* this */, jstring pythonHome) {
+        JNIEnv *env, jobject, jstring nativeLibDir, jstring sitePackagesDir) {
 
-    if (g_python_initialized) {
-        LOGI("Python đã được khởi tạo trước đó");
-        return JNI_TRUE;
+    if (g_initialized) return JNI_TRUE;
+
+    const char *libDir = env->GetStringUTFChars(nativeLibDir, nullptr);
+    const char *siteDir = env->GetStringUTFChars(sitePackagesDir, nullptr);
+
+    LOGI("nativeLibDir: %s", libDir);
+    LOGI("sitePackages: %s", siteDir);
+
+    // Set env vars cho Python
+    setenv("PYTHONHOME", libDir, 1);
+    setenv("PYTHONPATH", siteDir, 1);
+    setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
+
+    // Load libpython3.14.so
+    std::string libPath = std::string(libDir) + "/libpython3.14.so";
+    g_libpython = dlopen(libPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    if (!g_libpython) {
+        LOGE("dlopen fail: %s", dlerror());
+        env->ReleaseStringUTFChars(nativeLibDir, libDir);
+        env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
+        return JNI_FALSE;
     }
+    LOGI("✅ dlopen libpython OK");
 
-    const char *home = env->GetStringUTFChars(pythonHome, nullptr);
-    if (home == nullptr) return JNI_FALSE;
+    // Load symbols
+    #define LOAD(name) \
+        p_##name = (name##_t) dlsym(g_libpython, #name); \
+        if (!p_##name) { LOGE("Thiếu symbol: %s", #name); }
 
-    LOGI("Khởi tạo Python với PYTHONHOME=%s", home);
+    LOAD(Py_Initialize)
+    LOAD(Py_Finalize)
+    LOAD(PyRun_SimpleString)
+    LOAD(PyImport_ImportModule)
+    LOAD(PyObject_GetAttrString)
+    LOAD(PyCallable_Check)
+    LOAD(PyObject_CallObject)
+    LOAD(PyTuple_Pack)
+    LOAD(PyUnicode_FromString)
+    LOAD(PyObject_Str)
+    LOAD(PyUnicode_AsUTF8)
+    LOAD(PyErr_Print)
+    LOAD(Py_GetVersion)
 
-    // Cấu hình Python 3.14
-    PyConfig config;
-    PyConfig_InitPythonConfig(&config);
-    config.use_environment = 0;      // Không đọc env vars
-    config.isolated = 0;             // Cho phép site-packages
-    config.site_import = 1;          // Import site module
+    #undef LOAD
 
-    // Set PYTHONHOME
-    PyStatus status = PyConfig_SetBytesString(&config, &config.home, home);
-    if (PyStatus_Exception(status)) {
-        LOGE("PyConfig_SetBytesString(home) failed: %s", status.err_msg);
-        PyConfig_Clear(&config);
-        env->ReleaseStringUTFChars(pythonHome, home);
+    if (!p_Py_Initialize || !p_PyRun_SimpleString) {
+        LOGE("Thiếu symbol bắt buộc");
+        env->ReleaseStringUTFChars(nativeLibDir, libDir);
+        env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
         return JNI_FALSE;
     }
 
-    // Program name (bắt buộc)
-    PyConfig_SetBytesString(&config, &config.program_name, "python3.14");
+    // Init Python
+    p_Py_Initialize();
 
-    // Khởi tạo Python
-    status = Py_InitializeFromConfig(&config);
-    PyConfig_Clear(&config);
-    env->ReleaseStringUTFChars(pythonHome, home);
-
-    if (PyStatus_Exception(status)) {
-        LOGE("Py_InitializeFromConfig failed: %s", status.err_msg);
-        return JNI_FALSE;
+    if (p_Py_GetVersion) {
+        LOGI("✅ Python: %s", p_Py_GetVersion());
     }
 
-    g_python_initialized = true;
-    LOGI("✅ Python khởi tạo thành công. Version: %s", Py_GetVersion());
+    // Thêm site-packages vào sys.path
+    std::string code = "import sys\n";
+    code += "sys.path.insert(0, r'" + std::string(siteDir) + "')\n";
+    code += "sys.path.insert(0, r'" + std::string(libDir) + "')\n";
+    p_PyRun_SimpleString(code.c_str());
 
-    // Cấu hình sys.path để tìm site-packages
-    PyRun_SimpleString(
-        "import sys, os\n"
-        "sys.path.insert(0, os.path.join(sys.prefix, 'lib', 'python3.14'))\n"
-        "sys.path.insert(0, os.path.join(sys.prefix, 'lib', 'python3.14', 'site-packages'))\n"
-        "sys.path.insert(0, os.path.join(sys.prefix, 'lib', 'python3.14', 'lib-dynload'))\n"
-    );
+    g_initialized = true;
 
+    env->ReleaseStringUTFChars(nativeLibDir, libDir);
+    env->ReleaseStringUTFChars(sitePackagesDir, siteDir);
     return JNI_TRUE;
 }
 
-/**
- * Chạy một biểu thức Python và trả về kết quả dạng string.
- * Input có thể là string code hoặc file path (nếu là *.py).
- */
-JNIEXPORT jstring JNICALL
-Java_com_nam2006_y2mate_PythonBridge_nativeRun(
-        JNIEnv *env, jobject /* this */, jstring codeOrPath) {
-
-    if (!g_python_initialized) {
-        return env->NewStringUTF("ERROR: Python chưa được khởi tạo");
-    }
-
-    const char *input = env->GetStringUTFChars(codeOrPath, nullptr);
-    std::string inputStr(input);
-    env->ReleaseStringUTFChars(codeOrPath, input);
-
-    // Nếu input kết thúc bằng .py → chạy như file script
-    if (inputStr.size() > 3 && inputStr.substr(inputStr.size() - 3) == ".py") {
-        FILE *fp = fopen(inputStr.c_str(), "r");
-        if (!fp) {
-            std::string err = "ERROR: Không mở được file: " + inputStr;
-            return env->NewStringUTF(err.c_str());
-        }
-
-        // Chạy file Python
-        int result = PyRun_SimpleFile(fp, inputStr.c_str());
-        fclose(fp);
-
-        if (result != 0) {
-            return env->NewStringUTF("ERROR: Python script failed");
-        }
-        return env->NewStringUTF("OK");
-    }
-
-    // Chạy như string code
-    PyObject *main_module = PyImport_AddModule("__main__");
-    PyObject *global_dict = PyModule_GetDict(main_module);
-    PyObject *local_dict = PyDict_New();
-
-    PyObject *result = PyRun_String(inputStr.c_str(), Py_file_input, global_dict, local_dict);
-    Py_DECREF(local_dict);
-
-    if (result == nullptr) {
-        PyErr_Print();
-        return env->NewStringUTF("ERROR: Python execution failed");
-    }
-    Py_DECREF(result);
-    return env->NewStringUTF("OK");
-}
-
-/**
- * Gọi một hàm Python trong module cụ thể với JSON argument.
- * Trả về JSON string từ hàm Python.
- */
 JNIEXPORT jstring JNICALL
 Java_com_nam2006_y2mate_PythonBridge_nativeCallFunction(
-        JNIEnv *env, jobject /* this */,
-        jstring moduleName, jstring funcName, jstring argJson) {
+        JNIEnv *env, jobject, jstring moduleName, jstring funcName, jstring argJson) {
 
-    if (!g_python_initialized) {
-        return env->NewStringUTF("{\"success\":false,\"error\":\"Python chưa khởi tạo\"}");
+    if (!g_initialized || !p_PyImport_ImportModule) {
+        return env->NewStringUTF("{\"success\":false,\"error\":\"Python chưa init\"}");
     }
 
-    const char *modName = env->GetStringUTFChars(moduleName, nullptr);
-    const char *fnName = env->GetStringUTFChars(funcName, nullptr);
+    const char *mod = env->GetStringUTFChars(moduleName, nullptr);
+    const char *fn = env->GetStringUTFChars(funcName, nullptr);
     const char *arg = env->GetStringUTFChars(argJson, nullptr);
 
-    // Import module
-    PyObject *pModule = PyImport_ImportModule(modName);
-    if (pModule == nullptr) {
-        PyErr_Print();
-        std::string err = "{\"success\":false,\"error\":\"Không import được module ";
-        err += modName; err += "\"}";
-        env->ReleaseStringUTFChars(moduleName, modName);
-        env->ReleaseStringUTFChars(funcName, fnName);
+    PyObject pModule = p_PyImport_ImportModule(mod);
+    if (!pModule) {
+        if (p_PyErr_Print) p_PyErr_Print();
+        std::string err = "{\"success\":false,\"error\":\"Import failed: ";
+        err += mod; err += "\"}";
+        env->ReleaseStringUTFChars(moduleName, mod);
+        env->ReleaseStringUTFChars(funcName, fn);
         env->ReleaseStringUTFChars(argJson, arg);
         return env->NewStringUTF(err.c_str());
     }
 
-    // Lấy hàm
-    PyObject *pFunc = PyObject_GetAttrString(pModule, fnName);
-    if (pFunc == nullptr || !PyCallable_Check(pFunc)) {
-        PyErr_Print();
-        std::string err = "{\"success\":false,\"error\":\"Không tìm thấy hàm ";
-        err += fnName; err += "\"}";
-        Py_XDECREF(pFunc);
-        Py_DECREF(pModule);
-        env->ReleaseStringUTFChars(moduleName, modName);
-        env->ReleaseStringUTFChars(funcName, fnName);
+    PyObject pFunc = p_PyObject_GetAttrString(pModule, fn);
+    if (!pFunc || (p_PyCallable_Check && !p_PyCallable_Check(pFunc))) {
+        if (p_PyErr_Print) p_PyErr_Print();
+        std::string err = "{\"success\":false,\"error\":\"Func not found: ";
+        err += fn; err += "\"}";
+        env->ReleaseStringUTFChars(moduleName, mod);
+        env->ReleaseStringUTFChars(funcName, fn);
         env->ReleaseStringUTFChars(argJson, arg);
         return env->NewStringUTF(err.c_str());
     }
 
-    // Tạo argument
-    PyObject *pArgs = PyTuple_Pack(1, PyUnicode_FromString(arg));
-    PyObject *pResult = PyObject_CallObject(pFunc, pArgs);
+    PyObject pyArg = p_PyUnicode_FromString(arg);
+    PyObject pArgs = p_PyTuple_Pack(1, pyArg);
+    PyObject pResult = p_PyObject_CallObject(pFunc, pArgs);
 
-    Py_DECREF(pArgs);
-    Py_DECREF(pFunc);
-    Py_DECREF(pModule);
-    env->ReleaseStringUTFChars(moduleName, modName);
-    env->ReleaseStringUTFChars(funcName, fnName);
+    env->ReleaseStringUTFChars(moduleName, mod);
+    env->ReleaseStringUTFChars(funcName, fn);
     env->ReleaseStringUTFChars(argJson, arg);
 
-    if (pResult == nullptr) {
-        PyErr_Print();
-        return env->NewStringUTF("{\"success\":false,\"error\":\"Hàm Python thất bại\"}");
+    if (!pResult) {
+        if (p_PyErr_Print) p_PyErr_Print();
+        return env->NewStringUTF("{\"success\":false,\"error\":\"Call failed\"}");
     }
 
-    // Convert kết quả thành string
-    PyObject *pStr = PyObject_Str(pResult);
-    const char *resultCStr = PyUnicode_AsUTF8(pStr);
-    jstring result = env->NewStringUTF(resultCStr ? resultCStr : "");
+    PyObject pStr = p_PyObject_Str(pResult);
+    const char *result = p_PyUnicode_AsUTF8 ? p_PyUnicode_AsUTF8(pStr) : "";
 
-    Py_DECREF(pStr);
-    Py_DECREF(pResult);
-    return result;
+    jstring ret = env->NewStringUTF(result ? result : "");
+    return ret;
 }
 
-/**
- * Finalize Python khi app đóng.
- */
 JNIEXPORT void JNICALL
 Java_com_nam2006_y2mate_PythonBridge_nativeFinalize(
-        JNIEnv *env, jobject /* this */) {
-    if (g_python_initialized) {
-        Py_Finalize();
-        g_python_initialized = false;
-        LOGI("Python đã finalize");
+        JNIEnv *env, jobject) {
+    if (g_initialized && p_Py_Finalize) {
+        p_Py_Finalize();
+        g_initialized = false;
+    }
+    if (g_libpython) {
+        dlclose(g_libpython);
+        g_libpython = nullptr;
     }
 }
 
