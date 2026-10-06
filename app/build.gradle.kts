@@ -5,16 +5,9 @@ plugins {
     id("com.chaquo.python")
 }
 
-// Đọc version code từ versioncode.txt ở root repo.
-// CI workflow sẽ tự động bump file này mỗi lần build.
-// Nếu file chưa tồn tại (build local lần đầu), dùng mặc định là 1.
 val versionCodeFromFile: Int = run {
     val f = rootProject.file("versioncode.txt")
-    if (f.exists()) {
-        f.readText().trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
-    } else {
-        1
-    }
+    if (f.exists()) f.readText().trim().toIntOrNull()?.coerceAtLeast(1) ?: 1 else 1
 }
 
 android {
@@ -25,26 +18,24 @@ android {
         applicationId = "com.nam2006.y2mate"
         minSdk = 29
         targetSdk = 34
-
-        // Version code đọc từ file, được CI bump tự động
         versionCode = versionCodeFromFile
-        // versionName theo versionCode để dễ nhìn trong Settings → About
         versionName = "1.0.$versionCodeFromFile"
 
-        ndk {
-            abiFilters += listOf("arm64-v8a")
-        }
+        ndk { abiFilters += listOf("arm64-v8a") }
 
         externalNativeBuild {
-            cmake {
-                cppFlags += "-std=c++17"
-            }
+            cmake { cppFlags += "-std=c++17" }
         }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -54,9 +45,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+    }
 
-    // Build JNI từ CMake
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -64,7 +56,6 @@ android {
         }
     }
 
-    // Đảm bảo Gradle pick up jniLibs và assets
     sourceSets {
         getByName("main") {
             jniLibs.srcDirs("src/main/jniLibs")
@@ -75,17 +66,16 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            // Tránh conflict nếu có nhiều lib cùng tên
             pickFirsts += listOf(
                 "**/libffmpeg.so",
-                "**/libffprobe.so"
+                "**/libffprobe.so",
+                "**/libc++_shared.so"
             )
         }
     }
 
     androidResources {
-        // Không nén các file binary trong assets (cần cho extract runtime)
-        noCompress += listOf("zip", "so", "ffmpeg", "ffprobe")
+        noCompress += listOf("py", "pyc", "so", "zip", "dat")
     }
 
     lint {
@@ -98,20 +88,45 @@ android {
             version = "3.11"
             pip {
                 install("yt-dlp")
+                install("certifi")
             }
         }
     }
 }
 
 dependencies {
+    // BOM
     implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+
+    // Compose core
     implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material3:material3-window-size-class")
+    implementation("androidx.compose.material:material-icons-extended")
+
+    // Animations
+    implementation("androidx.compose.animation:animation")
+    implementation("androidx.compose.animation:animation-graphics")
+
+    // Activity + Lifecycle
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+
+    // Core
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.core:core-splashscreen:1.0.1")
+
+    // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
+    // Image
     implementation("io.coil-kt:coil-compose:2.7.0")
+
+    // Debug
+    debugImplementation("androidx.compose.ui:ui-tooling")
 }
