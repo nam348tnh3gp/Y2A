@@ -3,108 +3,172 @@ name: Build APK
 on:
   workflow_dispatch:
 
+# Tránh 2 workflow chạy song song gây conflict version code
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
+# Cần quyền write để commit versioncode.txt
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      # v4 không còn cố cài gói 'tools' đã bị Google gỡ bỏ
       - uses: android-actions/setup-android@v4
 
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
 
+      # Tự động bump version code
+      - name: Bump version code
+        id: bump
+        run: |
+          set -e
+
+          # Đọc version hiện tại, mặc định 0 nếu file chưa tồn tại
+          if [ -f versioncode.txt ]; then
+            CURRENT=$(cat versioncode.txt | tr -d '[:space:]')
+            CURRENT=${CURRENT:-0}
+          else
+            echo "📝 Chưa có versioncode.txt, tạo mới với giá trị 1"
+            CURRENT=0
+          fi
+
+          # Validate số nguyên
+          if ! [[ "$CURRENT" =~ ^[0-9]+$ ]]; then
+            echo "⚠️ versioncode.txt không hợp lệ: '$CURRENT', reset về 0"
+            CURRENT=0
+          fi
+
+          NEW=$((CURRENT + 1))
+          echo "$NEW" > versioncode.txt
+
+          echo "🔢 Version code: $CURRENT → $NEW"
+          echo "new_version=$NEW" >> "$GITHUB_OUTPUT"
+
+      # Commit và push version mới (cần trước khi build để APK có version đúng)
+      - name: Commit version bump
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add versioncode.txt
+
+          if git diff --staged --quiet; then
+            echo "⚠️ Không có thay đổi để commit"
+          else
+            git commit -m "chore: bump version code to ${{ steps.bump.outputs.new_version }} [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+            echo "✅ Đã push version code ${{ steps.bump.outputs.new_version }}"
+          fi
+
       # Tải FFmpeg từ Termux và đặt vào đúng vị trí
       - name: Download FFmpeg from Termux
         run: |
           set -e
-          
-          # Phiên bản FFmpeg từ Termux (có thể pin hoặc để latest)
+
           FFMPEG_VERSION="8.1.3"
           ARCH="aarch64"
           DEB_URL="https://packages.termux.dev/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
-          
+
           echo "📥 Downloading FFmpeg ${FFMPEG_VERSION} (${ARCH})..."
           wget -q --show-progress -O ffmpeg.deb "${DEB_URL}" || {
             echo "❌ Không tải được từ URL chính, thử mirror..."
-            # Mirror dự phòng
             wget -q -O ffmpeg.deb "https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
           }
-          
+
           echo "📦 Extracting .deb..."
           mkdir -p ffmpeg-extracted
           dpkg-deb -xv ffmpeg.deb ./ffmpeg-extracted
-          
-          # Đường dẫn trong gói .deb của Termux
+
           TERMUX_BIN="./ffmpeg-extracted/data/data/com.termux/files/usr/bin"
           TERMUX_LIB="./ffmpeg-extracted/data/data/com.termux/files/usr/lib"
-          
-          # Kiểm tra binary tồn tại
+
           if [ ! -f "${TERMUX_BIN}/ffmpeg" ]; then
             echo "❌ Không tìm thấy ffmpeg binary!"
             ls -la "${TERMUX_BIN}/" || true
             exit 1
           fi
-          
-          # Tạo thư mục đích
+
           mkdir -p app/src/main/jniLibs/arm64-v8a
           mkdir -p app/src/main/assets/ffmpeg/lib
-          
-          # Copy binary ffmpeg -> libffmpeg.so (Android yêu cầu prefix "lib" + suffix ".so" để cài vào nativeLibraryDir)
+
           cp "${TERMUX_BIN}/ffmpeg" app/src/main/jniLibs/arm64-v8a/libffmpeg.so
-          
-          # Copy ffprobe (nếu có) -> libffprobe.so
           if [ -f "${TERMUX_BIN}/ffprobe" ]; then
             cp "${TERMUX_BIN}/ffprobe" app/src/main/jniLibs/arm64-v8a/libffprobe.so
           fi
-          
-          # Copy các thư viện .so phụ thuộc vào assets
+
           if [ -d "${TERMUX_LIB}" ]; then
             echo "📚 Copying dependent libraries..."
-            # Chỉ copy các thư viện cần thiết (av*, sw*, postproc, etc.)
             find "${TERMUX_LIB}" -maxdepth 1 -type f \
               \( -name "libav*.so*" -o -name "libsw*.so*" -o -name "libpostproc*.so*" \) \
               -exec cp {} app/src/main/assets/ffmpeg/lib/ \;
-            
-            # Liệt kê để verify
             ls -la app/src/main/assets/ffmpeg/lib/ | head -20
           else
-            echo "⚠️ Không có thư mục lib (FFmpeg có thể là static binary)"
+            echo "⚠️ Không có thư mục lib"
           fi
-          
-          # Cấp quyền thực thi cho binary (không cần thiết trên CI nhưng để chắc chắn)
+
           chmod 755 app/src/main/jniLibs/arm64-v8a/libffmpeg.so
-          
+
           echo "✅ FFmpeg setup hoàn tất:"
           ls -la app/src/main/jniLibs/arm64-v8a/
-          echo ""
-          echo "📊 Kích thước:"
           du -sh app/src/main/jniLibs/arm64-v8a/
           du -sh app/src/main/assets/ffmpeg/lib/ 2>/dev/null || true
 
-      # Tạo debug keystore để ký APK release
-      - name: Create debug keystore
+      # Dùng debug keystore có sẵn trong repo (đã commit)
+      - name: Setup debug keystore
         run: |
+          set -e
           mkdir -p ~/.android
-          if [ ! -f ~/.android/debug.keystore ]; then
-            keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android \
-              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+
+          if [ -f "debug.keystore" ]; then
+            echo "🔐 Copy debug.keystore từ repo vào ~/.android/"
+            cp debug.keystore ~/.android/debug.keystore
+            echo "✅ Keystore đã sẵn sàng:"
+            ls -la ~/.android/debug.keystore
+            keytool -list -keystore ~/.android/debug.keystore -storepass android | head -5
+          else
+            echo "⚠️ Không tìm thấy debug.keystore trong repo, tạo tạm thời..."
+            keytool -genkey -v -keystore ~/.android/debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: Build release APK
         run: gradle :app:assembleRelease --stacktrace
 
+      - name: Rename APK with version code
+        run: |
+          set -e
+          VERSION=${{ steps.bump.outputs.new_version }}
+          for f in app/build/outputs/apk/release/*.apk; do
+            if [[ "$f" != *".apk" ]] || [[ "$f" == *"-unaligned"* ]]; then continue; fi
+            DIR=$(dirname "$f")
+            BASE=$(basename "$f" .apk)
+            NEW_NAME="${BASE}-v${VERSION}.apk"
+            mv "$f" "${DIR}/${NEW_NAME}"
+            echo "📦 Renamed: $f → ${DIR}/${NEW_NAME}"
+          done
+          ls -la app/build/outputs/apk/release/
+
       - uses: actions/upload-artifact@v4
         with:
-          name: Mini-Y2mate-Pro-apk
+          name: Mini-Y2mate-Pro-apk-v${{ steps.bump.outputs.new_version }}
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
