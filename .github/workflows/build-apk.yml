@@ -1,10 +1,12 @@
-name: Build APK
+name: Build APK with Self-Built Python
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
 
 concurrency:
-  group: version-bump
+  group: build-apk
   cancel-in-progress: false
 
 permissions:
@@ -13,7 +15,19 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
+
+    env:
+      PYTHON_VERSION: "3.11.8"
+      OPENSSL_VERSION: "1.1.1w"
+      LIBFFI_VERSION: "3.4.6"
+      SQLITE_VERSION: "3450100"
+      SQLITE_YEAR: "2024"
+      ZLIB_VERSION: "1.3.1"
+      XZ_VERSION: "5.4.6"
+      ANDROID_API: "24"
+      TARGET_HOST: "aarch64-linux-android"
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,15 +39,20 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Install Host Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake libtool \
+            pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf
 
-      - uses: android-actions/setup-android@v4
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.10.2"
+      - name: Setup Android NDK r25c
+        run: |
+          mkdir -p $HOME/ndk
+          cd $HOME/ndk
+          wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+          unzip -q android-ndk-r25c-linux.zip
+          echo "NDK=$HOME/ndk/android-ndk-r25c" >> $GITHUB_ENV
+          echo "$HOME/ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
       # ==========================================================
       # Bump version code
@@ -51,7 +70,6 @@ jobs:
           if ! [[ "$CURRENT" =~ ^[0-9]+$ ]]; then CURRENT=0; fi
           NEW=$((CURRENT + 1))
           echo "$NEW" > versioncode.txt
-          echo "🔢 Version: $CURRENT → $NEW"
           echo "new_version=$NEW" >> "$GITHUB_OUTPUT"
 
       - name: Commit version bump
@@ -69,6 +87,243 @@ jobs:
           fi
 
       # ==========================================================
+      # Build Host Python
+      # ==========================================================
+      - name: Build Host Python
+        run: |
+          mkdir -p /tmp/build-host
+          cd /tmp/build-host
+          wget -q https://www.python.org/ftp/python/${{ env.PYTHON_VERSION }}/Python-${{ env.PYTHON_VERSION }}.tar.xz
+          tar -xf Python-${{ env.PYTHON_VERSION }}.tar.xz
+          cd Python-${{ env.PYTHON_VERSION }}
+          ./configure --prefix=/tmp/host-python --enable-optimizations=no
+          make -j$(nproc)
+          make install
+          echo "HOST_PYTHON=/tmp/host-python/bin/python3" >> $GITHUB_ENV
+
+      - name: Clone BeeWare Patches
+        run: |
+          git clone --depth 1 https://github.com/beeware/cpython-android-source-deps.git /tmp/beeware-deps
+          PATCHES_DIR=$(find /tmp/beeware-deps -type d -path "*/3.11*" 2>/dev/null | head -1)
+          if [ -z "$PATCHES_DIR" ]; then
+            echo "❌ Cannot find patches for 3.11"
+            exit 1
+          fi
+          echo "PATCHES_DIR=$PATCHES_DIR" >> $GITHUB_ENV
+
+      - name: Environment Setup
+        run: |
+          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          DEPS_INSTALL=$GITHUB_WORKSPACE/deps-install
+          mkdir -p $DEPS_INSTALL
+
+          echo "CC=$TOOLCHAIN/bin/${{ env.TARGET_HOST }}${{ env.ANDROID_API }}-clang" >> $GITHUB_ENV
+          echo "CXX=$TOOLCHAIN/bin/${{ env.TARGET_HOST }}${{ env.ANDROID_API }}-clang++" >> $GITHUB_ENV
+          echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+          echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
+          echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
+          echo "DEPS_INSTALL=$DEPS_INSTALL" >> $GITHUB_ENV
+
+          echo "PKG_CONFIG_LIBDIR=$DEPS_INSTALL/lib/pkgconfig" >> $GITHUB_ENV
+          echo "PKG_CONFIG_SYSROOT_DIR=$DEPS_INSTALL" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$DEPS_INSTALL/lib/pkgconfig" >> $GITHUB_ENV
+
+          echo "CFLAGS=-fPIC -O2 -I$DEPS_INSTALL/include -Wno-implicit-function-declaration" >> $GITHUB_ENV
+          echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$DEPS_INSTALL/lib" >> $GITHUB_ENV
+
+      # ==========================================================
+      # Cross-compile 5 dependencies
+      # ==========================================================
+      - name: Cross-Compile zlib
+        run: |
+          cd /tmp
+          wget -q https://zlib.net/zlib-${{ env.ZLIB_VERSION }}.tar.gz
+          tar -xf zlib-${{ env.ZLIB_VERSION }}.tar.gz
+          cd zlib-${{ env.ZLIB_VERSION }}
+          ./configure --prefix=$DEPS_INSTALL --static
+          make -j$(nproc) install
+
+      - name: Cross-Compile libffi
+        run: |
+          cd /tmp
+          wget -q https://github.com/libffi/libffi/releases/download/v${{ env.LIBFFI_VERSION }}/libffi-${{ env.LIBFFI_VERSION }}.tar.gz
+          tar -xf libffi-${{ env.LIBFFI_VERSION }}.tar.gz
+          cd libffi-${{ env.LIBFFI_VERSION }}
+          ./configure --host=${{ env.TARGET_HOST }} --prefix=$DEPS_INSTALL --enable-static --disable-shared
+          make -j$(nproc) install
+
+      - name: Cross-Compile OpenSSL
+        run: |
+          cd /tmp
+          wget -q https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+          tar -xf openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+          cd openssl-${{ env.OPENSSL_VERSION }}
+          ./Configure android-arm64 \
+            --prefix=$DEPS_INSTALL \
+            --openssldir=$DEPS_INSTALL/ssl \
+            shared no-engine no-tests no-async \
+            -D__ANDROID_API__=${{ env.ANDROID_API }}
+          make -j$(nproc) SHLIB_VERSION_NUMBER=
+          make install_sw
+
+      - name: Cross-Compile SQLite3
+        run: |
+          cd /tmp
+          SQLITE_URL="https://www.sqlite.org/${{ env.SQLITE_YEAR }}/sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
+          if ! curl --output /dev/null --silent --head --fail "$SQLITE_URL"; then
+            SQLITE_URL="https://www.sqlite.org/$(( ${{ env.SQLITE_YEAR }} - 1 ))/sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
+          fi
+          wget -q "$SQLITE_URL"
+          tar -xf sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz
+          cd sqlite-autoconf-${{ env.SQLITE_VERSION }}
+          ./configure --host=${{ env.TARGET_HOST }} --prefix=$DEPS_INSTALL --enable-static --disable-shared
+          make -j$(nproc) install
+
+      - name: Cross-Compile XZ
+        run: |
+          cd /tmp
+          wget -q https://github.com/tukaani-project/xz/releases/download/v${{ env.XZ_VERSION }}/xz-${{ env.XZ_VERSION }}.tar.gz
+          tar -xf xz-${{ env.XZ_VERSION }}.tar.gz
+          cd xz-${{ env.XZ_VERSION }}
+          ./configure --host=${{ env.TARGET_HOST }} --prefix=$DEPS_INSTALL --enable-static --disable-shared
+          make -j$(nproc) install
+
+      # ==========================================================
+      # Cross-compile CPython
+      # ==========================================================
+      - name: Cross-Compile CPython
+        run: |
+          cd /tmp
+          tar -xf /tmp/build-host/Python-${{ env.PYTHON_VERSION }}.tar.xz
+          cd Python-${{ env.PYTHON_VERSION }}
+
+          echo "Applying BeeWare patches from: $PATCHES_DIR"
+          for p in $PATCHES_DIR/*.patch; do
+            [ -f "$p" ] && patch -p1 < "$p" || true
+          done
+
+          cat > Modules/Setup.local <<'EOF'
+*disabled*
+_crypt
+_nis
+spwd
+ossaudiodev
+_curses
+_curses_panel
+readline
+_multiprocessing
+nis
+EOF
+
+          OPENSSL_CFLAGS="-I$DEPS_INSTALL/include" \
+          OPENSSL_LIBS="-L$DEPS_INSTALL/lib -lssl -lcrypto" \
+          LIBFFI_CFLAGS="-I$DEPS_INSTALL/include" \
+          LIBFFI_LIBS="-L$DEPS_INSTALL/lib -lffi" \
+          SQLITE3_CFLAGS="-I$DEPS_INSTALL/include" \
+          SQLITE3_LIBS="-L$DEPS_INSTALL/lib -lsqlite3" \
+          ZLIB_CFLAGS="-I$DEPS_INSTALL/include" \
+          ZLIB_LIBS="-L$DEPS_INSTALL/lib -lz" \
+          LZMA_CFLAGS="-I$DEPS_INSTALL/include" \
+          LZMA_LIBS="-L$DEPS_INSTALL/lib -llzma" \
+          ./configure \
+            --host=${{ env.TARGET_HOST }} \
+            --build=x86_64-pc-linux-gnu \
+            --prefix=$GITHUB_WORKSPACE/python-android \
+            --with-build-python=$HOST_PYTHON \
+            --enable-shared \
+            --disable-ipv6 \
+            --without-ensurepip \
+            ac_cv_file__dev_ptmx=no \
+            ac_cv_file__dev_ptc=no \
+            ac_cv_buggy_getaddrinfo=no \
+            ac_cv_little_endian_double=yes
+
+          make -j$(nproc)
+          make install
+
+      # ==========================================================
+      # Bootstrap pip, yt-dlp, certifi
+      # ==========================================================
+      - name: Bootstrap Pure-Python Wheels
+        run: |
+          TARGET_SITE=$GITHUB_WORKSPACE/python-android/lib/python3.11/site-packages
+          mkdir -p /tmp/wheels $TARGET_SITE
+
+          $HOST_PYTHON -m pip download \
+            yt-dlp certifi setuptools wheel pip mutagen \
+            --dest=/tmp/wheels --only-binary=:all: --no-deps
+
+          for whl in /tmp/wheels/*.whl; do
+            unzip -o -q "$whl" -d "$TARGET_SITE"
+          done
+
+      - name: Strip Binaries & Patch Hardcoded Paths
+        run: |
+          find $GITHUB_WORKSPACE/python-android -name "*.so*" \
+            -exec $STRIP --strip-unneeded {} \; 2>/dev/null || true
+          $STRIP --strip-unneeded $GITHUB_WORKSPACE/python-android/bin/python3.11 2>/dev/null || true
+
+          find $GITHUB_WORKSPACE/python-android -type f \
+            \( -name "_sysconfigdata*.py" -o -name "*.pc" -o -name "*-config" -o -name "Makefile" \) \
+            -exec sed -i "s|$GITHUB_WORKSPACE/python-android|/data/data/com.nam2006.y2mate/files/python|g" {} \;
+
+      # ==========================================================
+      # Collect jniLibs, Rename SONAMEs, Patch NEEDED, set RPATH
+      # ==========================================================
+      - name: Collect & Process Native Libraries
+        run: |
+          JNI=$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a
+          DYNLIB=$GITHUB_WORKSPACE/python-android/lib/python3.11/lib-dynload
+          mkdir -p $JNI
+
+          cp $GITHUB_WORKSPACE/python-android/lib/libpython3.11.so $JNI/
+          find $DEPS_INSTALL/lib -maxdepth 1 -name "*.so*" -exec cp {} $JNI/ \; 2>/dev/null || true
+
+          # Rename .so.N -> .so
+          for f in $JNI/*.so.*; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            new=$(echo "$base" | sed -E 's/(\.so)\.[0-9]+(\.[0-9]+)*$/\1/')
+            [ "$new" = "$base" ] && continue
+            mv "$f" "$JNI/$new"
+            echo "Renamed: $base → $new"
+          done
+
+          # Patch NEEDED in libpython + extension modules
+          PATCHED=0
+          for so in $JNI/libpython3.11.so $DYNLIB/*.so; do
+            [ -f "$so" ] || continue
+            fname=$(basename "$so")
+            for needed in $(readelf -d "$so" 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/'); do
+              new_needed=$(echo "$needed" | sed -E 's/(\.so)\.[0-9]+(\.[0-9]+)*$/\1/')
+              if [ "$new_needed" != "$needed" ] && [ -f "$JNI/$new_needed" ]; then
+                patchelf --replace-needed "$needed" "$new_needed" "$so"
+                PATCHED=$((PATCHED+1))
+              fi
+            done
+          done
+          echo "Patched $PATCHED NEEDED entries"
+
+          # Set RPATH=$ORIGIN so loader finds sibling .so
+          for so in $JNI/libpython3.11.so $JNI/libssl.so $JNI/libcrypto.so; do
+            [ -f "$so" ] && patchelf --force-rpath --set-rpath '$ORIGIN' "$so" 2>/dev/null || true
+          done
+
+          echo "Final jniLibs:"
+          ls -lh $JNI/
+
+      # ==========================================================
+      # Package runtime tar → assets
+      # ==========================================================
+      - name: Package Python Runtime into Assets
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/app/src/main/assets
+          cd $GITHUB_WORKSPACE/python-android
+          tar -czvf $GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar.gz .
+          ls -lh $GITHUB_WORKSPACE/app/src/main/assets/
+
+      # ==========================================================
       # Download FFmpeg from Termux
       # ==========================================================
       - name: Download FFmpeg from Termux
@@ -77,139 +332,36 @@ jobs:
           FFMPEG_VERSION="8.1.3"
           ARCH="aarch64"
           DEB_URL="https://packages.termux.dev/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
-
-          echo "📥 Downloading FFmpeg ${FFMPEG_VERSION}..."
-          wget -q -O ffmpeg.deb "${DEB_URL}" || {
-            wget -q -O ffmpeg.deb "https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
-          }
-
-          echo "📦 Extracting..."
+          wget -q -O ffmpeg.deb "${DEB_URL}"
           mkdir -p ffmpeg-extracted
           dpkg-deb -xv ffmpeg.deb ./ffmpeg-extracted
 
           TERMUX_BIN="./ffmpeg-extracted/data/data/com.termux/files/usr/bin"
           TERMUX_LIB="./ffmpeg-extracted/data/data/com.termux/files/usr/lib"
 
-          [ ! -f "${TERMUX_BIN}/ffmpeg" ] && { echo "❌ No ffmpeg binary"; exit 1; }
-
-          mkdir -p app/src/main/jniLibs/arm64-v8a
           mkdir -p app/src/main/assets/ffmpeg/lib
-
           cp "${TERMUX_BIN}/ffmpeg" app/src/main/jniLibs/arm64-v8a/libffmpeg.so
           [ -f "${TERMUX_BIN}/ffprobe" ] && cp "${TERMUX_BIN}/ffprobe" app/src/main/jniLibs/arm64-v8a/libffprobe.so
 
-          if [ -d "${TERMUX_LIB}" ]; then
-            find "${TERMUX_LIB}" -maxdepth 1 -type f \
-              \( -name "libav*.so*" -o -name "libsw*.so*" -o -name "libpostproc*.so*" \) \
-              -exec cp {} app/src/main/assets/ffmpeg/lib/ \;
-          fi
+          find "${TERMUX_LIB}" -maxdepth 1 -type f \
+            \( -name "libav*.so*" -o -name "libsw*.so*" -o -name "libpostproc*.so*" \) \
+            -exec cp {} app/src/main/assets/ffmpeg/lib/ \;
 
           chmod 755 app/src/main/jniLibs/arm64-v8a/libffmpeg.so
-          echo "✅ FFmpeg OK"
-          ls -la app/src/main/jniLibs/arm64-v8a/
 
       # ==========================================================
-      # Setup Python runtime (PBS from flet-dev/python-android)
+      # Setup Android SDK + Gradle
       # ==========================================================
-      - name: Setup Python runtime
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -ex
-          WORKSPACE="$GITHUB_WORKSPACE"
+      - uses: android-actions/setup-android@v4
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
 
-          # ---- STEP 1: Tải Python runtime từ flet-dev/python-android ----
-          # Đây là bản build dựa trên PBS, đã patch cho Android
-          echo "═══ STEP 1: Download Python 3.12 runtime ═══"
-          PYTHON_VERSION="3.12"
-          PYTHON_FULL_VERSION="3.12.14"
-          ABI="arm64-v8a"
-
-          # URL tarball từ flet-dev/python-android releases
-          TARBALL="python-android-dart-${PYTHON_FULL_VERSION}-${ABI}.tar.gz"
-          URL="https://github.com/flet-dev/python-build/releases/download/20260921/${TARBALL}"
-
-          rm -rf "$WORKSPACE/_python_runtime"
-          mkdir -p "$WORKSPACE/_python_runtime"
-          cd "$WORKSPACE/_python_runtime"
-
-          wget -q --show-progress -O "$TARBALL" "$URL"
-          tar -xzf "$TARBALL"
-          echo "Files extracted:"
-          ls -la
-
-          # ---- STEP 2: Copy .so vào jniLibs ----
-          echo "═══ STEP 2: Copy .so → jniLibs ═══"
-          mkdir -p "$WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-          for so in *.so; do
-            [ -f "$so" ] || continue
-            cp "$so" "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
-            echo "  ✅ $so"
-          done
-
-          # ---- STEP 3: Tải yt-dlp + certifi, extract vào assets/python/site-packages ----
-          echo "═══ STEP 3: yt-dlp + certifi → assets/python/site-packages ═══"
-          rm -rf "$WORKSPACE/_wheels"
-          mkdir -p "$WORKSPACE/_wheels"
-          cd "$WORKSPACE/_wheels"
-
-          python3 -m pip download yt-dlp certifi \
-            --no-deps --only-binary=:all: -d .
-          ls -la *.whl
-
-          SITE_PACKAGES="$WORKSPACE/app/src/main/assets/python/site-packages"
-          rm -rf "$SITE_PACKAGES"
-          mkdir -p "$SITE_PACKAGES"
-
-          for whl in *.whl; do
-            echo "  Extract: $whl"
-            unzip -q "$whl" -d "$SITE_PACKAGES"
-          done
-
-          echo "site-packages contents:"
-          ls "$SITE_PACKAGES" | head -20
-
-          # ---- STEP 4: Copy yt_dlp_bridge.py ----
-          echo "═══ STEP 4: yt_dlp_bridge.py → assets/ ═══"
-          if [ ! -f "$WORKSPACE/app/src/main/python/yt_dlp_bridge.py" ]; then
-            echo "❌ Missing yt_dlp_bridge.py"
-            find "$WORKSPACE/app" -name "yt_dlp_bridge.py"
-            exit 1
-          fi
-          cp "$WORKSPACE/app/src/main/python/yt_dlp_bridge.py" \
-             "$WORKSPACE/app/src/main/assets/yt_dlp_bridge.py"
-          echo "✅ Copied"
-
-          # ---- STEP 5: Verify ----
-          echo "═══ STEP 5: Verify ═══"
-          echo "📋 jniLibs:"
-          ls -lh "$WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
-          echo ""
-          echo "📋 assets/python/:"
-          ls -lh "$WORKSPACE/app/src/main/assets/python/"
-          echo ""
-          echo "📋 assets/python/site-packages/ (top level):"
-          ls "$WORKSPACE/app/src/main/assets/python/site-packages/" | head -10
-          echo ""
-          echo "📋 assets/ root:"
-          ls -lh "$WORKSPACE/app/src/main/assets/" | head -10
-          echo ""
-          echo "📊 Sizes:"
-          du -sh "$WORKSPACE/app/src/main/jniLibs/"
-          du -sh "$WORKSPACE/app/src/main/assets/"
-          echo ""
-          echo "✅ DONE"
-
-      # ==========================================================
-      # Setup debug keystore
-      # ==========================================================
       - name: Setup debug keystore
         run: |
-          set -e
           mkdir -p ~/.android
           if [ -f "debug.keystore" ]; then
             cp debug.keystore ~/.android/debug.keystore
-            keytool -list -keystore ~/.android/debug.keystore -storepass android | head -5
           else
             keytool -genkey -v -keystore ~/.android/debug.keystore \
               -storepass android -alias androiddebugkey -keypass android \
@@ -223,14 +375,12 @@ jobs:
       - name: Build release APK
         run: gradle :app:assembleRelease --stacktrace
 
-      - name: Rename APK with version
+      - name: Rename APK
         run: |
-          set -e
           VERSION=${{ steps.bump.outputs.new_version }}
           for f in app/build/outputs/apk/release/*.apk; do
-            if [[ "$f" != *".apk" ]] || [[ "$f" == *"-unaligned"* ]]; then continue; fi
-            DIR=$(dirname "$f")
-            BASE=$(basename "$f" .apk)
+            [[ "$f" != *".apk" ]] || [[ "$f" == *"-unaligned"* ]] && continue
+            DIR=$(dirname "$f"); BASE=$(basename "$f" .apk)
             mv "$f" "${DIR}/${BASE}-v${VERSION}.apk"
           done
           ls -la app/build/outputs/apk/release/
@@ -240,3 +390,4 @@ jobs:
           name: Mini-Y2mate-Pro-v${{ steps.bump.outputs.new_version }}
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+          retention-days: 30
