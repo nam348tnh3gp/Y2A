@@ -7,6 +7,10 @@ on:
         description: 'Packages (cách nhau bằng dấu cách). Để trống = đọc từ wheels/list.txt'
         required: false
         default: ''
+      force_rebuild:
+        description: 'Force rebuild tất cả (bỏ qua cache) — true/false'
+        required: false
+        default: 'false'
   push:
     branches:
       - main
@@ -69,6 +73,50 @@ jobs:
             build-essential autoconf automake libtool \
             pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf \
             cmake ninja-build nasm
+
+      # ============================================================
+      # 1.5. TẢI WHEEL TỪ RELEASE GẦN NHẤT (để skip build trùng)
+      # ============================================================
+      - name: Download previous wheels from latest release
+        id: prev
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eo pipefail
+          mkdir -p wheels-out
+
+          if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
+            echo "⚡ force_rebuild=true → bỏ qua cache"
+            echo "has_cache=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "=== Tìm release wheels gần nhất ==="
+          LATEST_TAG=$(gh release list --limit 50 --json tagName -q '.[] | select(.tagName | startswith("wheels-")) | .tagName' | head -1 || echo "")
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "Không có release wheels nào — build từ đầu"
+            echo "has_cache=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Latest wheels tag: $LATEST_TAG"
+
+          gh release download "$LATEST_TAG" \
+            --pattern '*.whl' \
+            --dir wheels-out \
+            --clobber 2>&1 | tail -5 || true
+
+          COUNT=$(ls wheels-out/*.whl 2>/dev/null | wc -l)
+          echo "Đã tải $COUNT wheel từ $LATEST_TAG"
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "has_cache=true" >> "$GITHUB_OUTPUT"
+            ls -lh wheels-out/ | head -40
+          else
+            echo "has_cache=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup Android NDK r25c
         run: |
@@ -183,9 +231,6 @@ jobs:
           CC="$CC" AR="$AR" RANLIB="$RANLIB" ./configure --prefix="$DEPS_INSTALL" --static
           make -j$(nproc) install
 
-      # ==========================================================
-      # 4. CROSS-COMPILE DEPS CHO lxml
-      # ==========================================================
       - name: Cross-Compile libxml2 (cho lxml)
         run: |
           cd /tmp
@@ -209,9 +254,6 @@ jobs:
             --without-python --without-crypto
           make -j$(nproc) install
 
-      # ==========================================================
-      # 5. CROSS-COMPILE DEPS CHO Pillow
-      # ==========================================================
       - name: Cross-Compile libjpeg-turbo (cho Pillow)
         run: |
           cd /tmp
@@ -243,9 +285,6 @@ jobs:
             --enable-static --disable-shared
           make -j$(nproc) install
 
-      # ==========================================================
-      # 6. CROSS-COMPILE OpenBLAS (C-only, no Fortran)
-      # ==========================================================
       - name: Cross-Compile OpenBLAS (C-only, no Fortran)
         run: |
           cd /tmp
@@ -296,9 +335,6 @@ jobs:
           make -j$(nproc)
           make install
 
-      # ==========================================================
-      # 8. SYMLINK + PIP
-      # ==========================================================
       - name: Symlink target Python path
         run: |
           sudo mkdir -p /data/data/com.nam2006.y2mate/files
@@ -334,7 +370,7 @@ jobs:
             "setuptools_scm<8.2" Cython expandvars pkgconfig cffi
 
           echo ""
-          echo "=== Verify entry points ==="
+          echo "=== Verify ==="
           export PATH="$SITE/bin:$PATH"
           export PYTHONPATH="$SITE"
           which maturin meson ninja || true
@@ -342,10 +378,8 @@ jobs:
           meson --version || echo "⚠️ meson FAIL"
 
           echo ""
-          echo "=== Verify HOST_PYTHON ==="
           echo "HOST_PYTHON=$HOST_PYTHON"
           "$HOST_PYTHON" --version
-          ls -lh /tmp/host-python/bin/python*
 
       - name: Read package list
         id: pkglist
@@ -382,7 +416,7 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # 11. BUILD WHEELS
+      # 11. BUILD WHEELS — có skip wheel đã có
       # ==========================================================
       - name: Build wheels for Android aarch64
         run: |
@@ -419,7 +453,7 @@ jobs:
             echo "✅ Stub librt.a created"
           fi
 
-          # --- Cross-compile env (KHÔNG dùng -nostdinc) ---
+          # --- Cross-compile env ---
           NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
@@ -429,7 +463,6 @@ jobs:
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
           export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
 
-          # Đưa NDK sysroot lên đầu để shadow /usr/include (glibc)
           export CFLAGS="-fPIC -O2 \
             -I$NDK_SYSROOT/usr/include \
             -I$NDK_SYSROOT/usr/include/aarch64-linux-android \
@@ -444,14 +477,12 @@ jobs:
           export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$DEPS_INSTALL"
 
-          # Fix cryptography: cross-compile env cho maturin/pyo3
           export PYO3_PYTHON="$HOST_PY"
           export PYO3_CROSS=1
           export PYO3_CROSS_PYTHON_VERSION="3.13"
           export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
           export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
 
-          # BLAS/LAPACK
           export NPY_BLAS_ORDER="openblas"
           export NPY_LAPACK_ORDER="openblas"
           export NPY_DISABLE_SVML=1
@@ -461,7 +492,6 @@ jobs:
           export LAPACK="$DEPS_INSTALL"
           export F77=""; export F90=""; export FC=""
 
-          # Cargo
           export CARGO_BUILD_TARGET="aarch64-linux-android"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L$DEPS_INSTALL/lib"
@@ -473,7 +503,89 @@ jobs:
           echo "=== Verify tools ==="
           which maturin meson ninja cargo "$HOST_PY" || true
 
+          # ============================================================
+          # Helper: check wheel đã tồn tại (bất kỳ version)
+          # ============================================================
+          wheel_exists() {
+            local pkg="$1"
+            local pkg_a pkg_b
+            pkg_a=$(echo "$pkg" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+            pkg_b=$(echo "$pkg" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
+            ls wheels-out/${pkg_a}-*.whl wheels-out/${pkg_b}-*.whl 2>/dev/null | head -1 | grep -q '.whl'
+          }
+
+          # ============================================================
+          # BUILD PILLOW RIÊNG (patch setup.py)
+          # ============================================================
+          if wheel_exists "Pillow"; then
+            echo "⏭️  Skip Pillow (đã có wheel)"
+          else
+            echo ""
+            echo "=========================================="
+            echo "🔨 Building: Pillow (patched)"
+            echo "=========================================="
+
+            PILLOW_SRC="/tmp/pillow-src"
+            rm -rf "$PILLOW_SRC" && mkdir -p "$PILLOW_SRC"
+            cd "$PILLOW_SRC"
+
+            "$HOST_PY" -m pip download Pillow \
+              --no-deps --no-binary=:all: \
+              --dest="$PILLOW_SRC" 2>&1 | tail -5
+
+            PILLOW_TARBALL=$(ls "$PILLOW_SRC"/Pillow-*.tar.gz 2>/dev/null | head -1)
+            if [ -z "$PILLOW_TARBALL" ]; then
+              echo "❌ Không tải được Pillow source"
+            else
+              tar -xf "$PILLOW_TARBALL"
+              PILLOW_DIR=$(find "$PILLOW_SRC" -maxdepth 1 -type d -name "Pillow-*" | head -1)
+              cd "$PILLOW_DIR"
+
+              echo "=== Patch Pillow setup.py ==="
+              cp setup.py setup.py.bak
+
+              python3 - <<'PYEOF'
+import re
+with open('setup.py', 'r') as f:
+    content = f.read()
+
+patterns = [
+    r'_include_dirs\.append\(["\']/usr/include["\']\)',
+    r'_include_dirs\.append\(["\']/usr/local/include["\']\)',
+    r'_include_dirs\s*=\s*\[["\']/usr/local/include["\'],\s*["\']/usr/include["\']\]',
+    r'_include_dirs\s*\+=\s*\[["\']/usr/local/include["\'],\s*["\']/usr/include["\']\]',
+]
+for p in patterns:
+    content = re.sub(p, 'pass  # patched out', content)
+
+content = content.replace('"/usr/local/include"', '"/nonexistent/usrdir"')
+content = content.replace("'/usr/local/include'", "'/nonexistent/usrdir'")
+content = content.replace('"/usr/include"', '"/nonexistent/usrdir"')
+content = content.replace("'/usr/include'", "'/nonexistent/usrdir'")
+
+with open('setup.py', 'w') as f:
+    f.write(content)
+print("✅ Patched")
+PYEOF
+
+              echo "=== setup.py đã patch ==="
+              grep -c "nonexistent" setup.py || echo "(0)"
+
+              "$HOST_PY" -m pip wheel . \
+                --no-deps --no-build-isolation \
+                --wheel-dir "$GITHUB_WORKSPACE/wheels-out" 2>&1 | tail -30 && \
+                echo "✅ Pillow OK" || \
+                echo "❌ Pillow FAILED"
+
+              cd "$GITHUB_WORKSPACE"
+            fi
+          fi
+
+          # ============================================================
+          # LOOP BUILD CÁC GÓI KHÁC
+          # ============================================================
           SUCCESS_LIST=""
+          SKIP_LIST=""
           FAIL_LIST=""
 
           for pkg in ${{ steps.pkglist.outputs.packages }}; do
@@ -481,6 +593,14 @@ jobs:
             echo "=========================================="
             echo "🔨 Building: $pkg"
             echo "=========================================="
+
+            # Skip nếu wheel đã tồn tại
+            if wheel_exists "$pkg"; then
+              echo "⏭️  Skip $pkg (đã có wheel)"
+              SKIP_LIST="$SKIP_LIST $pkg"
+              continue
+            fi
+
             if "$HOST_PY" -m pip wheel "$pkg" \
                   --no-deps --no-build-isolation --no-binary=:all: \
                   --wheel-dir wheels-out 2>&1 | tail -80; then
@@ -494,27 +614,48 @@ jobs:
 
           echo ""
           echo "=========================================="
-          echo "✅ Built OK:$SUCCESS_LIST"
+          echo "⏭️  Skipped (đã có cache):$SKIP_LIST"
+          echo "✅ Built mới:$SUCCESS_LIST"
           echo "❌ Failed:$FAIL_LIST"
           echo "=========================================="
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
-      # 12. POST-PROCESS
+      # 12. POST-PROCESS — không ghi đè wheel đã có trong wheels-final
       # ==========================================================
       - name: Post-process wheels
         run: |
           mkdir -p wheels-final
           shopt -s nullglob
+          SKIPPED=0
+          COPIED=0
+
           for whl in wheels-out/*.whl; do
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
+
+            # Bỏ qua nếu file đã tồn tại
+            if [ -f "wheels-final/$base" ]; then
+              SKIPPED=$((SKIPPED+1))
+              continue
+            fi
+
             cp "$whl" "wheels-final/$base"
+            COPIED=$((COPIED+1))
+
+            # Nếu là linux_aarch64, cũng copy bản đổi tên
             if [[ "$base" == *"linux_aarch64"* ]]; then
               newname="${base//linux_aarch64/android_24_arm64_v8a}"
-              cp "$whl" "wheels-final/$newname"
+              if [ ! -f "wheels-final/$newname" ]; then
+                cp "$whl" "wheels-final/$newname"
+                COPIED=$((COPIED+1))
+              fi
             fi
           done
+
+          echo "=== Post-process ==="
+          echo "Copied mới: $COPIED"
+          echo "Skipped (đã có): $SKIPPED"
           ls -lh wheels-final/ || echo "(rỗng)"
 
       # ==========================================================
@@ -537,6 +678,7 @@ jobs:
             Packages: ${{ steps.pkglist.outputs.packages }}
           files: wheels-final/*.whl
           generate_release_notes: false
+          make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
