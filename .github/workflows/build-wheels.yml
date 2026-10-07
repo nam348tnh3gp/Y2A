@@ -339,32 +339,43 @@ jobs:
           echo "✅ pip installed"
 
       # ==========================================================
-      # 8.5. CÀI BUILD DEPENDENCIES (QUAN TRỌNG!)
+      # 8.5. CÀI BUILD DEPENDENCIES (FIX vcs_versioning + entry points)
       # ==========================================================
       - name: Install build dependencies for wheels
         run: |
           SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
-          mkdir -p /tmp/wheels_build_deps
+          mkdir -p "$SITE"
 
-          echo "=== Download build backend packages ==="
-          "$HOST_PYTHON" -m pip download \
-            setuptools_scm setuptools-rust pybind11 \
-            maturin meson-python meson ninja \
-            pkgconfig Cython wheel \
-            expandvars packaging tomli \
-            poetry-core flit-core hatchling \
-            --dest=/tmp/wheels_build_deps \
-            --only-binary=:all: --no-deps
+          echo "=== Cài build backends vào target site-packages ==="
+          "$HOST_PYTHON" -m pip install \
+            --target="$SITE" \
+            --no-deps \
+            --no-cache-dir \
+            --only-binary=:all: \
+            --upgrade \
+            "setuptools_scm<8.2" \
+            pybind11 \
+            maturin \
+            meson-python \
+            meson \
+            ninja \
+            pkgconfig \
+            Cython \
+            expandvars \
+            packaging \
+            tomli \
+            poetry-core \
+            flit-core \
+            hatchling \
+            wheel \
+            setuptools-rust
 
           echo ""
-          echo "=== Extract vào target site-packages ==="
-          for whl in /tmp/wheels_build_deps/*.whl; do
-            echo "  $(basename "$whl")"
-            unzip -o -q "$whl" -d "$SITE"
-          done
+          echo "=== Entry points (maturin, meson, ninja) ==="
+          ls -lh "$SITE/bin/" 2>/dev/null || echo "(không có bin/)"
 
           echo ""
-          echo "=== Verify ==="
+          echo "=== Verify modules ==="
           for m in setuptools_scm pybind11 maturin mesonpy pkgconfig expandvars Cython; do
             if [ -d "$SITE/$m" ] || ls "$SITE"/${m}* >/dev/null 2>&1; then
               echo "  ✅ $m"
@@ -372,6 +383,14 @@ jobs:
               echo "  ❌ $m MISSING"
             fi
           done
+
+          echo ""
+          echo "=== Verify entry points chạy được ==="
+          export PATH="$SITE/bin:$PATH"
+          export PYTHONPATH="$SITE"
+          echo "maturin: $(maturin --version 2>&1 || echo FAIL)"
+          echo "meson:   $(meson --version 2>&1 || echo FAIL)"
+          echo "ninja:   $(ninja --version 2>&1 || echo FAIL)"
 
       # ==========================================================
       # 9. ĐỌC DANH SÁCH PACKAGE
@@ -461,6 +480,7 @@ jobs:
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
           export PYTHONPATH="$SYSCONF_DIR:$TARGET_SITE"
+          export PATH="$TARGET_SITE/bin:$HOME/.cargo/bin:$PATH"
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
           export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
 
@@ -485,7 +505,15 @@ jobs:
           export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
 
-          # --- 7. Loop build ---
+          # --- 7. Verify entry points trước khi build ---
+          echo ""
+          echo "=== Verify tools ==="
+          which maturin || echo "⚠️ maturin NOT in PATH"
+          which meson   || echo "⚠️ meson NOT in PATH"
+          which ninja   || echo "⚠️ ninja NOT in PATH"
+          which cargo   || echo "⚠️ cargo NOT in PATH"
+
+          # --- 8. Loop build ---
           SUCCESS_LIST=""
           FAIL_LIST=""
 
@@ -534,6 +562,23 @@ jobs:
           done
           echo ""
           ls -lh wheels-final/ || echo "(rỗng)"
+
+      # ==========================================================
+      # 12.5 VERIFY TAG
+      # ==========================================================
+      - name: Verify wheel tags
+        run: |
+          echo "=== Tags trong wheels-final ==="
+          shopt -s nullglob
+          for whl in wheels-final/*.whl; do
+            [ -f "$whl" ] || continue
+            echo ""
+            echo "File: $(basename "$whl")"
+            content=$(unzip -p "$whl" "*.dist-info/WHEEL" 2>/dev/null || true)
+            if [ -n "$content" ]; then
+              echo "$content" | grep -iE "^Tag:|^Root-Is-Purelib:" || echo "  (không có Tag)"
+            fi
+          done
 
       # ==========================================================
       # 13. RELEASE
