@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:label="Mini-Y2mate Repository"
+        android:icon="@drawable/ic_plugin"
+        android:theme="@style/Theme.Material3.DayNight"
+        android:allowBackup="false"
+        android:supportsRtl="true">
+
+        <!-- ==========================================================
+             METADATA mà App A sẽ đọc qua PackageManager.
+             Sửa URL này thành GitHub Pages của bạn.
+             ========================================================== -->
+        <meta-data
+            android:name="pip.index_url"
+            android:value="https://nam348tnh3gp.github.io/Y2A/simple/" />
+
+        <meta-data
+            android:name="pip.extra_index_url"
+            android:value="https://pypi.org/simple/" />
+
+        <meta-data
+            android:name="pip.trusted_host"
+            android:value="nam348tnh3gp.github.io" />
+
+        <meta-data
+            android:name="pip.plugin_version"
+            android:value="1" />
+
+        <!-- Đánh dấu đây là plugin cho App A -->
+        <meta-data
+            android:name="pip.companion"
+            android:value="Mini-Y2mate Repository" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+</manifest>
