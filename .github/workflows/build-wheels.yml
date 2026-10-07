@@ -11,6 +11,10 @@ on:
         description: 'Force rebuild — true/false'
         required: false
         default: 'false'
+      clean_old_releases:
+        description: 'Xóa release wheels cũ (giữ 3 gần nhất) — true/false'
+        required: false
+        default: 'false'
   push:
     branches:
       - main
@@ -78,6 +82,46 @@ jobs:
             pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf \
             cmake ninja-build nasm
 
+      # ============================================================
+      # 0. CLEANUP RELEASES CŨ (nếu user yêu cầu)
+      # ============================================================
+      - name: Cleanup old wheel releases
+        if: github.event.inputs.clean_old_releases == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== Danh sách releases wheels ==="
+          gh release list --limit 100 --json tagName -q '.[] | select(.tagName | startswith("wheels-")) | .tagName' > /tmp/all_tags.txt
+          cat /tmp/all_tags.txt
+
+          TOTAL=$(wc -l < /tmp/all_tags.txt)
+          echo "Tổng: $TOTAL release"
+
+          if [ "$TOTAL" -le 3 ]; then
+            echo "≤ 3 release — không cần xóa"
+            exit 0
+          fi
+
+          # Giữ 3 release mới nhất, xóa phần còn lại
+          KEEP=$(head -3 /tmp/all_tags.txt)
+          DELETE=$(tail -n +4 /tmp/all_tags.txt)
+
+          echo "=== Giữ lại ==="
+          echo "$KEEP"
+          echo "=== Xóa ==="
+          echo "$DELETE"
+
+          while read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "→ Xóa release: $tag"
+            gh release delete "$tag" --yes --cleanup-tag 2>&1 || true
+          done <<< "$DELETE"
+
+          echo "✅ Cleanup done"
+
+      # ============================================================
+      # 1.5. TẢI WHEEL TỪ RELEASE GẦN NHẤT
+      # ============================================================
       - name: Download previous wheels
         id: prev
         continue-on-error: true
@@ -385,36 +429,14 @@ jobs:
             ar rcs "$DEPS_INSTALL/lib/librt.a"
           fi
 
-          # ────────────────────────────────────────────────
-          # Tìm clang builtin include (NDK r25c)
-          # ────────────────────────────────────────────────
           NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           NDK_PREBUILT="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-
           CLANG_BUILTIN=$("$CC" -print-resource-dir 2>/dev/null)/include
-
           if [ ! -f "$CLANG_BUILTIN/stddef.h" ]; then
-            echo "⚠️  -print-resource-dir fail, thử find..."
             CLANG_BUILTIN=$(find "$NDK_PREBUILT" -type f -name "stddef.h" 2>/dev/null | head -1 | xargs -r dirname)
           fi
-
-          echo "NDK_SYSROOT:   $NDK_SYSROOT"
           echo "CLANG_BUILTIN: ${CLANG_BUILTIN:-NOT_FOUND}"
 
-          if [ -z "$CLANG_BUILTIN" ] || [ ! -f "$CLANG_BUILTIN/stddef.h" ]; then
-            echo "❌ Không tìm được clang builtin"
-            echo "=== Cấu trúc NDK prebuilt ==="
-            ls -la "$NDK_PREBUILT/"
-            echo "=== Tìm thư mục clang ==="
-            find "$NDK_PREBUILT" -maxdepth 4 -type d -name "clang*" 2>/dev/null | head
-            echo "=== Tìm stddef.h ==="
-            find "$NDK_PREBUILT" -type f -name "stddef.h" 2>/dev/null | head
-            exit 1
-          fi
-          echo "✅ Clang builtin OK"
-          ls "$CLANG_BUILTIN/" | grep -E "stddef|stdarg" | head
-
-          # ─── Cross-compile env ───
           export NDK_SYSROOT CLANG_BUILTIN
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
@@ -517,13 +539,11 @@ jobs:
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
-      # 11.5. PATCH cryptography wheel — link libpython3.13.so
+      # 11.5. PATCH cryptography wheel
       # ==========================================================
       - name: Patch cryptography wheel
         run: |
           set -eo pipefail
-
-          # Ưu tiên wheel mới build (linux_aarch64), fallback bất kỳ
           CRYPTO_WHL=$(ls wheels-out/cryptography-*linux_aarch64.whl 2>/dev/null | head -1)
           if [ -z "$CRYPTO_WHL" ]; then
             CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1)
@@ -532,8 +552,6 @@ jobs:
             echo "⚠️ Không có wheel cryptography"
             exit 0
           fi
-
-          # Absolute path TRƯỚC khi cd
           CRYPTO_WHL=$(realpath "$CRYPTO_WHL")
           echo "Wheel: $CRYPTO_WHL"
 
@@ -549,9 +567,8 @@ jobs:
           fi
           echo "SO: $RUST_SO"
 
-          # Skip nếu đã patch rồi
           if readelf -d "$RUST_SO" | grep -q "libpython3.13.so"; then
-            echo "✅ Wheel đã patch từ trước — skip"
+            echo "✅ Wheel đã patch — skip"
             exit 0
           fi
 
@@ -568,9 +585,7 @@ jobs:
           cd "$WORK"
           rm -f "$CRYPTO_WHL"
           zip -rq "$CRYPTO_WHL" .
-          echo ""
           echo "✅ Đã patch: $CRYPTO_WHL"
-          ls -lh "$CRYPTO_WHL"
 
       # ==========================================================
       # 12. POST-PROCESS
@@ -636,24 +651,57 @@ jobs:
             ${{ github.event.repository.name }} \
             ${{ steps.tag.outputs.tag }}
 
+      # ==========================================================
+      # 14. COMMIT DOCS — FIX
+      # ==========================================================
       - name: Commit docs
         if: hashFiles('wheels-final/*.whl') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/
+
+          # 1. Add + commit docs
+          git add docs/ 2>/dev/null || true
+
           if git diff --staged --quiet; then
-            echo "no change"
-          else
-            git commit -m "chore(wheels): update index [${{ steps.tag.outputs.tag }}] [skip ci]"
-            for i in 1 2 3 4 5; do
-              if git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
-                break
-              fi
-              sleep 5
-            done
+            echo "no change in docs/"
+            exit 0
           fi
+
+          git commit -m "chore(wheels): update index [${{ steps.tag.outputs.tag }}] [skip ci]"
+
+          # 2. Cleanup unstaged/untracked TRƯỚC khi pull
+          # Xoá mọi thay đổi ở tracked files chưa commit
+          git checkout -- . 2>/dev/null || true
+          git reset --hard HEAD 2>/dev/null || true
+
+          # Xoá untracked files nhưng giữ wheels-out/final để chạy tiếp
+          git clean -fd -x -e wheels-out -e wheels-final 2>/dev/null || true
+
+          echo "=== git status sau cleanup ==="
+          git status --short || true
+
+          # 3. Pull + push với retry
+          for i in 1 2 3 4 5; do
+            echo "=== Attempt $i ==="
+            if git pull --rebase origin "${{ github.ref_name }}" && \
+               git push origin "HEAD:${{ github.ref_name }}"; then
+              echo "✅ Push OK (attempt $i)"
+              exit 0
+            fi
+            echo "⚠️ Retry $i"
+            # Reset lại để retry sạch
+            git checkout -- . 2>/dev/null || true
+            git reset --hard HEAD 2>/dev/null || true
+            git clean -fd -x -e wheels-out -e wheels-final 2>/dev/null || true
+            sleep 5
+          done
+
+          echo "❌ Push thất bại sau 5 lần"
+          exit 1
 
       - name: Summary
         if: always()
