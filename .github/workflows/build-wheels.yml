@@ -53,56 +53,22 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Debug apt sources
-        run: |
-          echo "=== /etc/apt/sources.list ==="
-          cat /etc/apt/sources.list 2>/dev/null || echo "(trống)"
-          echo ""
-          echo "=== /etc/apt/sources.list.d/*.list ==="
-          for f in /etc/apt/sources.list.d/*.list; do
-            [ -f "$f" ] && echo "--- $f ---" && cat "$f"
-          done
-
       - name: Install Host Tools
         run: |
-          # ============================================================
-          # Thay mirror azure (chậm/timeout) → archive.ubuntu.com
-          # ============================================================
           sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
             /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null || true
           sudo sed -i 's|https://azure.archive.ubuntu.com|https://archive.ubuntu.com|g' \
             /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null || true
-
-          # ============================================================
-          # Update với timeout ngắn, không treo
-          # ============================================================
           sudo apt-get update \
             -o Acquire::http::Timeout=15 \
             -o Acquire::https::Timeout=15 \
             -o Acquire::Retries=1 \
             -o Acquire::ForceIPv4=true \
             -qq || true
-
-          # ============================================================
-          # Cài packages
-          # ============================================================
           sudo apt-get install -y --no-install-recommends \
             build-essential autoconf automake libtool \
             pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf \
             cmake ninja-build nasm
-
-          # ============================================================
-          # Verify tools có mặt
-          # ============================================================
-          echo "=== Verify tools ==="
-          for tool in gcc g++ make autoconf automake libtool pkg-config \
-                       wget curl unzip git xz python3 pip3 patchelf cmake ninja nasm; do
-            if command -v "$tool" >/dev/null 2>&1; then
-              echo "✅ $tool: $(command -v $tool)"
-            else
-              echo "❌ $tool MISSING"
-            fi
-          done
 
       - name: Setup Android NDK r25c
         run: |
@@ -278,7 +244,6 @@ jobs:
 
       # ==========================================================
       # 6. CROSS-COMPILE OpenBLAS (C-only, no Fortran)
-      #    Build và install tách 2 lệnh make riêng
       # ==========================================================
       - name: Cross-Compile OpenBLAS (C-only, no Fortran)
         run: |
@@ -304,21 +269,13 @@ jobs:
             "CFLAGS=-O2 -fPIC -I$DEPS_INSTALL/include"
           )
 
-          echo "=== Bước 1: BUILD ==="
+          echo "=== BUILD ==="
           make -j$(nproc) "${MAKE_VARS[@]}"
 
-          echo ""
-          echo "=== Kiểm tra file .a sau build ==="
-          ls -lh libopenblas*.a libopenblas*.so* 2>/dev/null | head -10 || true
-
-          echo ""
-          echo "=== Bước 2: INSTALL ==="
+          echo "=== INSTALL ==="
           make "${MAKE_VARS[@]}" PREFIX="$DEPS_INSTALL" install
 
-          echo ""
-          echo "=== Kiểm tra file sau install ==="
-          ls -lh "$DEPS_INSTALL/lib/" | grep -iE "openblas|lapack|blas" || echo "(không có file lib)"
-          ls -lh "$DEPS_INSTALL/include/" | grep -iE "openblas|cblas|lapack" || echo "(không có file header)"
+          ls -lh "$DEPS_INSTALL/lib/" | grep -iE "openblas|lapack|blas" || echo "(không có)"
 
       # ==========================================================
       # 7. CROSS-COMPILE CPYTHON 3.13
@@ -382,6 +339,41 @@ jobs:
           echo "✅ pip installed"
 
       # ==========================================================
+      # 8.5. CÀI BUILD DEPENDENCIES (QUAN TRỌNG!)
+      # ==========================================================
+      - name: Install build dependencies for wheels
+        run: |
+          SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
+          mkdir -p /tmp/wheels_build_deps
+
+          echo "=== Download build backend packages ==="
+          "$HOST_PYTHON" -m pip download \
+            setuptools_scm setuptools-rust pybind11 \
+            maturin meson-python meson ninja \
+            pkgconfig Cython wheel \
+            expandvars packaging tomli \
+            poetry-core flit-core hatchling \
+            --dest=/tmp/wheels_build_deps \
+            --only-binary=:all: --no-deps
+
+          echo ""
+          echo "=== Extract vào target site-packages ==="
+          for whl in /tmp/wheels_build_deps/*.whl; do
+            echo "  $(basename "$whl")"
+            unzip -o -q "$whl" -d "$SITE"
+          done
+
+          echo ""
+          echo "=== Verify ==="
+          for m in setuptools_scm pybind11 maturin mesonpy pkgconfig expandvars Cython; do
+            if [ -d "$SITE/$m" ] || ls "$SITE"/${m}* >/dev/null 2>&1; then
+              echo "  ✅ $m"
+            else
+              echo "  ❌ $m MISSING"
+            fi
+          done
+
+      # ==========================================================
       # 9. ĐỌC DANH SÁCH PACKAGE
       # ==========================================================
       - name: Read package list
@@ -392,8 +384,16 @@ jobs:
           else
             LIST=$(grep -v '^#' wheels/list.txt | grep -v '^$' | tr '\n' ' ')
           fi
-          echo "packages=$LIST" >> "$GITHUB_OUTPUT"
-          echo "📦 Sẽ build: $LIST"
+          # Loại bỏ token không phải package (số, ký tự đặc biệt)
+          CLEAN=""
+          for p in $LIST; do
+            if echo "$p" | grep -qE '^[a-zA-Z][a-zA-Z0-9_.\-]*$'; then
+              CLEAN="$CLEAN $p"
+            fi
+          done
+          CLEAN=$(echo "$CLEAN" | xargs)
+          echo "packages=$CLEAN" >> "$GITHUB_OUTPUT"
+          echo "📦 Sẽ build: $CLEAN"
 
       # ==========================================================
       # 10. RUST
@@ -449,7 +449,14 @@ jobs:
             echo "✅ Headers copied"
           fi
 
-          # --- 3. Cross-compile env ---
+          # --- 3. STUB librt.a (Android gộp librt vào libc) ---
+          mkdir -p "$DEPS_INSTALL/lib"
+          if [ ! -f "$DEPS_INSTALL/lib/librt.a" ]; then
+            ar rcs "$DEPS_INSTALL/lib/librt.a"
+            echo "✅ Stub librt.a created"
+          fi
+
+          # --- 4. Cross-compile env ---
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
@@ -461,7 +468,7 @@ jobs:
           export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$DEPS_INSTALL"
 
-          # --- 4. BLAS/LAPACK env cho numpy ---
+          # --- 5. BLAS/LAPACK ---
           export NPY_BLAS_ORDER="openblas"
           export NPY_LAPACK_ORDER="openblas"
           export NPY_DISABLE_SVML=1
@@ -469,27 +476,14 @@ jobs:
           export OPENBLAS="$DEPS_INSTALL"
           export BLAS="$DEPS_INSTALL"
           export LAPACK="$DEPS_INSTALL"
-          export F77=""
-          export F90=""
-          export FC=""
+          export F77=""; export F90=""; export FC=""
 
-          # --- 5. Cargo ---
+          # --- 6. Cargo ---
           export CARGO_BUILD_TARGET="aarch64-linux-android"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
           export OPENSSL_DIR="$DEPS_INSTALL"
           export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
-
-          # --- 6. Test import ---
-          echo ""
-          echo "=== Test sysconfig ==="
-          "$HOST_PY" -c "
-          import importlib, os
-          name = os.environ['_PYTHON_SYSCONFIGDATA_NAME']
-          s = importlib.import_module(name)
-          print('  EXT_SUFFIX =', s.build_time_vars.get('EXT_SUFFIX', 'n/a'))
-          print('  CC         =', s.build_time_vars.get('CC', 'n/a'))
-          "
 
           # --- 7. Loop build ---
           SUCCESS_LIST=""
@@ -519,8 +513,6 @@ jobs:
           echo "✅ Built OK:$SUCCESS_LIST"
           echo "❌ Failed:$FAIL_LIST"
           echo "=========================================="
-          echo ""
-          echo "=== Wheels built ==="
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
@@ -541,25 +533,7 @@ jobs:
             fi
           done
           echo ""
-          echo "=== Final wheels ==="
           ls -lh wheels-final/ || echo "(rỗng)"
-
-      # ==========================================================
-      # 12.5 VERIFY TAG
-      # ==========================================================
-      - name: Verify wheel tags
-        run: |
-          echo "=== Tags trong wheels-final ==="
-          shopt -s nullglob
-          for whl in wheels-final/*.whl; do
-            [ -f "$whl" ] || continue
-            echo ""
-            echo "File: $(basename "$whl")"
-            content=$(unzip -p "$whl" "*.dist-info/WHEEL" 2>/dev/null || true)
-            if [ -n "$content" ]; then
-              echo "$content" | grep -iE "^Tag:|^Root-Is-Purelib:" || echo "  (không có Tag)"
-            fi
-          done
 
       # ==========================================================
       # 13. RELEASE
