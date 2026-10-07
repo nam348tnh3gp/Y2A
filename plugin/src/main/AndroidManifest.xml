@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- ============================================================
+         App B cần query App A để biết đã cài chưa.
+         ============================================================ -->
+    <queries>
+        <package android:name="com.nam2006.y2mate" />
+    </queries>
+
     <application
         android:label="Mini-Y2mate Repository"
         android:icon="@drawable/ic_plugin"
@@ -10,7 +17,6 @@
 
         <!-- ==========================================================
              METADATA mà App A sẽ đọc qua PackageManager.
-             Sửa URL này thành GitHub Pages của bạn.
              ========================================================== -->
         <meta-data
             android:name="pip.index_url"
