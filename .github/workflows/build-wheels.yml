@@ -119,7 +119,8 @@ jobs:
       - name: Cross-Compile OpenSSL
         run: |
           cd /tmp
-          wget -q "https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
+          wget -q "https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz" \
+            || wget -q "https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
           tar -xf "openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
           cd "openssl-${{ env.OPENSSL_VERSION }}"
 
@@ -164,7 +165,7 @@ jobs:
       - name: Cross-Compile zlib
         run: |
           cd /tmp
-          wget -q "https://zlib.net/zlib-${{ env.ZLIB_VERSION }}.tar.gz"
+          wget -q "https://github.com/madler/zlib/releases/download/v${{ env.ZLIB_VERSION }}/zlib-${{ env.ZLIB_VERSION }}.tar.gz"
           tar -xf "zlib-${{ env.ZLIB_VERSION }}.tar.gz"
           cd "zlib-${{ env.ZLIB_VERSION }}"
           CC="$CC" AR="$AR" RANLIB="$RANLIB" ./configure --prefix="$DEPS_INSTALL" --static
@@ -222,9 +223,15 @@ jobs:
       - name: Cross-Compile libpng (cho Pillow)
         run: |
           cd /tmp
-          wget -q "https://download.sourceforge.net/libpng/libpng-${{ env.LIBPNG_VERSION }}.tar.gz"
+          wget -q "https://download.sourceforge.net/libpng/libpng-${{ env.LIBPNG_VERSION }}.tar.gz" \
+            || wget -q "https://github.com/pnggroup/libpng/archive/refs/tags/v${{ env.LIBPNG_VERSION }}.tar.gz" -O "libpng-${{ env.LIBPNG_VERSION }}.tar.gz"
           tar -xf "libpng-${{ env.LIBPNG_VERSION }}.tar.gz"
-          cd "libpng-${{ env.LIBPNG_VERSION }}"
+          # Nếu tải từ GitHub, tên thư mục là libpng-1.6.43 (bỏ tiền tố v)
+          if [ -d "libpng-${{ env.LIBPNG_VERSION }}" ]; then
+            cd "libpng-${{ env.LIBPNG_VERSION }}"
+          else
+            cd "libpng-${{ env.LIBPNG_VERSION }}"
+          fi
           ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
             --enable-static --disable-shared
           make -j$(nproc) install
