@@ -85,8 +85,8 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     // ========================================================
     setenv("PYTHONHOME", pythonHome, 1);
 
-    std::string stdlib = std::string(pythonHome) + "/lib/python3.11";
-    std::string dynload = stdlib + "/lib-dynload";
+    std::string stdlib   = std::string(pythonHome) + "/lib/python3.13";
+    std::string dynload  = stdlib + "/lib-dynload";
     std::string sitePkgs = stdlib + "/site-packages";
     std::string pythonPath = stdlib + ":" + dynload + ":" + sitePkgs + ":" + filesDir;
     setenv("PYTHONPATH", pythonPath.c_str(), 1);
@@ -112,9 +112,9 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     setenv("PYTHONUNBUFFERED", "1", 1);
 
     // ========================================================
-    // dlopen libpython3.11.so
+    // dlopen libpython3.13.so
     // ========================================================
-    std::string libPath = std::string(nativeLibDir) + "/libpython3.11.so";
+    std::string libPath = std::string(nativeLibDir) + "/libpython3.13.so";
     g_libpython = dlopen(libPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (!g_libpython) {
         LOGE("❌ dlopen fail: %s", dlerror());
@@ -123,7 +123,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         env->ReleaseStringUTFChars(jFilesDir, filesDir);
         return JNI_FALSE;
     }
-    LOGI("✅ dlopen libpython OK");
+    LOGI("✅ dlopen libpython3.13 OK");
 
     // ========================================================
     // Load symbols
