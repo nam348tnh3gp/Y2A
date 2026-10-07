@@ -226,12 +226,7 @@ jobs:
           wget -q "https://download.sourceforge.net/libpng/libpng-${{ env.LIBPNG_VERSION }}.tar.gz" \
             || wget -q "https://github.com/pnggroup/libpng/archive/refs/tags/v${{ env.LIBPNG_VERSION }}.tar.gz" -O "libpng-${{ env.LIBPNG_VERSION }}.tar.gz"
           tar -xf "libpng-${{ env.LIBPNG_VERSION }}.tar.gz"
-          # Nếu tải từ GitHub, tên thư mục là libpng-1.6.43 (bỏ tiền tố v)
-          if [ -d "libpng-${{ env.LIBPNG_VERSION }}" ]; then
-            cd "libpng-${{ env.LIBPNG_VERSION }}"
-          else
-            cd "libpng-${{ env.LIBPNG_VERSION }}"
-          fi
+          cd "libpng-${{ env.LIBPNG_VERSION }}"
           ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
             --enable-static --disable-shared
           make -j$(nproc) install
@@ -345,16 +340,42 @@ jobs:
           set -eo pipefail
           HOST_PY="$HOST_PYTHON"
           TARGET_ROOT="$GITHUB_WORKSPACE/python-android"
-          TARGET_SITE="$TARGET_ROOT/lib/python3.13/site-packages"
+          TARGET_STDLIB="$TARGET_ROOT/lib/python3.13"
+          TARGET_SITE="$TARGET_STDLIB/site-packages"
           mkdir -p wheels-out
 
           # ============================================================
-          # Cross-compile env cho setuptools/distutils
+          # 1. Detect tên file _sysconfigdata trong target stdlib
+          # ============================================================
+          echo "=== Target stdlib chứa sysconfig: ==="
+          ls "$TARGET_STDLIB/" | grep -i sysconfig || echo "(không tìm thấy)"
+
+          SYSCONF_FILE=$(ls "$TARGET_STDLIB"/_sysconfigdata__*.py 2>/dev/null | head -1)
+          if [ -z "$SYSCONF_FILE" ]; then
+            echo "❌ Không tìm thấy _sysconfigdata*.py trong $TARGET_STDLIB"
+            ls -la "$TARGET_STDLIB/" || true
+            exit 1
+          fi
+          SYSCONF_NAME=$(basename "$SYSCONF_FILE" .py)
+          echo "✅ Sysconfig data name: $SYSCONF_NAME"
+
+          # ============================================================
+          # 2. Copy _sysconfigdata ra thư mục riêng
+          #    (không thêm cả stdlib target vào PYTHONPATH để tránh conflict)
+          # ============================================================
+          SYSCONF_DIR="$GITHUB_WORKSPACE/sysconfigdata-host"
+          rm -rf "$SYSCONF_DIR"
+          mkdir -p "$SYSCONF_DIR"
+          cp "$SYSCONF_FILE" "$SYSCONF_DIR/"
+          echo "✅ Copied: $(basename "$SYSCONF_FILE")"
+
+          # ============================================================
+          # 3. Cross-compile env cho setuptools/distutils
           # ============================================================
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
-          export _PYTHON_SYSCONFIGDATA_NAME="_sysconfigdata__linux_aarch64-linux-android"
-          export PYTHONPATH="$TARGET_SITE"
+          export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
+          export PYTHONPATH="$SYSCONF_DIR:$TARGET_SITE"
           export CC="$CC"
           export CXX="$CXX"
           export AR="$AR"
@@ -364,12 +385,10 @@ jobs:
           export CPP="$CC -E"
           export READELF="$READELF"
 
-          # pkg-config tìm libs trong DEPS_INSTALL
           export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$DEPS_INSTALL"
 
-          # Cargo cho cryptography
           export CARGO_BUILD_TARGET="aarch64-linux-android"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
           export OPENSSL_DIR="$DEPS_INSTALL"
@@ -377,7 +396,23 @@ jobs:
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
 
           # ============================================================
-          # Build từng package
+          # 4. Test: host Python có import được _sysconfigdata không?
+          # ============================================================
+          echo ""
+          echo "=== Test import _sysconfigdata ==="
+          "$HOST_PY" -c "import ${SYSCONF_NAME} as s; print('✅ OK, CC =', s.build_time_vars.get('CC', 'n/a'))"
+
+          echo ""
+          echo "=== Test sysconfig.get_paths() ==="
+          "$HOST_PY" -c "
+          import sysconfig
+          paths = sysconfig.get_paths()
+          for k, v in paths.items():
+              print(f'  {k} = {v}')
+          "
+
+          # ============================================================
+          # 5. Build từng package
           # ============================================================
           for pkg in ${{ steps.pkglist.outputs.packages }}; do
             echo ""
