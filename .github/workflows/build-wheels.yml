@@ -233,9 +233,8 @@ jobs:
           make -j$(nproc) install
 
       # ==========================================================
-      # 6. CROSS-COMPILE OpenBLAS (thay thế Fortran)
-      #    Build C-only → có CBLAS + LAPACK từ C sources
-      #    → numpy 2.x build được KHÔNG cần Fortran
+      # 6. CROSS-COMPILE OpenBLAS (C-only, no Fortran)
+      #    Build và install phải tách 2 lệnh make riêng
       # ==========================================================
       - name: Cross-Compile OpenBLAS (C-only, no Fortran)
         run: |
@@ -244,26 +243,41 @@ jobs:
           tar -xf "OpenBLAS-${{ env.OPENBLAS_VERSION }}.tar.gz"
           cd "OpenBLAS-${{ env.OPENBLAS_VERSION }}"
 
-          make -j$(nproc) \
-            TARGET=ARMV8 \
-            HOSTCC=gcc \
-            CC="$CC" \
-            CXX="$CXX" \
-            AR="$AR" \
-            RANLIB="$RANLIB" \
-            FC="" \
-            NOFORTRAN=1 \
-            NOLAPACK=0 \
-            USE_THREAD=1 \
-            USE_OPENMP=0 \
-            NUM_THREADS=64 \
-            COMMON_OPT="-O2 -fPIC" \
-            CFLAGS="-O2 -fPIC -I$DEPS_INSTALL/include" \
-            PREFIX="$DEPS_INSTALL" \
-            install
+          # ============================================================
+          # Biến chung cho cả build và install
+          # ============================================================
+          MAKE_VARS=(
+            "TARGET=ARMV8"
+            "HOSTCC=gcc"
+            "CC=$CC"
+            "CXX=$CXX"
+            "AR=$AR"
+            "RANLIB=$RANLIB"
+            "FC="
+            "NOFORTRAN=1"
+            "NOLAPACK=0"
+            "USE_THREAD=1"
+            "USE_OPENMP=0"
+            "NUM_THREADS=64"
+            "COMMON_OPT=-O2 -fPIC"
+            "CFLAGS=-O2 -fPIC -I$DEPS_INSTALL/include"
+          )
 
-          echo "✅ OpenBLAS installed"
-          ls -lh "$DEPS_INSTALL/lib/" | grep -iE "openblas|lapack|blas" || true
+          echo "=== Bước 1: BUILD ==="
+          make -j$(nproc) "${MAKE_VARS[@]}"
+
+          echo ""
+          echo "=== Kiểm tra file .a sau build ==="
+          ls -lh libopenblas*.a libopenblas*.so* 2>/dev/null | head -10 || true
+
+          echo ""
+          echo "=== Bước 2: INSTALL ==="
+          make "${MAKE_VARS[@]}" PREFIX="$DEPS_INSTALL" install
+
+          echo ""
+          echo "=== Kiểm tra file sau install ==="
+          ls -lh "$DEPS_INSTALL/lib/" | grep -iE "openblas|lapack|blas" || echo "(không có file lib)"
+          ls -lh "$DEPS_INSTALL/include/" | grep -iE "openblas|cblas|lapack" || echo "(không có file header)"
 
       # ==========================================================
       # 7. CROSS-COMPILE CPYTHON 3.13
