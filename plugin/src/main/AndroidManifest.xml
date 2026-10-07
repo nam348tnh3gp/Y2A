@@ -1,9 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- ============================================================
-         App B cần query App A để biết đã cài chưa.
-         ============================================================ -->
     <queries>
         <package android:name="com.nam2006.y2mate" />
     </queries>
@@ -15,15 +12,19 @@
         android:allowBackup="false"
         android:supportsRtl="true">
 
-        <!-- ==========================================================
-             METADATA mà App A sẽ đọc qua PackageManager.
-             ========================================================== -->
+        <!-- Index chính: wheel tự build -->
         <meta-data
             android:name="pip.index_url"
             android:value="https://nam348tnh3gp.github.io/Y2A/simple/" />
 
+        <!-- Extra index 1: Flet (numpy, pandas, scipy...) -->
         <meta-data
             android:name="pip.extra_index_url"
+            android:value="https://pypi.flet.dev/simple/" />
+
+        <!-- Extra index 2: PyPI cho pure Python -->
+        <meta-data
+            android:name="pip.extra_index_url_2"
             android:value="https://pypi.org/simple/" />
 
         <meta-data
@@ -32,9 +33,8 @@
 
         <meta-data
             android:name="pip.plugin_version"
-            android:value="1" />
+            android:value="2" />
 
-        <!-- Đánh dấu đây là plugin cho App A -->
         <meta-data
             android:name="pip.companion"
             android:value="Mini-Y2mate Repository" />
