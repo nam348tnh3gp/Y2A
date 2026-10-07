@@ -26,7 +26,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 300
 
     env:
       PYTHON_VERSION: "3.13.1"
@@ -40,6 +40,7 @@ jobs:
       LIBXSLT_VERSION: "1.1.39"
       LIBJPEGTURBO_VERSION: "3.0.3"
       LIBPNG_VERSION: "1.6.43"
+      OPENBLAS_VERSION: "0.3.28"
       ANDROID_API: "24"
       TARGET_HOST: "aarch64-linux-android"
 
@@ -69,7 +70,7 @@ jobs:
           echo "$HOME/ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
       # ==========================================================
-      # 2. HOST PYTHON (x86_64)
+      # 2. HOST PYTHON
       # ==========================================================
       - name: Build Host Python
         run: |
@@ -232,7 +233,40 @@ jobs:
           make -j$(nproc) install
 
       # ==========================================================
-      # 6. CROSS-COMPILE CPYTHON 3.13
+      # 6. CROSS-COMPILE OpenBLAS (thay thế Fortran)
+      #    Build C-only → có CBLAS + LAPACK từ C sources
+      #    → numpy 2.x build được KHÔNG cần Fortran
+      # ==========================================================
+      - name: Cross-Compile OpenBLAS (C-only, no Fortran)
+        run: |
+          cd /tmp
+          wget -q "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${{ env.OPENBLAS_VERSION }}/OpenBLAS-${{ env.OPENBLAS_VERSION }}.tar.gz"
+          tar -xf "OpenBLAS-${{ env.OPENBLAS_VERSION }}.tar.gz"
+          cd "OpenBLAS-${{ env.OPENBLAS_VERSION }}"
+
+          make -j$(nproc) \
+            TARGET=ARMV8 \
+            HOSTCC=gcc \
+            CC="$CC" \
+            CXX="$CXX" \
+            AR="$AR" \
+            RANLIB="$RANLIB" \
+            FC="" \
+            NOFORTRAN=1 \
+            NOLAPACK=0 \
+            USE_THREAD=1 \
+            USE_OPENMP=0 \
+            NUM_THREADS=64 \
+            COMMON_OPT="-O2 -fPIC" \
+            CFLAGS="-O2 -fPIC -I$DEPS_INSTALL/include" \
+            PREFIX="$DEPS_INSTALL" \
+            install
+
+          echo "✅ OpenBLAS installed"
+          ls -lh "$DEPS_INSTALL/lib/" | grep -iE "openblas|lapack|blas" || true
+
+      # ==========================================================
+      # 7. CROSS-COMPILE CPYTHON 3.13
       # ==========================================================
       - name: Cross-Compile CPython
         run: |
@@ -270,11 +304,9 @@ jobs:
           make -j$(nproc)
           make install
           echo "✅ CPython built"
-          echo "=== Include dir có gì ==="
-          ls "$GITHUB_WORKSPACE/python-android/include/python3.13/" | head -20
 
       # ==========================================================
-      # 7. SYMLINK PATH TARGET → RUNNER
+      # 8. SYMLINK + PIP
       # ==========================================================
       - name: Symlink target Python path
         run: |
@@ -282,11 +314,7 @@ jobs:
           sudo ln -sfn "$GITHUB_WORKSPACE/python-android" \
                         /data/data/com.nam2006.y2mate/files/python
           ls -la /data/data/com.nam2006.y2mate/files/
-          echo "✅ Symlink created"
 
-      # ==========================================================
-      # 8. CÀI PIP VÀO RUNTIME TARGET
-      # ==========================================================
       - name: Prepare pip for wheel building
         run: |
           SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
@@ -296,7 +324,7 @@ jobs:
           for whl in /tmp/wheels_bootstrap/*.whl; do
             unzip -o -q "$whl" -d "$SITE"
           done
-          echo "✅ pip installed into target runtime"
+          echo "✅ pip installed"
 
       # ==========================================================
       # 9. ĐỌC DANH SÁCH PACKAGE
@@ -313,7 +341,7 @@ jobs:
           echo "📦 Sẽ build: $LIST"
 
       # ==========================================================
-      # 10. CÀI RUST (cho cryptography)
+      # 10. RUST
       # ==========================================================
       - name: Setup Rust for cross-compile
         run: |
@@ -332,10 +360,9 @@ jobs:
           echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
           echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
-          echo "✅ Rust installed"
 
       # ==========================================================
-      # 11. BUILD WHEELS (buộc build từ source: --no-binary=:all:)
+      # 11. BUILD WHEELS
       # ==========================================================
       - name: Build wheels for Android aarch64
         run: |
@@ -346,73 +373,60 @@ jobs:
           TARGET_SITE="$TARGET_STDLIB/site-packages"
           mkdir -p wheels-out
 
-          # ============================================================
-          # 1. Detect _sysconfigdata
-          # ============================================================
-          echo "=== Target stdlib chứa sysconfig: ==="
-          ls "$TARGET_STDLIB/" | grep -i sysconfig || echo "(không tìm thấy)"
-
+          # --- 1. Detect _sysconfigdata ---
           SYSCONF_FILE=$(ls "$TARGET_STDLIB"/_sysconfigdata__*.py 2>/dev/null | head -1)
           if [ -z "$SYSCONF_FILE" ]; then
-            echo "❌ Không tìm thấy _sysconfigdata*.py trong $TARGET_STDLIB"
-            ls -la "$TARGET_STDLIB/" || true
+            echo "❌ Không tìm thấy _sysconfigdata*.py"
             exit 1
           fi
           SYSCONF_NAME=$(basename "$SYSCONF_FILE" .py)
-          echo "✅ Sysconfig data name: $SYSCONF_NAME"
+          echo "✅ Sysconfig: $SYSCONF_NAME"
 
           SYSCONF_DIR="$GITHUB_WORKSPACE/sysconfigdata-host"
-          rm -rf "$SYSCONF_DIR"
-          mkdir -p "$SYSCONF_DIR"
+          rm -rf "$SYSCONF_DIR" && mkdir -p "$SYSCONF_DIR"
           cp "$SYSCONF_FILE" "$SYSCONF_DIR/"
-          echo "✅ Copied: $(basename "$SYSCONF_FILE")"
 
-          # ============================================================
-          # 2. Copy Python headers từ TARGET đè HOST
-          #    → đảm bảo Python.h khớp target (Android aarch64)
-          # ============================================================
-          echo ""
-          echo "=== Copy target Python headers → host include ==="
+          # --- 2. Copy headers target → host ---
           HOST_INCLUDE="/tmp/host-python/include/python3.13"
           TARGET_INCLUDE="$TARGET_ROOT/include/python3.13"
           if [ -d "$TARGET_INCLUDE" ]; then
             cp -rf "$TARGET_INCLUDE/." "$HOST_INCLUDE/"
             echo "✅ Headers copied"
-            ls "$HOST_INCLUDE/" | head -10
-          else
-            echo "⚠️ Target include không tồn tại: $TARGET_INCLUDE"
-            ls "$TARGET_ROOT/include/" 2>/dev/null || echo "(không có include/)"
           fi
 
-          # ============================================================
-          # 3. Cross-compile env
-          # ============================================================
+          # --- 3. Cross-compile env ---
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
           export PYTHONPATH="$SYSCONF_DIR:$TARGET_SITE"
-          export CC="$CC"
-          export CXX="$CXX"
-          export AR="$AR"
-          export RANLIB="$RANLIB"
-          export STRIP="$STRIP"
-          export LDSHARED="$CC -shared"
-          export CPP="$CC -E"
-          export READELF="$READELF"
+          export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
+          export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
 
           export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$DEPS_INSTALL"
 
+          # --- 4. BLAS/LAPACK env cho numpy ---
+          export NPY_BLAS_ORDER="openblas"
+          export NPY_LAPACK_ORDER="openblas"
+          export NPY_DISABLE_SVML=1
+          export NPY_USE_BLAS_ILP64=0
+          export OPENBLAS="$DEPS_INSTALL"
+          export BLAS="$DEPS_INSTALL"
+          export LAPACK="$DEPS_INSTALL"
+          # Tránh numpy tự đi tìm Fortran compiler
+          export F77=""
+          export F90=""
+          export FC=""
+
+          # --- 5. Cargo ---
           export CARGO_BUILD_TARGET="aarch64-linux-android"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
           export OPENSSL_DIR="$DEPS_INSTALL"
           export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
 
-          # ============================================================
-          # 4. Test
-          # ============================================================
+          # --- 6. Test import ---
           echo ""
           echo "=== Test sysconfig ==="
           "$HOST_PY" -c "
@@ -423,10 +437,7 @@ jobs:
           print('  CC         =', s.build_time_vars.get('CC', 'n/a'))
           "
 
-          # ============================================================
-          # 5. Build từng package — BẮT BUỘC build từ source
-          #    --no-binary=:all: để pip KHÔNG lấy manylinux wheel từ PyPI
-          # ============================================================
+          # --- 7. Loop build ---
           SUCCESS_LIST=""
           FAIL_LIST=""
 
@@ -459,7 +470,7 @@ jobs:
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
-      # 12. POST-PROCESS: đổi tag linux_aarch64 → android_24_arm64_v8a
+      # 12. POST-PROCESS
       # ==========================================================
       - name: Post-process wheels
         run: |
@@ -480,29 +491,21 @@ jobs:
           ls -lh wheels-final/ || echo "(rỗng)"
 
       # ==========================================================
-      # 12.5 VERIFY TAG TRONG FILE WHEEL
+      # 12.5 VERIFY TAG
       # ==========================================================
       - name: Verify wheel tags
         run: |
           echo "=== Tags trong wheels-final ==="
           shopt -s nullglob
-          found=0
           for whl in wheels-final/*.whl; do
             [ -f "$whl" ] || continue
-            found=1
             echo ""
             echo "File: $(basename "$whl")"
-            # WHEEL file nằm trong *.dist-info/WHEEL
             content=$(unzip -p "$whl" "*.dist-info/WHEEL" 2>/dev/null || true)
             if [ -n "$content" ]; then
-              echo "$content" | grep -iE "^Tag:|^Root-Is-Purelib:|^Generator:" || echo "  (không có Tag)"
-            else
-              echo "  (không đọc được WHEEL)"
+              echo "$content" | grep -iE "^Tag:|^Root-Is-Purelib:" || echo "  (không có Tag)"
             fi
           done
-          if [ "$found" -eq 0 ]; then
-            echo "(không có wheel nào)"
-          fi
 
       # ==========================================================
       # 13. RELEASE
@@ -530,7 +533,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ==========================================================
-      # 14. SINH PIP INDEX + COMMIT VÀO docs/
+      # 14. INDEX + COMMIT
       # ==========================================================
       - name: Generate pip index HTML
         if: hashFiles('wheels-final/*.whl') != ''
@@ -556,10 +559,8 @@ jobs:
             for i in 1 2 3 4 5; do
               if git pull --rebase origin "${{ github.ref_name }}" && \
                  git push origin "HEAD:${{ github.ref_name }}"; then
-                echo "✅ Push OK (attempt $i)"
                 break
               fi
-              echo "⚠️ Retry push (attempt $i)"
               sleep 5
             done
           fi
