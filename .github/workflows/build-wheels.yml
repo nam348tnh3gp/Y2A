@@ -144,7 +144,8 @@ jobs:
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
           echo "LDFLAGS=-L$DEPS_INSTALL/lib -Wl,--hash-style=both" >> "$GITHUB_ENV"
 
-      # ───────── Cross-compile deps (giữ nguyên như cũ) ─────────
+      # ─────────── CROSS-COMPILE CORE DEPS ───────────
+
       - name: Cross-Compile libffi
         run: |
           cd /tmp
@@ -260,6 +261,8 @@ jobs:
           )
           make -j$(nproc) "${MAKE_VARS[@]}"
           make "${MAKE_VARS[@]}" PREFIX="$DEPS_INSTALL" install
+
+      # ─────────── CROSS-COMPILE CPYTHON 3.13 ───────────
 
       - name: Cross-Compile CPython
         run: |
@@ -382,13 +385,35 @@ jobs:
             ar rcs "$DEPS_INSTALL/lib/librt.a"
           fi
 
-          # ─── NDK sysroot + clang builtin include ───
+          # ────────────────────────────────────────────────
+          # Tìm clang builtin include (NDK r25c)
+          # ────────────────────────────────────────────────
           NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          CLANG_VER=$(ls "$NDK/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/" | head -1)
-          CLANG_BUILTIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/$CLANG_VER/include"
+          NDK_PREBUILT="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+
+          # Hỏi trực tiếp clang
+          CLANG_BUILTIN=$("$CC" -print-resource-dir 2>/dev/null)/include
+
+          if [ ! -f "$CLANG_BUILTIN/stddef.h" ]; then
+            echo "⚠️  -print-resource-dir fail, thử find..."
+            CLANG_BUILTIN=$(find "$NDK_PREBUILT" -type f -name "stddef.h" 2>/dev/null | head -1 | xargs -r dirname)
+          fi
 
           echo "NDK_SYSROOT:   $NDK_SYSROOT"
-          echo "CLANG_BUILTIN: $CLANG_BUILTIN"
+          echo "CLANG_BUILTIN: ${CLANG_BUILTIN:-NOT_FOUND}"
+
+          if [ -z "$CLANG_BUILTIN" ] || [ ! -f "$CLANG_BUILTIN/stddef.h" ]; then
+            echo "❌ Không tìm được clang builtin"
+            echo "=== Cấu trúc NDK prebuilt ==="
+            ls -la "$NDK_PREBUILT/"
+            echo "=== Tìm thư mục clang ==="
+            find "$NDK_PREBUILT" -maxdepth 4 -type d -name "clang*" 2>/dev/null | head
+            echo "=== Tìm stddef.h ==="
+            find "$NDK_PREBUILT" -type f -name "stddef.h" 2>/dev/null | head
+            exit 1
+          fi
+          echo "✅ Clang builtin OK"
+          ls "$CLANG_BUILTIN/" | grep -E "stddef|stdarg" | head
 
           # ─── Cross-compile env ───
           export NDK_SYSROOT CLANG_BUILTIN
@@ -400,7 +425,6 @@ jobs:
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
           export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
 
-          # QUAN TRỌNG: -nostdinc để bỏ hoàn toàn /usr/include + clang builtin
           export CFLAGS="-fPIC -O2 \
             -nostdinc \
             -I$CLANG_BUILTIN \
@@ -430,11 +454,9 @@ jobs:
           export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
 
-          # ─── EXPORT cho script con ───
           export HOST_PY TARGET_ROOT TARGET_SITE TARGET_STDLIB
           export WHEELS_OUT="$GITHUB_WORKSPACE/wheels-out"
 
-          # Helper: check wheel tồn tại
           wheel_exists() {
             local pkg="$1"
             local pkg_a pkg_b
@@ -460,7 +482,6 @@ jobs:
               continue
             fi
 
-            # Tầng 1: pip wheel chuẩn
             echo "🔨 Tầng 1: pip wheel"
             if "$HOST_PY" -m pip wheel "$pkg" \
                   --no-deps --no-build-isolation --no-binary=:all: \
@@ -472,7 +493,6 @@ jobs:
               fi
             fi
 
-            # Tầng 2: p4a-style
             echo ""
             echo "🔨 Tầng 2: p4a-style"
             if bash "$GITHUB_WORKSPACE/scripts/build-p4a-style.sh" "$pkg" 2>&1 | tail -30; then
@@ -525,22 +545,18 @@ jobs:
           echo "=== Trước patch ==="
           readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH" || echo "(không có)"
 
-          # Xoá RUNPATH cũ (nếu có) để tránh conflict
           patchelf --remove-rpath "$RUST_SO" 2>/dev/null || true
 
-          # Thêm NEEDED libpython3.13.so (nếu chưa có)
           if ! readelf -d "$RUST_SO" | grep -q "libpython3.13.so"; then
             patchelf --add-needed libpython3.13.so "$RUST_SO"
             echo "  Added NEEDED libpython3.13.so"
           fi
 
-          # Set RUNPATH trỏ 5 cấp lên (tới python/lib/)
           patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
 
           echo "=== Sau patch ==="
           readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH"
 
-          # Đóng gói lại
           cd "$WORK"
           rm -f "$CRYPTO_WHL"
           zip -rq "$CRYPTO_WHL" .
