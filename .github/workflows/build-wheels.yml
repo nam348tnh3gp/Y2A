@@ -69,7 +69,7 @@ jobs:
           echo "$HOME/ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
       # ==========================================================
-      # 2. HOST PYTHON (x86_64) — dùng để CHẠY pip cross-compile
+      # 2. HOST PYTHON (x86_64)
       # ==========================================================
       - name: Build Host Python
         run: |
@@ -272,7 +272,7 @@ jobs:
           echo "✅ CPython built"
 
       # ==========================================================
-      # 7. SYMLINK PATH TARGET → RUNNER (fix hardcoded path)
+      # 7. SYMLINK PATH TARGET → RUNNER
       # ==========================================================
       - name: Symlink target Python path
         run: |
@@ -361,7 +361,6 @@ jobs:
 
           # ============================================================
           # 2. Copy _sysconfigdata ra thư mục riêng
-          #    (không thêm cả stdlib target vào PYTHONPATH để tránh conflict)
           # ============================================================
           SYSCONF_DIR="$GITHUB_WORKSPACE/sysconfigdata-host"
           rm -rf "$SYSCONF_DIR"
@@ -370,7 +369,7 @@ jobs:
           echo "✅ Copied: $(basename "$SYSCONF_FILE")"
 
           # ============================================================
-          # 3. Cross-compile env cho setuptools/distutils
+          # 3. Cross-compile env
           # ============================================================
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
@@ -396,11 +395,22 @@ jobs:
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
 
           # ============================================================
-          # 4. Test: host Python có import được _sysconfigdata không?
+          # 4. Test import qua importlib (tên có dấu gạch ngang,
+          #    chỉ import được qua __import__/importlib)
           # ============================================================
           echo ""
-          echo "=== Test import _sysconfigdata ==="
-          "$HOST_PY" -c "import ${SYSCONF_NAME} as s; print('✅ OK, CC =', s.build_time_vars.get('CC', 'n/a'))"
+          echo "=== Test import _sysconfigdata (via importlib) ==="
+          "$HOST_PY" -c "
+          import importlib, os
+          name = os.environ['_PYTHON_SYSCONFIGDATA_NAME']
+          s = importlib.import_module(name)
+          print('✅ Import OK:', name)
+          print('  CC =', s.build_time_vars.get('CC', 'n/a'))
+          print('  CFLAGS =', s.build_time_vars.get('CFLAGS', 'n/a'))
+          print('  host_platform =', s.build_time_vars.get('host_platform', 'n/a'))
+          print('  EXT_SUFFIX =', s.build_time_vars.get('EXT_SUFFIX', 'n/a'))
+          print('  SOABI =', s.build_time_vars.get('SOABI', 'n/a'))
+          "
 
           echo ""
           echo "=== Test sysconfig.get_paths() ==="
@@ -409,6 +419,8 @@ jobs:
           paths = sysconfig.get_paths()
           for k, v in paths.items():
               print(f'  {k} = {v}')
+          print('  platform =', sysconfig.get_platform())
+          print('  EXT_SUFFIX =', sysconfig.get_config_var('EXT_SUFFIX'))
           "
 
           # ============================================================
@@ -435,7 +447,7 @@ jobs:
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
-      # 12. POST-PROCESS: đổi tag linux_aarch64 → android_24_arm64_v8a
+      # 12. POST-PROCESS
       # ==========================================================
       - name: Post-process wheels
         run: |
