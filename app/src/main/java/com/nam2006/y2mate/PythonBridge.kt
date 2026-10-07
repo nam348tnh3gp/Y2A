@@ -101,8 +101,19 @@ object PythonBridge {
 
             if (!initialized) {
                 initError = "nativeInit trả false (xem logcat tag PythonJNI)"
+                return false
             }
-            return initialized
+
+            // 4. Detect plugin Repo + ghi pip.conf
+            try {
+                val repoCfg = RepoPlugin.detect(app)
+                RepoPlugin.writePipConf(app, repoCfg)
+                Log.i(TAG, "✅ pip.conf written (plugin=${repoCfg.installed})")
+            } catch (e: Exception) {
+                Log.w(TAG, "RepoPlugin fail (không quan trọng)", e)
+            }
+
+            return true
         } catch (t: Throwable) {
             initError = t.message
             Log.e(TAG, "❌ Init fail", t)
