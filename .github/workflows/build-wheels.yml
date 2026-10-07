@@ -1,0 +1,327 @@
+name: Build Android Wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Packages (cách nhau bằng dấu cách). Để trống = đọc từ wheels/list.txt'
+        required: false
+        default: ''
+  push:
+    branches:
+      - main
+      - nam348tnh3gp-patch-1
+    paths:
+      - 'wheels/list.txt'
+      - 'scripts/gen_index.py'
+      - '.github/workflows/build-wheels.yml'
+
+concurrency:
+  group: build-wheels
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    env:
+      PYTHON_VERSION: "3.13.1"
+      OPENSSL_VERSION: "3.3.2"
+      LIBFFI_VERSION: "3.4.6"
+      SQLITE_VERSION: "3460100"
+      SQLITE_YEAR: "2024"
+      XZ_VERSION: "5.4.6"
+      ANDROID_API: "24"
+      TARGET_HOST: "aarch64-linux-android"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Host Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake libtool \
+            pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf
+
+      - name: Setup Android NDK r25c
+        run: |
+          mkdir -p "$HOME/ndk"
+          cd "$HOME/ndk"
+          wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+          unzip -q android-ndk-r25c-linux.zip
+          echo "NDK=$HOME/ndk/android-ndk-r25c" >> "$GITHUB_ENV"
+          echo "$HOME/ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Build Host Python
+        run: |
+          mkdir -p /tmp/build-host
+          cd /tmp/build-host
+          wget -q "https://www.python.org/ftp/python/${{ env.PYTHON_VERSION }}/Python-${{ env.PYTHON_VERSION }}.tar.xz"
+          tar -xf "Python-${{ env.PYTHON_VERSION }}.tar.xz"
+          cd "Python-${{ env.PYTHON_VERSION }}"
+          ./configure --prefix=/tmp/host-python --enable-optimizations=no
+          make -j$(nproc)
+          make install
+          echo "HOST_PYTHON=/tmp/host-python/bin/python3" >> "$GITHUB_ENV"
+
+      - name: Export Cross-Compile Environment
+        run: |
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          DEPS_INSTALL="$GITHUB_WORKSPACE/deps-install"
+          mkdir -p "$DEPS_INSTALL"
+
+          echo "CC=$TOOLCHAIN/bin/${{ env.TARGET_HOST }}${{ env.ANDROID_API }}-clang" >> "$GITHUB_ENV"
+          echo "CXX=$TOOLCHAIN/bin/${{ env.TARGET_HOST }}${{ env.ANDROID_API }}-clang++" >> "$GITHUB_ENV"
+          echo "AR=$TOOLCHAIN/bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> "$GITHUB_ENV"
+          echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> "$GITHUB_ENV"
+          echo "DEPS_INSTALL=$DEPS_INSTALL" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_LIBDIR=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_SYSROOT_DIR=$DEPS_INSTALL" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "CFLAGS=-fPIC -O2 -I$DEPS_INSTALL/include -Wno-implicit-function-declaration" >> "$GITHUB_ENV"
+          echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L$DEPS_INSTALL/lib -Wl,--hash-style=both" >> "$GITHUB_ENV"
+
+      - name: Cross-Compile libffi
+        run: |
+          cd /tmp
+          wget -q "https://github.com/libffi/libffi/releases/download/v${{ env.LIBFFI_VERSION }}/libffi-${{ env.LIBFFI_VERSION }}.tar.gz"
+          tar -xf "libffi-${{ env.LIBFFI_VERSION }}.tar.gz"
+          cd "libffi-${{ env.LIBFFI_VERSION }}"
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
+          make -j$(nproc) install
+
+      - name: Cross-Compile OpenSSL
+        run: |
+          cd /tmp
+          wget -q "https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
+          tar -xf "openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
+          cd "openssl-${{ env.OPENSSL_VERSION }}"
+
+          export ANDROID_NDK_ROOT="$NDK"
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+
+          ./Configure android-arm64 \
+            -D__ANDROID_API__=${{ env.ANDROID_API }} \
+            --prefix="$DEPS_INSTALL" \
+            --openssldir="$DEPS_INSTALL/ssl" \
+            shared no-engine no-tests no-async \
+            CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
+            -Wl,--hash-style=both
+
+          make -j$(nproc)
+          make install_sw
+
+      - name: Cross-Compile SQLite3
+        run: |
+          cd /tmp
+          SQLITE_URL="https://www.sqlite.org/${{ env.SQLITE_YEAR }}/sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
+          if ! curl --output /dev/null --silent --head --fail "$SQLITE_URL"; then
+            SQLITE_URL="https://www.sqlite.org/2023/sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
+          fi
+          wget -q "$SQLITE_URL"
+          tar -xf "sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
+          cd "sqlite-autoconf-${{ env.SQLITE_VERSION }}"
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
+          make -j$(nproc) install
+
+      - name: Cross-Compile XZ
+        run: |
+          cd /tmp
+          wget -q "https://github.com/tukaani-project/xz/releases/download/v${{ env.XZ_VERSION }}/xz-${{ env.XZ_VERSION }}.tar.gz"
+          tar -xf "xz-${{ env.XZ_VERSION }}.tar.gz"
+          cd "xz-${{ env.XZ_VERSION }}"
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
+          make -j$(nproc) install
+
+      - name: Cross-Compile CPython
+        run: |
+          cd /tmp
+          tar -xf "/tmp/build-host/Python-${{ env.PYTHON_VERSION }}.tar.xz"
+          cd "Python-${{ env.PYTHON_VERSION }}"
+
+          printf '%s\n' '*disabled*' '_crypt' '_nis' 'spwd' 'ossaudiodev' \
+            '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' \
+            > Modules/Setup.local
+
+          LDFLAGS="-L$DEPS_INSTALL/lib -Wl,--hash-style=both" \
+          OPENSSL_CFLAGS="-I$DEPS_INSTALL/include" \
+          OPENSSL_LIBS="-L$DEPS_INSTALL/lib -lssl -lcrypto" \
+          LIBFFI_CFLAGS="-I$DEPS_INSTALL/include" \
+          LIBFFI_LIBS="-L$DEPS_INSTALL/lib -lffi" \
+          SQLITE3_CFLAGS="-I$DEPS_INSTALL/include" \
+          SQLITE3_LIBS="-L$DEPS_INSTALL/lib -lsqlite3" \
+          LZMA_CFLAGS="-I$DEPS_INSTALL/include" \
+          LZMA_LIBS="-L$DEPS_INSTALL/lib -llzma" \
+          ./configure \
+            --host="${{ env.TARGET_HOST }}" \
+            --build=x86_64-pc-linux-gnu \
+            --prefix="$GITHUB_WORKSPACE/python-android" \
+            --with-build-python="$HOST_PYTHON" \
+            --enable-shared \
+            --disable-ipv6 \
+            --without-ensurepip \
+            --with-openssl="$DEPS_INSTALL" \
+            ac_cv_file__dev_ptmx=no \
+            ac_cv_file__dev_ptc=no \
+            ac_cv_buggy_getaddrinfo=no \
+            ac_cv_little_endian_double=yes
+
+          make -j$(nproc)
+          make install
+          echo "✅ CPython built: $(ls $GITHUB_WORKSPACE/python-android/bin/ | head)"
+
+      - name: Prepare pip for wheel building
+        run: |
+          # Cài pip vào runtime vừa build (cho target aarch64)
+          SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
+          mkdir -p "$SITE" /tmp/wheels_bootstrap
+          "$HOST_PYTHON" -m pip download pip setuptools wheel \
+            --dest=/tmp/wheels_bootstrap --only-binary=:all: --no-deps
+          for whl in /tmp/wheels_bootstrap/*.whl; do
+            unzip -o -q "$whl" -d "$SITE"
+          done
+          echo "✅ pip installed into target runtime"
+
+      - name: Read package list
+        id: pkglist
+        run: |
+          if [ -n "${{ github.event.inputs.packages }}" ]; then
+            LIST="${{ github.event.inputs.packages }}"
+          else
+            LIST=$(grep -v '^#' wheels/list.txt | grep -v '^$' | tr '\n' ' ')
+          fi
+          echo "packages=$LIST" >> "$GITHUB_OUTPUT"
+          echo "📦 Sẽ build: $LIST"
+
+      - name: Build wheels for Android aarch64
+        run: |
+          set -e
+          PYTHON="$GITHUB_WORKSPACE/python-android/bin/python3.13"
+          SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
+          mkdir -p wheels-out
+
+          # Cấu hình cross-compile cho setuptools/distutils
+          export _PYTHON_HOST_PLATFORM="linux_aarch64"
+          export _PYTHON_PROJECT_BASE="$GITHUB_WORKSPACE/python-android"
+          export PYTHONPATH="$SITE"
+          export PATH="$GITHUB_WORKSPACE/python-android/bin:$PATH"
+          export CC="$CC"
+          export CXX="$CXX"
+          export AR="$AR"
+          export RANLIB="$RANLIB"
+          export STRIP="$STRIP"
+          export LDSHARED="$CC -shared"
+          export CPP="$CC -E"
+
+          # Chạy pip wheel cho từng package
+          for pkg in ${{ steps.pkglist.outputs.packages }}; do
+            echo ""
+            echo "=========================================="
+            echo "🔨 Building: $pkg"
+            echo "=========================================="
+            if "$PYTHON" -m pip wheel "$pkg" \
+                --no-deps \
+                --no-build-isolation \
+                --wheel-dir wheels-out \
+                --config-settings="--build-option=--plat-name=linux_aarch64" 2>&1 | tail -40; then
+              echo "✅ $pkg OK"
+            else
+              echo "⚠️ $pkg FAILED (bỏ qua, tiếp tục)"
+            fi
+          done
+
+          echo ""
+          echo "=== Wheels built ==="
+          ls -lh wheels-out/ || echo "(rỗng)"
+
+      - name: Post-process wheels
+        run: |
+          # Đổi tên wheel để tag platform = android_24_arm64_v8a
+          # (một số wheel có tag linux_aarch64 — pip có thể chấp nhận cả 2)
+          mkdir -p wheels-final
+          for whl in wheels-out/*.whl; do
+            [ -f "$whl" ] || continue
+            base=$(basename "$whl")
+            # Chỉ đổi nếu chưa phải android_24_arm64_v8a
+            if [[ "$base" == *"linux_aarch64"* ]]; then
+              newname="${base//linux_aarch64/android_24_arm64_v8a}"
+              cp "$whl" "wheels-final/$newname"
+              # Giữ cả bản gốc để pip dễ match
+              cp "$whl" "wheels-final/$base"
+              echo "Renamed: $base → $newname"
+            else
+              cp "$whl" "wheels-final/$base"
+            fi
+          done
+          echo ""
+          echo "=== Final wheels ==="
+          ls -lh wheels-final/
+
+      - name: Generate release tag
+        id: tag
+        run: |
+          TAG="wheels-$(date +%Y%m%d-%H%M%S)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag sẽ là: $TAG"
+
+      - name: Create release with wheels
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Wheels ${{ steps.tag.outputs.tag }}
+          body: |
+            Prebuilt wheels cho Android aarch64 / Python 3.13.
+
+            Packages: ${{ steps.pkglist.outputs.packages }}
+          files: wheels-final/*.whl
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate pip index HTML
+        run: |
+          python3 scripts/gen_index.py \
+            wheels-final \
+            docs \
+            ${{ github.repository_owner }} \
+            ${{ github.event.repository.name }} \
+            ${{ steps.tag.outputs.tag }}
+
+      - name: Commit docs index
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          if git diff --staged --quiet; then
+            echo "no change"
+          else
+            git commit -m "chore(wheels): update index [${{ steps.tag.outputs.tag }}] [skip ci]"
+            for i in 1 2 3 4 5; do
+              if git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
+                break
+              fi
+              sleep 5
+            done
+          fi
+
+      - name: Summary
+        run: |
+          echo "## 📦 Wheels Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Index URL:** https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/simple/" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Wheels" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lh wheels-final/ >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
