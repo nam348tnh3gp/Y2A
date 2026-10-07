@@ -111,6 +111,7 @@ private fun MainContent(vm: MainViewModel) {
     val clipboard = LocalClipboardManager.current
     var showHistory by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var topTab by remember { mutableStateOf(0) }   // 0 = Video, 1 = Python
     val o = vm.opts
 
     val cookiePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -118,10 +119,6 @@ private fun MainContent(vm: MainViewModel) {
             val ok = vm.importCookies(uri)
             toast(ctx, if (ok) "Đã nhập cookies.txt" else "Không đọc được file")
         }
-    }
-
-    fun startDownload() {
-        if (vm.url.isBlank()) toast(ctx, "Nhập liên kết trước đã nhé") else vm.download()
     }
 
     Column(
@@ -155,135 +152,185 @@ private fun MainContent(vm: MainViewModel) {
             Pill("🕘", Fg) { vm.refreshHistory(); showHistory = true }
         }
 
-        Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(CardBg)
-                .border(1.dp, Line, RoundedCornerShape(22.dp)).padding(16.dp),
+        // ---------- tab cấp cao
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Soft)
+                .border(1.dp, Line, RoundedCornerShape(14.dp))
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            PlatformTabs(o.platform) { vm.setPlatform(it) }
-            Spacer(Modifier.height(14.dp))
-
-            // ---------- ô link
-            OutlinedTextField(
-                value = vm.url,
-                onValueChange = { vm.onUrlChange(it) },
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Dán link vào đây…", color = Muted) },
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
-                keyboardActions = KeyboardActions(onGo = { startDownload() }),
-                trailingIcon = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("📋", fontSize = 18.sp, modifier = Modifier.clickable {
-                            val t = clipboard.getText()?.text?.trim().orEmpty()
-                            if (t.isEmpty()) toast(ctx, "Clipboard đang trống") else vm.onUrlChange(t)
-                        }.padding(8.dp))
-                        if (vm.url.isNotEmpty()) {
-                            Text("✕", fontSize = 16.sp, color = Muted, modifier = Modifier.clickable { vm.onUrlChange("") }.padding(8.dp))
-                        }
-                    }
-                },
-            )
-
-            // ---------- xem trước
-            val pv = vm.preview
-            if (pv != null || vm.previewLoading) {
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(Soft).padding(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+            listOf("📥 Video", "🐍 Python").forEachIndexed { idx, label ->
+                val sel = topTab == idx
+                Box(
+                    Modifier.weight(1f).height(42.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (sel) accent else Color.Transparent)
+                        .clickable { topTab = idx },
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Box(
-                        Modifier.size(width = 96.dp, height = 64.dp).clip(RoundedCornerShape(10.dp)).background(Soft),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        val thumb = pv?.thumbnail
-                        if (thumb != null) {
-                            AsyncImage(model = thumb, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                        } else {
-                            Text("🎬", fontSize = 22.sp)
-                        }
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            pv?.title ?: "Đang tải thông tin…",
-                            fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                        )
-                        if (pv != null) {
-                            val meta = listOf(pv.uploader, if (pv.duration > 0) fmtDuration(pv.duration) else "")
-                                .filter { it.isNotEmpty() }.joinToString(" · ")
-                            Text(meta, fontSize = 12.sp, color = Muted)
-                        }
-                    }
+                    Text(
+                        label,
+                        color = if (sel) onAccent else Muted,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                    )
                 }
             }
-
-            // ---------- loại tải
-            Spacer(Modifier.height(14.dp))
-            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Soft).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TypeButton("🎬 Video", !o.audioOnly, accent, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioOnly = false)) }
-                TypeButton("🎵 Audio", o.audioOnly, accent, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioOnly = true)) }
-            }
-
-            // ---------- tùy chọn
-            Spacer(Modifier.height(14.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (!o.audioOnly) {
-                    Picker("Chất lượng", o.quality, o.platform.qualities.map { it to qLabel(it) }, Modifier.weight(1f)) { vm.updateOpts(o.copy(quality = it)) }
-                    Picker("Định dạng video", o.videoFormat, listOf("mp4", "webm", "mkv", "avi", "mov", "flv").map { it to it.uppercase() }, Modifier.weight(1f)) { vm.updateOpts(o.copy(videoFormat = it)) }
-                } else {
-                    Picker("Định dạng âm thanh", o.audioFormat, o.platform.audioFormats.map { it to it.uppercase() }, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioFormat = it)) }
-                    Picker("Bitrate", o.audioBitrate.toString(), listOf(64, 128, 192, 256, 320).map { it.toString() to "$it kbps" }, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioBitrate = it.toInt())) }
-                }
-            }
-
-            if (!o.audioOnly) {
-                Spacer(Modifier.height(12.dp))
-                SwitchRow("📱 iPhone Compatible", "H.264 + AAC, phát được trên iPhone", o.iphone, accent, onAccent) { vm.updateOpts(o.copy(iphone = it)) }
-            }
-            if (o.platform == Platform.YOUTUBE) {
-                Spacer(Modifier.height(8.dp))
-                SwitchRow("📀 Tải toàn bộ playlist / kênh", "Lưu vào thư mục riêng trong Download/Mini-Y2mate", o.playlist, accent, onAccent) { vm.updateOpts(o.copy(playlist = it)) }
-            }
-
-            // ---------- nút tải
-            Spacer(Modifier.height(18.dp))
-            val running = dl is DlState.Running
-            Button(
-                onClick = { startDownload() },
-                enabled = !running,
-                modifier = Modifier.fillMaxWidth().height(54.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = onAccent),
-            ) {
-                Text(
-                    when (dl) {
-                        is DlState.Running -> "Đang tải…"
-                        is DlState.Failed -> "🔄 Thử lại"
-                        else -> "⬇️ Tải xuống"
-                    },
-                    fontSize = 16.sp, fontWeight = FontWeight.Bold,
-                )
-            }
-
-            // ---------- kết quả
-            when (val s = dl) {
-                is DlState.Running -> RunningPanel(s, accent) { vm.cancel() }
-                is DlState.Done -> ResultPanel(s.files, ctx)
-                is DlState.Failed -> Text("❌ ${s.message}", color = Err, fontSize = 13.sp, modifier = Modifier.padding(top = 12.dp))
-                DlState.Idle -> {}
-            }
-
-            Text(
-                "📁 File được lưu trong Download/Mini-Y2mate",
-                fontSize = 12.sp, color = Muted, modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
-            )
         }
+
+        Spacer(Modifier.height(12.dp))
+
+        when (topTab) {
+            0 -> VideoTabContent(vm, ctx, clipboard, dl, accent, onAccent)
+            1 -> PyScriptScreen()
+        }
+
         Spacer(Modifier.height(24.dp))
     }
 
     if (showHistory) HistoryDialog(vm, ctx) { showHistory = false }
-    if (showSettings) SettingsDialog(vm, ctx, onPick = { cookiePicker.launch(arrayOf("text/plain", "application/octet-stream", "*/*")) }) { showSettings = false }
+    if (showSettings) SettingsDialog(
+        vm, ctx,
+        onPick = { cookiePicker.launch(arrayOf("text/plain", "application/octet-stream", "*/*")) }
+    ) { showSettings = false }
+}
+
+@Composable
+private fun VideoTabContent(
+    vm: MainViewModel,
+    ctx: Context,
+    clipboard: androidx.compose.ui.platform.ClipboardManager,
+    dl: DlState,
+    accent: Color,
+    onAccent: Color,
+) {
+    val o = vm.opts
+
+    fun startDownload() {
+        if (vm.url.isBlank()) toast(ctx, "Nhập liên kết trước đã nhé") else vm.download()
+    }
+
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(CardBg)
+            .border(1.dp, Line, RoundedCornerShape(22.dp)).padding(16.dp),
+    ) {
+        PlatformTabs(o.platform) { vm.setPlatform(it) }
+        Spacer(Modifier.height(14.dp))
+
+        OutlinedTextField(
+            value = vm.url,
+            onValueChange = { vm.onUrlChange(it) },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("Dán link vào đây…", color = Muted) },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+            keyboardActions = KeyboardActions(onGo = { startDownload() }),
+            trailingIcon = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("📋", fontSize = 18.sp, modifier = Modifier.clickable {
+                        val t = clipboard.getText()?.text?.trim().orEmpty()
+                        if (t.isEmpty()) toast(ctx, "Clipboard đang trống") else vm.onUrlChange(t)
+                    }.padding(8.dp))
+                    if (vm.url.isNotEmpty()) {
+                        Text("✕", fontSize = 16.sp, color = Muted, modifier = Modifier.clickable { vm.onUrlChange("") }.padding(8.dp))
+                    }
+                }
+            },
+        )
+
+        val pv = vm.preview
+        if (pv != null || vm.previewLoading) {
+            Row(
+                Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(Soft).padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier.size(width = 96.dp, height = 64.dp).clip(RoundedCornerShape(10.dp)).background(Soft),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val thumb = pv?.thumbnail
+                    if (thumb != null) {
+                        AsyncImage(model = thumb, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    } else {
+                        Text("🎬", fontSize = 22.sp)
+                    }
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        pv?.title ?: "Đang tải thông tin…",
+                        fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    )
+                    if (pv != null) {
+                        val meta = listOf(pv.uploader, if (pv.duration > 0) fmtDuration(pv.duration) else "")
+                            .filter { it.isNotEmpty() }.joinToString(" · ")
+                        Text(meta, fontSize = 12.sp, color = Muted)
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Soft).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            TypeButton("🎬 Video", !o.audioOnly, accent, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioOnly = false)) }
+            TypeButton("🎵 Audio", o.audioOnly, accent, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioOnly = true)) }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (!o.audioOnly) {
+                Picker("Chất lượng", o.quality, o.platform.qualities.map { it to qLabel(it) }, Modifier.weight(1f)) { vm.updateOpts(o.copy(quality = it)) }
+                Picker("Định dạng video", o.videoFormat, listOf("mp4", "mkv", "webm").map { it to it.uppercase() }, Modifier.weight(1f)) { vm.updateOpts(o.copy(videoFormat = it)) }
+            } else {
+                Picker("Định dạng âm thanh", o.audioFormat, o.platform.audioFormats.map { it to it.uppercase() }, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioFormat = it)) }
+                Picker("Bitrate", o.audioBitrate.toString(), listOf(64, 128, 192, 256, 320).map { it.toString() to "$it kbps" }, Modifier.weight(1f)) { vm.updateOpts(o.copy(audioBitrate = it.toInt())) }
+            }
+        }
+
+        if (!o.audioOnly) {
+            Spacer(Modifier.height(12.dp))
+            SwitchRow("📱 iPhone Compatible", "H.264 + AAC, phát được trên iPhone", o.iphone, accent, onAccent) { vm.updateOpts(o.copy(iphone = it)) }
+        }
+        if (o.platform == Platform.YOUTUBE) {
+            Spacer(Modifier.height(8.dp))
+            SwitchRow("📀 Tải toàn bộ playlist / kênh", "Lưu vào thư mục riêng trong Download/Mini-Y2mate", o.playlist, accent, onAccent) { vm.updateOpts(o.copy(playlist = it)) }
+        }
+
+        Spacer(Modifier.height(18.dp))
+        val running = dl is DlState.Running
+        Button(
+            onClick = { startDownload() },
+            enabled = !running,
+            modifier = Modifier.fillMaxWidth().height(54.dp),
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = onAccent),
+        ) {
+            Text(
+                when (dl) {
+                    is DlState.Running -> "Đang tải…"
+                    is DlState.Failed -> "🔄 Thử lại"
+                    else -> "⬇️ Tải xuống"
+                },
+                fontSize = 16.sp, fontWeight = FontWeight.Bold,
+            )
+        }
+
+        when (val s = dl) {
+            is DlState.Running -> RunningPanel(s, accent) { vm.cancel() }
+            is DlState.Done -> ResultPanel(s.files, ctx)
+            is DlState.Failed -> Text("❌ ${s.message}", color = Err, fontSize = 13.sp, modifier = Modifier.padding(top = 12.dp))
+            DlState.Idle -> {}
+        }
+
+        Text(
+            "📁 File được lưu trong Download/Mini-Y2mate",
+            fontSize = 12.sp, color = Muted, modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+        )
+    }
 }
 
 // ===================================================================== thành phần nhỏ
@@ -480,7 +527,6 @@ private fun SettingsDialog(vm: MainViewModel, ctx: Context, onPick: () -> Unit, 
                 }
                 Spacer(Modifier.height(14.dp))
 
-                // Nút kiểm tra cập nhật yt-dlp — gọi Downloader.checkYtDlpUpdate()
                 OutlinedButton(
                     onClick = {
                         updating = true
@@ -496,7 +542,7 @@ private fun SettingsDialog(vm: MainViewModel, ctx: Context, onPick: () -> Unit, 
 
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "ℹ️ yt-dlp được quản lý bởi Python/pip. Muốn lên bản mới, sửa `install(\"yt-dlp\")` trong build.gradle.kts rồi build lại.",
+                    "ℹ️ yt-dlp được quản lý bởi Python/pip. Vào tab 🐍 Python để cập nhật.",
                     fontSize = 11.sp, color = Muted,
                 )
             }
