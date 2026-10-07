@@ -1,5 +1,8 @@
 package com.nam2006.y2mate.repo
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -7,6 +10,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
@@ -33,9 +37,25 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, pad / 4, 0, pad / 4)
         }
 
+        fun small(text: String) = TextView(this).apply {
+            this.text = text
+            textSize = 12f
+            setPadding(0, pad / 6, 0, pad / 4)
+            setTextColor(0xFF8B94A7.toInt())
+        }
+
         fun button(text: String, onClick: () -> Unit) = Button(this).apply {
             this.text = text
             setOnClickListener { onClick() }
+        }
+
+        fun copyButton(label: String, value: String) = Button(this).apply {
+            this.text = label
+            setOnClickListener {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("index", value))
+                Toast.makeText(this@MainActivity, "Đã copy: $value", Toast.LENGTH_SHORT).show()
+            }
         }
 
         val pm = packageManager
@@ -49,12 +69,27 @@ class MainActivity : AppCompatActivity() {
             "Đặc điểm:\n" +
             "• Không chứa code thực thi\n" +
             "• Chỉ cung cấp địa chỉ index cho pip\n" +
-            "• Tự động được App A phát hiện"
+            "• Tự động được App A phát hiện\n" +
+            "• Cấu hình 3 index: tự build, Flet, PyPI"
         ))
 
-        // ===== Index URL =====
-        root.addView(title("🔗 Index URL"))
+        // ===== Index URLs =====
+        root.addView(title("🔗 Index URLs"))
+        root.addView(small("1. Tự build (wheel do bạn build từ CI):"))
         root.addView(body(RepoConfig.INDEX_URL))
+        root.addView(copyButton("📋 Copy index 1", RepoConfig.INDEX_URL))
+
+        root.addView(small("2. Flet (numpy, pandas, scipy, cryptography…):"))
+        root.addView(body(RepoConfig.EXTRA_INDEX_URL))
+        root.addView(copyButton("📋 Copy index 2", RepoConfig.EXTRA_INDEX_URL))
+
+        root.addView(small("3. PyPI (pure Python packages):"))
+        root.addView(body(RepoConfig.EXTRA_INDEX_URL_2))
+        root.addView(copyButton("📋 Copy index 3", RepoConfig.EXTRA_INDEX_URL_2))
+
+        // ===== Trusted host =====
+        root.addView(title("🔒 Trusted host"))
+        root.addView(body(RepoConfig.TRUSTED_HOST))
 
         // ===== Trạng thái App A =====
         root.addView(title("📱 Trạng thái"))
