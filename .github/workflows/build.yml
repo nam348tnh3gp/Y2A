@@ -340,7 +340,7 @@ jobs:
           ls -lh "$JNI/"
 
       # ==========================================================
-      # SECTION 8: PACKAGE RUNTIME TAR
+      # SECTION 8: PACKAGE RUNTIME TAR (không nén — dùng .tar thuần)
       # ==========================================================
       - name: Package Python Runtime into Assets
         run: |
@@ -350,11 +350,16 @@ jobs:
              "$GITHUB_WORKSPACE/app/src/main/assets/yt_dlp_bridge.py"
           echo "yt_dlp_bridge.py copied"
 
+          # Dọn asset cũ (nếu có) để tránh lẫn lộn giữa .tar và .tar.gz
+          rm -f "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar" \
+                "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar.gz"
+
           cd "$GITHUB_WORKSPACE/python-android"
-          tar -czvf "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar.gz" lib/python3.13
+          # tar thuần, KHÔNG nén gzip
+          tar -cvf "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar" lib/python3.13
 
           cd "$GITHUB_WORKSPACE"
-          SIZE=$(stat -c%s app/src/main/assets/python-runtime.tar.gz)
+          SIZE=$(stat -c%s app/src/main/assets/python-runtime.tar)
           SIZE_MB=$((SIZE / 1024 / 1024))
           echo "Runtime tar: ${SIZE_MB} MB ($SIZE bytes)"
           if [ "$SIZE" -lt 5000000 ]; then
@@ -363,7 +368,7 @@ jobs:
           fi
 
           echo "Tar contents:"
-          tar -tzf app/src/main/assets/python-runtime.tar.gz | head -10
+          tar -tvf app/src/main/assets/python-runtime.tar | head -10
           echo "Assets:"
           ls -lh app/src/main/assets/
 
