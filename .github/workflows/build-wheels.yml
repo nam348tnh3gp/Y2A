@@ -45,6 +45,9 @@ jobs:
       TARGET_HOST: "aarch64-linux-android"
 
     steps:
+      # ==========================================================
+      # 1. SETUP
+      # ==========================================================
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -76,6 +79,9 @@ jobs:
           echo "NDK=$HOME/ndk/android-ndk-r25c" >> "$GITHUB_ENV"
           echo "$HOME/ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
+      # ==========================================================
+      # 2. HOST PYTHON
+      # ==========================================================
       - name: Build Host Python
         run: |
           mkdir -p /tmp/build-host
@@ -113,6 +119,9 @@ jobs:
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
           echo "LDFLAGS=-L$DEPS_INSTALL/lib -Wl,--hash-style=both" >> "$GITHUB_ENV"
 
+      # ==========================================================
+      # 3. CROSS-COMPILE CORE DEPS
+      # ==========================================================
       - name: Cross-Compile libffi
         run: |
           cd /tmp
@@ -175,6 +184,9 @@ jobs:
           CC="$CC" AR="$AR" RANLIB="$RANLIB" ./configure --prefix="$DEPS_INSTALL" --static
           make -j$(nproc) install
 
+      # ==========================================================
+      # 4. CROSS-COMPILE DEPS CHO lxml
+      # ==========================================================
       - name: Cross-Compile libxml2 (cho lxml)
         run: |
           cd /tmp
@@ -198,6 +210,9 @@ jobs:
             --without-python --without-crypto
           make -j$(nproc) install
 
+      # ==========================================================
+      # 5. CROSS-COMPILE DEPS CHO Pillow
+      # ==========================================================
       - name: Cross-Compile libjpeg-turbo (cho Pillow)
         run: |
           cd /tmp
@@ -229,6 +244,9 @@ jobs:
             --enable-static --disable-shared
           make -j$(nproc) install
 
+      # ==========================================================
+      # 6. CROSS-COMPILE OpenBLAS (C-only, no Fortran)
+      # ==========================================================
       - name: Cross-Compile OpenBLAS (C-only, no Fortran)
         run: |
           cd /tmp
@@ -247,6 +265,9 @@ jobs:
           make -j$(nproc) "${MAKE_VARS[@]}"
           make "${MAKE_VARS[@]}" PREFIX="$DEPS_INSTALL" install
 
+      # ==========================================================
+      # 7. CROSS-COMPILE CPYTHON 3.13
+      # ==========================================================
       - name: Cross-Compile CPython
         run: |
           cd /tmp
@@ -276,6 +297,9 @@ jobs:
           make -j$(nproc)
           make install
 
+      # ==========================================================
+      # 8. SYMLINK + PIP
+      # ==========================================================
       - name: Symlink target Python path
         run: |
           sudo mkdir -p /data/data/com.nam2006.y2mate/files
@@ -305,10 +329,10 @@ jobs:
             poetry-core flit-core hatchling wheel setuptools-rust
 
           echo ""
-          echo "=== Cài meson-python + maturin vào HOST python (cho pip subprocess) ==="
+          echo "=== Cài build backends vào HOST python ==="
           "$HOST_PYTHON" -m pip install --no-cache-dir \
             meson-python meson ninja maturin pybind11 setuptools-rust \
-            "setuptools_scm<8.2" Cython expandvars pkgconfig
+            "setuptools_scm<8.2" Cython expandvars pkgconfig cffi
 
           echo ""
           echo "=== Verify entry points ==="
@@ -358,6 +382,9 @@ jobs:
           echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
+      # ==========================================================
+      # 11. BUILD WHEELS (KHÔNG có -nostdinc)
+      # ==========================================================
       - name: Build wheels for Android aarch64
         run: |
           set -eo pipefail
@@ -392,7 +419,7 @@ jobs:
             ar rcs "$DEPS_INSTALL/lib/librt.a"
           fi
 
-          # --- Cross-compile env ---
+          # --- Cross-compile env (KHÔNG dùng -nostdinc) ---
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
@@ -400,18 +427,6 @@ jobs:
           export PATH="$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
           export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
-
-          # --- Fix Pillow: chặn /usr/include, dùng NDK sysroot ---
-          NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          export CFLAGS="-fPIC -O2 -nostdinc \
-            -I$DEPS_INSTALL/include \
-            -I/tmp/host-python/include/python3.13 \
-            -I$NDK_SYSROOT/usr/include \
-            -I$NDK_SYSROOT/usr/include/aarch64-linux-android \
-            -Wno-implicit-function-declaration"
-          export CPPFLAGS="$CFLAGS"
-          export CXXFLAGS="$CFLAGS"
-          export LDFLAGS="-L$DEPS_INSTALL/lib -L$NDK_SYSROOT/usr/lib/aarch64-linux-android/24 -Wl,--hash-style=both"
 
           export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
@@ -427,17 +442,9 @@ jobs:
           export LAPACK="$DEPS_INSTALL"
           export F77=""; export F90=""; export FC=""
 
-          # --- Fix cryptography: chỉ định interpreter cho maturin ---
-          export PYO3_PYTHON="/tmp/host-python/bin/python3.13"
-          export PYO3_CROSS=1
-          export PYO3_CROSS_PYTHON_VERSION="3.13"
-          export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
-          export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
-
           # --- Cargo ---
           export CARGO_BUILD_TARGET="aarch64-linux-android"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L$DEPS_INSTALL/lib"
           export OPENSSL_DIR="$DEPS_INSTALL"
           export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
@@ -472,6 +479,86 @@ jobs:
           echo "=========================================="
           ls -lh wheels-out/ || echo "(rỗng)"
 
+      # ==========================================================
+      # 11.5. FLET FORGE — build các gói nâng cao (numpy, Pillow, cryptography)
+      # ==========================================================
+      - name: Build advanced packages with Flet Forge
+        continue-on-error: true
+        run: |
+          set -eo pipefail
+
+          echo "=== Clone Mobile Forge ==="
+          git clone --depth 1 https://github.com/flet-dev/mobile-forge /tmp/forge || {
+            echo "⚠️ Không clone được Mobile Forge — bỏ qua"
+            exit 0
+          }
+
+          cd /tmp/forge
+
+          echo "=== Setup Python deps cho forge ==="
+          "$HOST_PYTHON" -m pip install --quiet \
+            click pyyaml packaging requests toml tomlkit || true
+
+          echo ""
+          echo "=== Recipe có sẵn ==="
+          ls recipes/ 2>/dev/null | head -50 || echo "(không có recipes/)"
+
+          echo ""
+          echo "=== Cấu hình env cho forge ==="
+          export ANDROID_NDK_ROOT="$NDK"
+          export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP"
+          export CFLAGS="-fPIC -O2 -I$DEPS_INSTALL/include -Wno-implicit-function-declaration"
+          export CPPFLAGS="-I$DEPS_INSTALL/include"
+          export LDFLAGS="-L$DEPS_INSTALL/lib -Wl,--hash-style=both"
+          export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
+          export PKG_CONFIG_SYSROOT_DIR="$DEPS_INSTALL"
+          export PATH="$HOST_PYTHON:$(dirname $HOST_PYTHON):$PATH"
+          export PYO3_PYTHON="$HOST_PYTHON"
+          export CARGO_BUILD_TARGET="aarch64-linux-android"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
+          export OPENSSL_DIR="$DEPS_INSTALL"
+          export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
+          export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
+
+          # --- Các gói nâng cao cần forge ---
+          ADVANCED="numpy pillow cryptography"
+
+          for pkg in $ADVANCED; do
+            echo ""
+            echo "=========================================="
+            echo "🔨 [FORGE] $pkg"
+            echo "=========================================="
+
+            if [ ! -d "recipes/$pkg" ]; then
+              echo "⚠️ Không có recipe cho $pkg — bỏ qua"
+              continue
+            fi
+
+            # Thử nhiều cú pháp gọi forge
+            "$HOST_PYTHON" -m forge build "$pkg" \
+              --platform android \
+              --arch arm64-v8a \
+              --output-dir "$GITHUB_WORKSPACE/wheels-out" 2>&1 | tail -50 || \
+            python3 -m forge build "$pkg" \
+              --platform android \
+              --arch arm64-v8a \
+              --output-dir "$GITHUB_WORKSPACE/wheels-out" 2>&1 | tail -50 || \
+            forge build "$pkg" \
+              --platform android \
+              --arch arm64-v8a \
+              --output-dir "$GITHUB_WORKSPACE/wheels-out" 2>&1 | tail -50 || {
+                echo "⚠️ Forge build $pkg thất bại — bỏ qua"
+              }
+          done
+
+          echo ""
+          echo "=== Wheels sau forge ==="
+          ls -lh "$GITHUB_WORKSPACE/wheels-out/" || true
+
+      # ==========================================================
+      # 12. POST-PROCESS
+      # ==========================================================
       - name: Post-process wheels
         run: |
           mkdir -p wheels-final
@@ -487,6 +574,9 @@ jobs:
           done
           ls -lh wheels-final/ || echo "(rỗng)"
 
+      # ==========================================================
+      # 13. RELEASE
+      # ==========================================================
       - name: Generate release tag
         id: tag
         run: |
@@ -507,6 +597,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ==========================================================
+      # 14. INDEX + COMMIT
+      # ==========================================================
       - name: Generate pip index HTML
         if: hashFiles('wheels-final/*.whl') != ''
         run: |
@@ -535,6 +628,9 @@ jobs:
             done
           fi
 
+      # ==========================================================
+      # 15. SUMMARY
+      # ==========================================================
       - name: Summary
         if: always()
         run: |
