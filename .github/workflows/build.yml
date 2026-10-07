@@ -1,4 +1,4 @@
-name: Build APK with Self-Built Python
+name: Build APK & Plugin
 
 on:
   workflow_dispatch:
@@ -6,18 +6,60 @@ on:
     types: [build-apk]
   push:
     branches:
-      - nam348tnh3gp-patch-1
       - main
+      - nam348tnh3gp-patch-1
+    paths:
+      - 'app/**'
+      - 'plugin/**'
+      - 'settings.gradle.kts'
+      - 'build.gradle.kts'
+      - 'versioncode.txt'
+      - 'plugin/versioncode.txt'
+      - '.github/workflows/build.yml'
 
 concurrency:
-  group: build-apk
+  group: build-all-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  # ============================================================
+  # JOB 0: Detect thay đổi để quyết định build app / plugin / cả 2
+  # ============================================================
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+      plugin: ${{ steps.filter.outputs.plugin }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            app:
+              - 'app/**'
+              - 'settings.gradle.kts'
+              - 'build.gradle.kts'
+              - 'versioncode.txt'
+              - '.github/workflows/build.yml'
+            plugin:
+              - 'plugin/**'
+              - 'settings.gradle.kts'
+              - 'plugin/versioncode.txt'
+              - '.github/workflows/build.yml'
+
+  # ============================================================
+  # JOB 1: Build App chính (317 MB self-built Python)
+  # ============================================================
+  build-app:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -32,9 +74,7 @@ jobs:
       TARGET_HOST: "aarch64-linux-android"
 
     steps:
-      # ==========================================================
-      # SECTION 1: ENVIRONMENT SETUP
-      # ==========================================================
+      # ---------- SECTION 1: ENVIRONMENT SETUP ----------
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -84,9 +124,7 @@ jobs:
           fi
           echo "✅ Bridge scripts found"
 
-      # ==========================================================
-      # SECTION 2: VERSION BUMP
-      # ==========================================================
+      # ---------- SECTION 2: VERSION BUMP ----------
       - name: Bump version code
         id: bump
         run: |
@@ -112,13 +150,17 @@ jobs:
             echo "no change"
           else
             git commit -m "chore: bump version code to ${{ steps.bump.outputs.new_version }} [skip ci]"
-            git pull --rebase origin "${{ github.ref_name }}" || true
-            git push origin "HEAD:${{ github.ref_name }}"
+            for i in 1 2 3 4 5; do
+              if git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
+                echo "✅ Push OK (attempt $i)"
+                break
+              fi
+              echo "⚠️ Retry push (attempt $i)"
+              sleep 5
+            done
           fi
 
-      # ==========================================================
-      # SECTION 3: HOST PYTHON
-      # ==========================================================
+      # ---------- SECTION 3: HOST PYTHON ----------
       - name: Build Host Python
         run: |
           mkdir -p /tmp/build-host
@@ -148,13 +190,9 @@ jobs:
           echo "PKG_CONFIG_PATH=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "CFLAGS=-fPIC -O2 -I$DEPS_INSTALL/include -Wno-implicit-function-declaration" >> "$GITHUB_ENV"
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
-          # QUAN TRỌNG: --hash-style=both để tương thích Android 12 linker
           echo "LDFLAGS=-L$DEPS_INSTALL/lib -Wl,--hash-style=both" >> "$GITHUB_ENV"
 
-      # ==========================================================
-      # SECTION 4: CROSS-COMPILE DEPENDENCIES
-      # ==========================================================
-
+      # ---------- SECTION 4: CROSS-COMPILE DEPENDENCIES ----------
       - name: Cross-Compile libffi
         run: |
           cd /tmp
@@ -212,9 +250,7 @@ jobs:
           ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
           make -j$(nproc) install
 
-      # ==========================================================
-      # SECTION 5: CROSS-COMPILE CPYTHON 3.13
-      # ==========================================================
+      # ---------- SECTION 5: CROSS-COMPILE CPYTHON 3.13 ----------
       - name: Cross-Compile CPython
         run: |
           cd /tmp
@@ -266,9 +302,7 @@ jobs:
           echo "Verify hash style of libpython3.13.so:"
           readelf -d "$GITHUB_WORKSPACE/python-android/lib/libpython3.13.so" | grep -E "HASH" || true
 
-      # ==========================================================
-      # SECTION 6: BOOTSTRAP WHEELS + PATCH PATHS
-      # ==========================================================
+      # ---------- SECTION 6: BOOTSTRAP WHEELS ----------
       - name: Bootstrap Pure-Python Wheels
         run: |
           TARGET_SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
@@ -310,9 +344,7 @@ jobs:
             \( -name "_sysconfigdata*.py" -o -name "*.pc" -o -name "*-config" -o -name "Makefile" \) \
             -exec sed -i "s|$GITHUB_WORKSPACE/python-android|/data/data/com.nam2006.y2mate/files/python|g" {} \;
 
-      # ==========================================================
-      # SECTION 7: COLLECT jniLibs + PATCH NEEDED + RPATH
-      # ==========================================================
+      # ---------- SECTION 7: COLLECT jniLibs ----------
       - name: Collect and Process Native Libraries
         run: |
           JNI="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
@@ -369,9 +401,7 @@ jobs:
           echo "Final jniLibs:"
           ls -lh "$JNI/"
 
-      # ==========================================================
-      # SECTION 8: PACKAGE RUNTIME TAR + SCRIPTS
-      # ==========================================================
+      # ---------- SECTION 8: PACKAGE RUNTIME TAR ----------
       - name: Package Python Runtime into Assets
         run: |
           mkdir -p "$GITHUB_WORKSPACE/app/src/main/assets"
@@ -413,9 +443,7 @@ jobs:
           echo "Assets:"
           ls -lh app/src/main/assets/
 
-      # ==========================================================
-      # SECTION 9: FFMPEG FROM TERMUX
-      # ==========================================================
+      # ---------- SECTION 9: FFMPEG ----------
       - name: Download FFmpeg from Termux
         run: |
           set -e
@@ -444,9 +472,7 @@ jobs:
           echo "jniLibs final:"
           ls -lh app/src/main/jniLibs/arm64-v8a/
 
-      # ==========================================================
-      # SECTION 9.5: VERIFY libpython3.13.so CÓ TRONG jniLibs
-      # ==========================================================
+      # ---------- SECTION 9.5: VERIFY ----------
       - name: Verify libpython in jniLibs
         run: |
           JNI="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
@@ -474,9 +500,7 @@ jobs:
           echo "=== hash sections of libpython3.13.so ==="
           readelf -d "$JNI/libpython3.13.so" | grep -E "HASH" || echo "❌ No hash section"
 
-      # ==========================================================
-      # SECTION 10: BUILD APK
-      # ==========================================================
+      # ---------- SECTION 10: BUILD APK ----------
       - name: Setup debug keystore
         run: |
           mkdir -p "$HOME/.android"
@@ -516,5 +540,121 @@ jobs:
         with:
           name: Mini-Y2mate-Pro-v${{ steps.bump.outputs.new_version }}
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  # ============================================================
+  # JOB 2: Build Plugin Repository (10 MB)
+  # ============================================================
+  build-plugin:
+    needs: changes
+    if: needs.changes.outputs.plugin == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Bump plugin version code
+        id: bump
+        run: |
+          set -e
+          F="plugin/versioncode.txt"
+          if [ -f "$F" ]; then
+            C=$(cat "$F" | tr -d '[:space:]')
+            C=${C:-0}
+          else
+            C=0
+          fi
+          if ! [[ "$C" =~ ^[0-9]+$ ]]; then C=0; fi
+          N=$((C + 1))
+          echo "$N" > "$F"
+          echo "new_version=$N" >> "$GITHUB_OUTPUT"
+
+      - name: Commit plugin version bump
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add plugin/versioncode.txt
+          if git diff --staged --quiet; then
+            echo "no change"
+          else
+            git commit -m "chore(plugin): bump version to ${{ steps.bump.outputs.new_version }} [skip ci]"
+            for i in 1 2 3 4 5; do
+              if git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
+                echo "✅ Push OK (attempt $i)"
+                break
+              fi
+              echo "⚠️ Retry push (attempt $i)"
+              sleep 5
+            done
+          fi
+
+      - name: Setup debug keystore
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ -f "debug.keystore" ]; then
+            cp debug.keystore "$HOME/.android/debug.keystore"
+          else
+            keytool -genkey -v -keystore "$HOME/.android/debug.keystore" \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build plugin APK
+        run: gradle :plugin:assembleRelease --stacktrace
+
+      - name: Rename APK
+        run: |
+          V="${{ steps.bump.outputs.new_version }}"
+          for f in plugin/build/outputs/apk/release/*.apk; do
+            if [[ "$f" != *".apk" ]] || [[ "$f" == *"-unaligned"* ]]; then continue; fi
+            D=$(dirname "$f")
+            B=$(basename "$f" .apk)
+            mv "$f" "${D}/${B}-v${V}.apk"
+          done
+          ls -lh plugin/build/outputs/apk/release/
+
+      - name: Report plugin size
+        run: |
+          echo "Plugin APK:"
+          ls -lh plugin/build/outputs/apk/release/*.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: plugin-v1.0.${{ steps.bump.outputs.new_version }}
+          name: Mini-Y2mate Repository v1.0.${{ steps.bump.outputs.new_version }}
+          body: |
+            Plugin Repository cho Mini-Y2mate.
+            Cung cấp pip index để tải wheel Android có sẵn.
+          files: plugin/build/outputs/apk/release/*.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mini-Y2mate-Repo-v${{ steps.bump.outputs.new_version }}
+          path: plugin/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 30
