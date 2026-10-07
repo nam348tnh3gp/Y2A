@@ -8,6 +8,14 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- ============================================================
+         Android 11+ yêu cầu khai báo package cần query.
+         Không có block này → getPackageInfo() luôn fail.
+         ============================================================ -->
+    <queries>
+        <package android:name="com.nam2006.y2mate.repo" />
+    </queries>
+
     <application
         android:name=".App"
         android:allowBackup="false"
