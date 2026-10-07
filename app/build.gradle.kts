@@ -61,7 +61,7 @@ android {
             pickFirsts += listOf(
                 "**/libffmpeg.so",
                 "**/libffprobe.so",
-                "**/libpython3.11.so",
+                "**/libpython3.13.so",     // ← đổi từ 3.11
                 "**/libssl.so",
                 "**/libcrypto.so",
                 "**/libffi.so",
@@ -74,8 +74,8 @@ android {
     }
 
     androidResources {
-        // Không nén tar.gz và .so để extract nhanh
-        noCompress += listOf("tar.gz", "so", "py", "pyc")
+        // Không nén .tar, .so, .py, .pyc để extract nhanh
+        noCompress += listOf("tar", "tar.gz", "so", "py", "pyc")
     }
 
     lint {
