@@ -18,6 +18,7 @@ on:
     paths:
       - 'wheels/list.txt'
       - 'scripts/gen_index.py'
+      - 'scripts/build-p4a-style.sh'
       - '.github/workflows/build-wheels.yml'
 
 concurrency:
@@ -57,6 +58,16 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify p4a script exists
+        run: |
+          if [ ! -f scripts/build-p4a-style.sh ]; then
+            echo "❌ Missing scripts/build-p4a-style.sh"
+            echo "Please add the file to your repo (see workflow comments)"
+            exit 1
+          fi
+          chmod +x scripts/build-p4a-style.sh
+          echo "✅ scripts/build-p4a-style.sh found"
+
       - name: Install Host Tools
         run: |
           sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
@@ -75,7 +86,7 @@ jobs:
             cmake ninja-build nasm
 
       # ============================================================
-      # 1.5. TẢI WHEEL TỪ RELEASE GẦN NHẤT (để skip build trùng)
+      # 1.5. TẢI WHEEL TỪ RELEASE GẦN NHẤT
       # ============================================================
       - name: Download previous wheels from latest release
         id: prev
@@ -92,7 +103,6 @@ jobs:
             exit 0
           fi
 
-          echo "=== Tìm release wheels gần nhất ==="
           LATEST_TAG=$(gh release list --limit 50 --json tagName -q '.[] | select(.tagName | startswith("wheels-")) | .tagName' | head -1 || echo "")
 
           if [ -z "$LATEST_TAG" ]; then
@@ -102,21 +112,12 @@ jobs:
           fi
 
           echo "Latest wheels tag: $LATEST_TAG"
-
           gh release download "$LATEST_TAG" \
-            --pattern '*.whl' \
-            --dir wheels-out \
-            --clobber 2>&1 | tail -5 || true
+            --pattern '*.whl' --dir wheels-out --clobber 2>&1 | tail -3 || true
 
           COUNT=$(ls wheels-out/*.whl 2>/dev/null | wc -l)
           echo "Đã tải $COUNT wheel từ $LATEST_TAG"
-
-          if [ "$COUNT" -gt 0 ]; then
-            echo "has_cache=true" >> "$GITHUB_OUTPUT"
-            ls -lh wheels-out/ | head -40
-          else
-            echo "has_cache=false" >> "$GITHUB_OUTPUT"
-          fi
+          [ "$COUNT" -gt 0 ] && echo "has_cache=true" >> "$GITHUB_OUTPUT" || echo "has_cache=false" >> "$GITHUB_OUTPUT"
 
       - name: Setup Android NDK r25c
         run: |
@@ -140,10 +141,7 @@ jobs:
           ./configure --prefix=/tmp/host-python --enable-optimizations=no
           make -j$(nproc)
           make install
-
-          echo "=== Python binaries ==="
           ls -lh /tmp/host-python/bin/python*
-
           echo "HOST_PYTHON=/tmp/host-python/bin/python3.13" >> "$GITHUB_ENV"
 
       - name: Export Cross-Compile Environment
@@ -175,8 +173,7 @@ jobs:
           wget -q "https://github.com/libffi/libffi/releases/download/v${{ env.LIBFFI_VERSION }}/libffi-${{ env.LIBFFI_VERSION }}.tar.gz"
           tar -xf "libffi-${{ env.LIBFFI_VERSION }}.tar.gz"
           cd "libffi-${{ env.LIBFFI_VERSION }}"
-          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
-            --enable-static --disable-shared
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
           make -j$(nproc) install
 
       - name: Cross-Compile OpenSSL
@@ -188,10 +185,8 @@ jobs:
           cd "openssl-${{ env.OPENSSL_VERSION }}"
           export ANDROID_NDK_ROOT="$NDK"
           export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-          ./Configure android-arm64 \
-            -D__ANDROID_API__=${{ env.ANDROID_API }} \
-            --prefix="$DEPS_INSTALL" \
-            --openssldir="$DEPS_INSTALL/ssl" \
+          ./Configure android-arm64 -D__ANDROID_API__=${{ env.ANDROID_API }} \
+            --prefix="$DEPS_INSTALL" --openssldir="$DEPS_INSTALL/ssl" \
             shared no-engine no-tests no-async \
             CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
             -Wl,--hash-style=both
@@ -208,8 +203,7 @@ jobs:
           wget -q "$SQLITE_URL"
           tar -xf "sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
           cd "sqlite-autoconf-${{ env.SQLITE_VERSION }}"
-          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
-            --enable-static --disable-shared
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
           make -j$(nproc) install
 
       - name: Cross-Compile XZ
@@ -218,8 +212,7 @@ jobs:
           wget -q "https://github.com/tukaani-project/xz/releases/download/v${{ env.XZ_VERSION }}/xz-${{ env.XZ_VERSION }}.tar.gz"
           tar -xf "xz-${{ env.XZ_VERSION }}.tar.gz"
           cd "xz-${{ env.XZ_VERSION }}"
-          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
-            --enable-static --disable-shared
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
           make -j$(nproc) install
 
       - name: Cross-Compile zlib
@@ -231,30 +224,27 @@ jobs:
           CC="$CC" AR="$AR" RANLIB="$RANLIB" ./configure --prefix="$DEPS_INSTALL" --static
           make -j$(nproc) install
 
-      - name: Cross-Compile libxml2 (cho lxml)
+      - name: Cross-Compile libxml2
         run: |
           cd /tmp
           wget -q "https://download.gnome.org/sources/libxml2/2.12/libxml2-${{ env.LIBXML2_VERSION }}.tar.xz"
           tar -xf "libxml2-${{ env.LIBXML2_VERSION }}.tar.xz"
           cd "libxml2-${{ env.LIBXML2_VERSION }}"
           ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
-            --enable-static --disable-shared \
-            --without-python --without-lzma --without-zlib \
-            --without-iconv --without-icu
+            --enable-static --disable-shared --without-python --without-lzma --without-zlib --without-iconv --without-icu
           make -j$(nproc) install
 
-      - name: Cross-Compile libxslt (cho lxml)
+      - name: Cross-Compile libxslt
         run: |
           cd /tmp
           wget -q "https://download.gnome.org/sources/libxslt/1.1/libxslt-${{ env.LIBXSLT_VERSION }}.tar.xz"
           tar -xf "libxslt-${{ env.LIBXSLT_VERSION }}.tar.xz"
           cd "libxslt-${{ env.LIBXSLT_VERSION }}"
           ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
-            --enable-static --disable-shared \
-            --without-python --without-crypto
+            --enable-static --disable-shared --without-python --without-crypto
           make -j$(nproc) install
 
-      - name: Cross-Compile libjpeg-turbo (cho Pillow)
+      - name: Cross-Compile libjpeg-turbo
         run: |
           cd /tmp
           wget -q "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${{ env.LIBJPEGTURBO_VERSION }}/libjpeg-turbo-${{ env.LIBJPEGTURBO_VERSION }}.tar.gz"
@@ -263,42 +253,33 @@ jobs:
           mkdir build && cd build
           cmake -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-${{ env.ANDROID_API }} \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-${{ env.ANDROID_API }} \
             -DCMAKE_INSTALL_PREFIX="$DEPS_INSTALL" \
-            -DENABLE_SHARED=OFF \
-            -DENABLE_STATIC=ON \
-            -DWITH_TURBOJPEG=OFF \
-            -DWITH_SIMD=OFF \
-            ..
-          ninja
-          ninja install
+            -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=OFF -DWITH_SIMD=OFF ..
+          ninja && ninja install
 
-      - name: Cross-Compile libpng (cho Pillow)
+      - name: Cross-Compile libpng
         run: |
           cd /tmp
           wget -q "https://download.sourceforge.net/libpng/libpng-${{ env.LIBPNG_VERSION }}.tar.gz" \
             || wget -q "https://github.com/pnggroup/libpng/archive/refs/tags/v${{ env.LIBPNG_VERSION }}.tar.gz" -O "libpng-${{ env.LIBPNG_VERSION }}.tar.gz"
           tar -xf "libpng-${{ env.LIBPNG_VERSION }}.tar.gz"
           cd "libpng-${{ env.LIBPNG_VERSION }}"
-          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
-            --enable-static --disable-shared
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
           make -j$(nproc) install
 
-      - name: Cross-Compile OpenBLAS (C-only, no Fortran)
+      - name: Cross-Compile OpenBLAS
         run: |
           cd /tmp
           wget -q "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${{ env.OPENBLAS_VERSION }}/OpenBLAS-${{ env.OPENBLAS_VERSION }}.tar.gz"
           tar -xf "OpenBLAS-${{ env.OPENBLAS_VERSION }}.tar.gz"
           cd "OpenBLAS-${{ env.OPENBLAS_VERSION }}"
           MAKE_VARS=(
-            "TARGET=ARMV8"
-            "HOSTCC=gcc"
+            "TARGET=ARMV8" "HOSTCC=gcc"
             "CC=$CC" "CXX=$CXX" "AR=$AR" "RANLIB=$RANLIB"
             "FC=" "NOFORTRAN=1" "NOLAPACK=0"
             "USE_THREAD=1" "USE_OPENMP=0" "NUM_THREADS=64"
-            "COMMON_OPT=-O2 -fPIC"
-            "CFLAGS=-O2 -fPIC -I$DEPS_INSTALL/include"
+            "COMMON_OPT=-O2 -fPIC" "CFLAGS=-O2 -fPIC -I$DEPS_INSTALL/include"
           )
           make -j$(nproc) "${MAKE_VARS[@]}"
           make "${MAKE_VARS[@]}" PREFIX="$DEPS_INSTALL" install
@@ -312,20 +293,14 @@ jobs:
           tar -xf "/tmp/build-host/Python-${{ env.PYTHON_VERSION }}.tar.xz"
           cd "Python-${{ env.PYTHON_VERSION }}"
           printf '%s\n' '*disabled*' '_crypt' '_nis' 'spwd' 'ossaudiodev' \
-            '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' \
-            > Modules/Setup.local
+            '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' > Modules/Setup.local
           LDFLAGS="-L$DEPS_INSTALL/lib -Wl,--hash-style=both" \
-          OPENSSL_CFLAGS="-I$DEPS_INSTALL/include" \
-          OPENSSL_LIBS="-L$DEPS_INSTALL/lib -lssl -lcrypto" \
-          LIBFFI_CFLAGS="-I$DEPS_INSTALL/include" \
-          LIBFFI_LIBS="-L$DEPS_INSTALL/lib -lffi" \
-          SQLITE3_CFLAGS="-I$DEPS_INSTALL/include" \
-          SQLITE3_LIBS="-L$DEPS_INSTALL/lib -lsqlite3" \
-          LZMA_CFLAGS="-I$DEPS_INSTALL/include" \
-          LZMA_LIBS="-L$DEPS_INSTALL/lib -llzma" \
+          OPENSSL_CFLAGS="-I$DEPS_INSTALL/include" OPENSSL_LIBS="-L$DEPS_INSTALL/lib -lssl -lcrypto" \
+          LIBFFI_CFLAGS="-I$DEPS_INSTALL/include" LIBFFI_LIBS="-L$DEPS_INSTALL/lib -lffi" \
+          SQLITE3_CFLAGS="-I$DEPS_INSTALL/include" SQLITE3_LIBS="-L$DEPS_INSTALL/lib -lsqlite3" \
+          LZMA_CFLAGS="-I$DEPS_INSTALL/include" LZMA_LIBS="-L$DEPS_INSTALL/lib -llzma" \
           ./configure \
-            --host="${{ env.TARGET_HOST }}" \
-            --build=x86_64-pc-linux-gnu \
+            --host="${{ env.TARGET_HOST }}" --build=x86_64-pc-linux-gnu \
             --prefix="$GITHUB_WORKSPACE/python-android" \
             --with-build-python="$HOST_PYTHON" \
             --enable-shared --disable-ipv6 --without-ensurepip \
@@ -354,32 +329,15 @@ jobs:
         run: |
           SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
           mkdir -p "$SITE"
-
-          echo "=== Cài build backends vào TARGET site-packages ==="
           "$HOST_PYTHON" -m pip install \
             --target="$SITE" \
             --no-deps --no-cache-dir --only-binary=:all: --upgrade \
             "setuptools_scm<8.2" pybind11 maturin meson-python meson ninja \
             pkgconfig Cython expandvars packaging tomli \
             poetry-core flit-core hatchling wheel setuptools-rust
-
-          echo ""
-          echo "=== Cài build backends vào HOST python ==="
           "$HOST_PYTHON" -m pip install --no-cache-dir \
             meson-python meson ninja maturin pybind11 setuptools-rust \
             "setuptools_scm<8.2" Cython expandvars pkgconfig cffi
-
-          echo ""
-          echo "=== Verify ==="
-          export PATH="$SITE/bin:$PATH"
-          export PYTHONPATH="$SITE"
-          which maturin meson ninja || true
-          maturin --version || echo "⚠️ maturin FAIL"
-          meson --version || echo "⚠️ meson FAIL"
-
-          echo ""
-          echo "HOST_PYTHON=$HOST_PYTHON"
-          "$HOST_PYTHON" --version
 
       - name: Read package list
         id: pkglist
@@ -416,7 +374,7 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # 11. BUILD WHEELS
+      # 11. BUILD WHEELS — 3 tầng fallback
       # ==========================================================
       - name: Build wheels for Android aarch64
         run: |
@@ -450,55 +408,18 @@ jobs:
           mkdir -p "$DEPS_INSTALL/lib"
           if [ ! -f "$DEPS_INSTALL/lib/librt.a" ]; then
             ar rcs "$DEPS_INSTALL/lib/librt.a"
-            echo "✅ Stub librt.a created"
           fi
 
           # ========================================================
-          # Tạo wrapper scripts (từ p4a MesonRecipe)
-          # ========================================================
-          echo "=== Tạo wrapper scripts cho p4a-style build ==="
-
-          # Python wrapper giả lập target Python cho Meson introspection
-          cat > /tmp/target-python.sh <<EOF
-          #!$HOST_PY
-          import sys, os, sysconfig
-          sys._PYTHON_HOST_PLATFORM = "android-24-arm64_v8a"
-          sys.platform = "linux"
-          real_run = __import__("runpy").run_path
-          import runpy
-          sys.argv = [sys.argv[1]] + sys.argv[2:]
-          runpy.run_path(sys.argv[0], run_name="__main__")
-          EOF
-          chmod +x /tmp/target-python.sh
-
-          # numpy-config wrapper
-          cat > /tmp/numpy-config <<EOF
-          #!/bin/sh
-          if [ "\$1" = "--version" ]; then
-              echo "2.5.3"
-          else
-              echo "-I$TARGET_SITE/numpy/_core/include"
-          fi
-          EOF
-          chmod +x /tmp/numpy-config
-
-          # pybind11-config wrapper
-          cat > /tmp/pybind11-config <<EOF
-          #!/bin/sh
-          echo "-I$TARGET_SITE/pybind11/include"
-          EOF
-          chmod +x /tmp/pybind11-config
-
-          export PATH="/tmp:$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
-
-          # ========================================================
-          # Cross-compile env (giữ nguyên cho các gói thường)
+          # ENV CHUNG CHO CẢ 3 TẦNG
           # ========================================================
           NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          export NDK_SYSROOT
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
           export PYTHONPATH="$SYSCONF_DIR:$TARGET_SITE"
+          export PATH="$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
           export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
 
@@ -529,13 +450,11 @@ jobs:
           export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
 
-          echo ""
-          echo "=== Verify tools ==="
-          which maturin meson ninja cargo "$HOST_PY" || true
+          export WHEELS_OUT="$GITHUB_WORKSPACE/wheels-out"
 
-          # ============================================================
+          # ========================================================
           # Helper: check wheel đã tồn tại
-          # ============================================================
+          # ========================================================
           wheel_exists() {
             local pkg="$1"
             local pkg_a pkg_b
@@ -544,143 +463,103 @@ jobs:
             ls wheels-out/${pkg_a}-*.whl wheels-out/${pkg_b}-*.whl 2>/dev/null | head -1 | grep -q '.whl'
           }
 
-          # ============================================================
-          # BUILD NUMPY (p4a MesonRecipe style)
-          # ============================================================
-          if wheel_exists "numpy"; then
-            echo "⏭️  Skip numpy (đã có wheel)"
-          else
-            echo ""
-            echo "=========================================="
-            echo "🔨 Building: numpy (p4a style)"
-            echo "=========================================="
-
-            # Set env riêng cho numpy — giống p4a NumpyRecipe
-            export _PYTHON_HOST_PLATFORM="android-24-arm64_v8a"
-            export NPY_DISABLE_SVML=1
-            export TARGET_PYTHON_EXE="$TARGET_ROOT/bin/python3.13"
-            export NPY_BLAS_ORDER="openblas"
-            export NPY_LAPACK_ORDER="openblas"
-            export NPY_USE_BLAS_ILP64=0
-            export NPY_DISABLE_SVML=1
-            export OPENBLAS="$DEPS_INSTALL"
-            export BLAS="$DEPS_INSTALL"
-            export LAPACK="$DEPS_INSTALL"
-            export F77=""; export F90=""; export FC=""
-
-            # Build với setup-args của p4a
-            "$HOST_PY" -m pip wheel numpy \
-              --no-deps --no-build-isolation \
-              -Csetup-args=-Dblas=auto \
-              -Csetup-args=-Dlapack=auto \
-              -Csetup-args=-Dallow-noblas=False \
-              -Csetup-args=-Dlongdouble_format=IEEE_QUAD_LE \
-              --wheel-dir "$GITHUB_WORKSPACE/wheels-out" 2>&1 | tail -50 && \
-              echo "✅ numpy OK" || \
-              echo "❌ numpy FAILED"
-
-            # Reset env về linux_aarch64 cho các gói khác
-            export _PYTHON_HOST_PLATFORM="linux_aarch64"
-          fi
-
-          # ============================================================
-          # BUILD PILLOW (p4a patch style)
-          # ============================================================
-          if wheel_exists "Pillow"; then
-            echo "⏭️  Skip Pillow (đã có wheel)"
-          else
-            echo ""
-            echo "=========================================="
-            echo "🔨 Building: Pillow (patched)"
-            echo "=========================================="
-
-            PILLOW_SRC="/tmp/pillow-src"
-            rm -rf "$PILLOW_SRC" && mkdir -p "$PILLOW_SRC"
-            cd "$PILLOW_SRC"
-
-            "$HOST_PY" -m pip download Pillow \
-              --no-deps --no-binary=:all: \
-              --dest="$PILLOW_SRC" 2>&1 | tail -5
-
-            PILLOW_TARBALL=$(ls "$PILLOW_SRC"/Pillow-*.tar.gz 2>/dev/null | head -1)
-            if [ -z "$PILLOW_TARBALL" ]; then
-              echo "❌ Không tải được Pillow source"
-            else
-              tar -xf "$PILLOW_TARBALL"
-              PILLOW_DIR=$(find "$PILLOW_SRC" -maxdepth 1 -type d -name "Pillow-*" | head -1)
-              cd "$PILLOW_DIR"
-
-              echo "=== Patch Pillow setup.py ==="
-              cp setup.py setup.py.bak
-
-              # Dùng printf để tránh vấn đề YAML block scalar
-              printf '%s\n' \
-                'import re' \
-                'with open("setup.py", "r") as f:' \
-                '    content = f.read()' \
-                'q1 = chr(34)' \
-                'q2 = chr(39)' \
-                'content = content.replace(q1+"/usr/local/include"+q1, q1+"/nonexistent/usrdir"+q1)' \
-                'content = content.replace(q2+"/usr/local/include"+q2, q2+"/nonexistent/usrdir"+q2)' \
-                'content = content.replace(q1+"/usr/include"+q1, q1+"/nonexistent/usrdir"+q1)' \
-                'content = content.replace(q2+"/usr/include"+q2, q2+"/nonexistent/usrdir"+q2)' \
-                'with open("setup.py", "w") as f:' \
-                '    f.write(content)' \
-                'print("Patched")' \
-                > /tmp/patch_pillow.py
-
-              python3 /tmp/patch_pillow.py
-
-              echo "=== setup.py đã patch ==="
-              grep -c "nonexistent" setup.py || echo "(0)"
-
-              "$HOST_PY" -m pip wheel . \
-                --no-deps --no-build-isolation \
-                --wheel-dir "$GITHUB_WORKSPACE/wheels-out" 2>&1 | tail -30 && \
-                echo "✅ Pillow OK" || \
-                echo "❌ Pillow FAILED"
-
-              cd "$GITHUB_WORKSPACE"
-            fi
-          fi
-
-          # ============================================================
-          # LOOP BUILD CÁC GÓI KHÁC
-          # ============================================================
-          SUCCESS_LIST=""
+          # ========================================================
+          # LOOP BUILD — 3 tầng fallback cho MỌI lib
+          # ========================================================
+          SUCCESS_T1=""
+          SUCCESS_T2=""
           SKIP_LIST=""
           FAIL_LIST=""
 
           for pkg in ${{ steps.pkglist.outputs.packages }}; do
             echo ""
-            echo "=========================================="
-            echo "🔨 Building: $pkg"
-            echo "=========================================="
+            echo "════════════════════════════════════════════"
+            echo "📦 $pkg"
+            echo "════════════════════════════════════════════"
 
-            # Skip nếu wheel đã tồn tại
             if wheel_exists "$pkg"; then
-              echo "⏭️  Skip $pkg (đã có wheel)"
+              echo "⏭️  Skip (đã có wheel)"
               SKIP_LIST="$SKIP_LIST $pkg"
               continue
             fi
 
+            # ────────────────────────────────────────────────
+            # TẦNG 1: pip wheel chuẩn
+            # ────────────────────────────────────────────────
+            echo "🔨 Tầng 1: pip wheel (chuẩn)"
             if "$HOST_PY" -m pip wheel "$pkg" \
                   --no-deps --no-build-isolation --no-binary=:all: \
-                  --wheel-dir wheels-out 2>&1 | tail -80; then
-              echo "✅ $pkg OK"
-              SUCCESS_LIST="$SUCCESS_LIST $pkg"
-            else
-              echo "❌ $pkg FAILED"
-              FAIL_LIST="$FAIL_LIST $pkg"
+                  --wheel-dir wheels-out 2>&1 | tail -30; then
+              if wheel_exists "$pkg"; then
+                echo "✅ $pkg — Tầng 1 OK"
+                SUCCESS_T1="$SUCCESS_T1 $pkg"
+                continue
+              fi
             fi
+
+            # ────────────────────────────────────────────────
+            # TẦNG 2: p4a-style (safe cho mọi backend)
+            # ────────────────────────────────────────────────
+            echo ""
+            echo "🔨 Tầng 2: p4a-style"
+            if bash "$GITHUB_WORKSPACE/scripts/build-p4a-style.sh" "$pkg" 2>&1 | tail -40; then
+              if wheel_exists "$pkg"; then
+                echo "✅ $pkg — Tầng 2 OK (p4a)"
+                SUCCESS_T2="$SUCCESS_T2 $pkg"
+                continue
+              fi
+            fi
+
+            # ────────────────────────────────────────────────
+            # TẦNG 3: Fallback đặc biệt (meson + custom args)
+            # ────────────────────────────────────────────────
+            echo ""
+            echo "🔨 Tầng 3: p4a + meson setup-args"
+
+            # Danh sách lib cần meson args đặc biệt
+            MESON_ARGS=()
+            case "$pkg" in
+              numpy)
+                MESON_ARGS=("-Dblas=auto" "-Dlapack=auto" "-Dallow-noblas=False" "-Dlongdouble_format=IEEE_QUAD_LE")
+                ;;
+              scipy)
+                MESON_ARGS=("-Dblas=openblas" "-Dlapack=openblas" "-Dfortran_link_args=-L$DEPS_INSTALL/lib")
+                ;;
+              pandas)
+                MESON_ARGS=("-Dbuildtype=release")
+                ;;
+              *)
+                # Thử generic
+                MESON_ARGS=("-Dbuildtype=release")
+                ;;
+            esac
+
+            ARGS_BUILT=()
+            for a in "${MESON_ARGS[@]}"; do
+              ARGS_BUILT+=("--setup-args=$a")
+            done
+
+            if bash "$GITHUB_WORKSPACE/scripts/build-p4a-style.sh" "$pkg" "${ARGS_BUILT[@]}" 2>&1 | tail -40; then
+              if wheel_exists "$pkg"; then
+                echo "✅ $pkg — Tầng 3 OK (meson)"
+                SUCCESS_T2="$SUCCESS_T2 $pkg"
+                continue
+              fi
+            fi
+
+            echo "❌ $pkg — FAILED tất cả tầng"
+            FAIL_LIST="$FAIL_LIST $pkg"
           done
 
           echo ""
-          echo "=========================================="
-          echo "⏭️  Skipped (đã có cache):$SKIP_LIST"
-          echo "✅ Built mới:$SUCCESS_LIST"
-          echo "❌ Failed:$FAIL_LIST"
-          echo "=========================================="
+          echo "════════════════════════════════════════════"
+          echo "📊 KẾT QUẢ"
+          echo "════════════════════════════════════════════"
+          echo "⏭️  Skipped:    $SKIP_LIST"
+          echo "✅ Tầng 1 OK:  $SUCCESS_T1"
+          echo "✅ Tầng 2/3 OK:$SUCCESS_T2"
+          echo "❌ Failed:     $FAIL_LIST"
+          echo ""
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
@@ -714,9 +593,7 @@ jobs:
             fi
           done
 
-          echo "=== Post-process ==="
-          echo "Copied mới: $COPIED"
-          echo "Skipped (đã có): $SKIPPED"
+          echo "Copied mới: $COPIED / Skipped: $SKIPPED"
           ls -lh wheels-final/ || echo "(rỗng)"
 
       # ==========================================================
