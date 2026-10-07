@@ -1,0 +1,13 @@
+# Package build wheel Android aarch64
+# Format: tên[==version]
+# Không có version → lấy bản mới nhất
+
+charset-normalizer
+MarkupSafe
+PyYAML
+cffi
+lxml
+Pillow
+cryptography
+# numpy
+# pandas
