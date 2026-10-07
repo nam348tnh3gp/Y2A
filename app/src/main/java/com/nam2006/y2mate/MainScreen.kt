@@ -510,7 +510,8 @@ private fun SettingsDialog(vm: MainViewModel, ctx: Context, onPick: () -> Unit, 
         try {
             RepoPlugin.detect(ctx.applicationContext as Application)
         } catch (_: Exception) {
-            RepoPlugin.Config(false, "", "", "", 0)
+            // 6 args: installed, indexUrl, extraIndexUrl, extraIndexUrl2, trustedHost, pluginVersion
+            RepoPlugin.Config(false, "", "", "", "", 0)
         }
     }
 
@@ -554,10 +555,24 @@ private fun SettingsDialog(vm: MainViewModel, ctx: Context, onPick: () -> Unit, 
                         )
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            repoCfg.indexUrl,
+                            "• ${repoCfg.indexUrl}",
                             fontSize = 10.sp, color = Muted,
                             maxLines = 2, overflow = TextOverflow.Ellipsis,
                         )
+                        if (repoCfg.extraIndexUrl.isNotBlank()) {
+                            Text(
+                                "• ${repoCfg.extraIndexUrl}",
+                                fontSize = 10.sp, color = Muted,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (repoCfg.extraIndexUrl2.isNotBlank()) {
+                            Text(
+                                "• ${repoCfg.extraIndexUrl2}",
+                                fontSize = 10.sp, color = Muted,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                     else -> {
                         Text(
