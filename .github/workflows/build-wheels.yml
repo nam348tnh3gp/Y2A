@@ -416,7 +416,7 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # 11. BUILD WHEELS — có skip wheel đã có
+      # 11. BUILD WHEELS
       # ==========================================================
       - name: Build wheels for Android aarch64
         run: |
@@ -453,13 +453,52 @@ jobs:
             echo "✅ Stub librt.a created"
           fi
 
-          # --- Cross-compile env ---
+          # ========================================================
+          # Tạo wrapper scripts (từ p4a MesonRecipe)
+          # ========================================================
+          echo "=== Tạo wrapper scripts cho p4a-style build ==="
+
+          # Python wrapper giả lập target Python cho Meson introspection
+          cat > /tmp/target-python.sh <<EOF
+          #!$HOST_PY
+          import sys, os, sysconfig
+          sys._PYTHON_HOST_PLATFORM = "android-24-arm64_v8a"
+          sys.platform = "linux"
+          real_run = __import__("runpy").run_path
+          import runpy
+          sys.argv = [sys.argv[1]] + sys.argv[2:]
+          runpy.run_path(sys.argv[0], run_name="__main__")
+          EOF
+          chmod +x /tmp/target-python.sh
+
+          # numpy-config wrapper
+          cat > /tmp/numpy-config <<EOF
+          #!/bin/sh
+          if [ "\$1" = "--version" ]; then
+              echo "2.5.3"
+          else
+              echo "-I$TARGET_SITE/numpy/_core/include"
+          fi
+          EOF
+          chmod +x /tmp/numpy-config
+
+          # pybind11-config wrapper
+          cat > /tmp/pybind11-config <<EOF
+          #!/bin/sh
+          echo "-I$TARGET_SITE/pybind11/include"
+          EOF
+          chmod +x /tmp/pybind11-config
+
+          export PATH="/tmp:$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
+
+          # ========================================================
+          # Cross-compile env (giữ nguyên cho các gói thường)
+          # ========================================================
           NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
           export PYTHONPATH="$SYSCONF_DIR:$TARGET_SITE"
-          export PATH="$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
           export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
 
@@ -483,15 +522,6 @@ jobs:
           export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
           export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
 
-          export NPY_BLAS_ORDER="openblas"
-          export NPY_LAPACK_ORDER="openblas"
-          export NPY_DISABLE_SVML=1
-          export NPY_USE_BLAS_ILP64=0
-          export OPENBLAS="$DEPS_INSTALL"
-          export BLAS="$DEPS_INSTALL"
-          export LAPACK="$DEPS_INSTALL"
-          export F77=""; export F90=""; export FC=""
-
           export CARGO_BUILD_TARGET="aarch64-linux-android"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L$DEPS_INSTALL/lib"
@@ -504,7 +534,7 @@ jobs:
           which maturin meson ninja cargo "$HOST_PY" || true
 
           # ============================================================
-          # Helper: check wheel đã tồn tại (bất kỳ version)
+          # Helper: check wheel đã tồn tại
           # ============================================================
           wheel_exists() {
             local pkg="$1"
@@ -515,7 +545,46 @@ jobs:
           }
 
           # ============================================================
-          # BUILD PILLOW RIÊNG (patch setup.py)
+          # BUILD NUMPY (p4a MesonRecipe style)
+          # ============================================================
+          if wheel_exists "numpy"; then
+            echo "⏭️  Skip numpy (đã có wheel)"
+          else
+            echo ""
+            echo "=========================================="
+            echo "🔨 Building: numpy (p4a style)"
+            echo "=========================================="
+
+            # Set env riêng cho numpy — giống p4a NumpyRecipe
+            export _PYTHON_HOST_PLATFORM="android-24-arm64_v8a"
+            export NPY_DISABLE_SVML=1
+            export TARGET_PYTHON_EXE="$TARGET_ROOT/bin/python3.13"
+            export NPY_BLAS_ORDER="openblas"
+            export NPY_LAPACK_ORDER="openblas"
+            export NPY_USE_BLAS_ILP64=0
+            export NPY_DISABLE_SVML=1
+            export OPENBLAS="$DEPS_INSTALL"
+            export BLAS="$DEPS_INSTALL"
+            export LAPACK="$DEPS_INSTALL"
+            export F77=""; export F90=""; export FC=""
+
+            # Build với setup-args của p4a
+            "$HOST_PY" -m pip wheel numpy \
+              --no-deps --no-build-isolation \
+              -Csetup-args=-Dblas=auto \
+              -Csetup-args=-Dlapack=auto \
+              -Csetup-args=-Dallow-noblas=False \
+              -Csetup-args=-Dlongdouble_format=IEEE_QUAD_LE \
+              --wheel-dir "$GITHUB_WORKSPACE/wheels-out" 2>&1 | tail -50 && \
+              echo "✅ numpy OK" || \
+              echo "❌ numpy FAILED"
+
+            # Reset env về linux_aarch64 cho các gói khác
+            export _PYTHON_HOST_PLATFORM="linux_aarch64"
+          fi
+
+          # ============================================================
+          # BUILD PILLOW (p4a patch style)
           # ============================================================
           if wheel_exists "Pillow"; then
             echo "⏭️  Skip Pillow (đã có wheel)"
@@ -615,7 +684,7 @@ jobs:
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
-      # 12. POST-PROCESS — không ghi đè wheel đã có trong wheels-final
+      # 12. POST-PROCESS
       # ==========================================================
       - name: Post-process wheels
         run: |
@@ -628,7 +697,6 @@ jobs:
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
 
-            # Bỏ qua nếu file đã tồn tại
             if [ -f "wheels-final/$base" ]; then
               SKIPPED=$((SKIPPED+1))
               continue
@@ -637,7 +705,6 @@ jobs:
             cp "$whl" "wheels-final/$base"
             COPIED=$((COPIED+1))
 
-            # Nếu là linux_aarch64, cũng copy bản đổi tên
             if [[ "$base" == *"linux_aarch64"* ]]; then
               newname="${base//linux_aarch64/android_24_arm64_v8a}"
               if [ ! -f "wheels-final/$newname" ]; then
