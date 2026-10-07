@@ -249,7 +249,7 @@ private fun PillSmall(text: String, onClick: () -> Unit) {
 @Composable
 private fun InstallDialog(
     onClose: () -> Unit,
-    onResult: (PythonRunner.Result) -> Unit,
+    onResult: (PipManager.Result) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var pkg by remember { mutableStateOf("") }
