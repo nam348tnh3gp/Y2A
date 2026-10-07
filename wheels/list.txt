@@ -1,56 +1,14 @@
 # Package build wheel Android aarch64 / Python 3.13
 # Format: tên[==version]
-
-# ============================================
-# BATCH 1: C ext thuần (tự chứa)
-# ============================================
-charset-normalizer
-MarkupSafe
-PyYAML
-cffi
-ujson
-msgpack
-regex
-
-# ============================================
-# BATCH 2: cần thư viện native (đã cross-compile)
-# ============================================
-lxml
-Pillow
-
-# ============================================
-# BATCH 3: crypto (Rust + OpenSSL)
-# ============================================
-cryptography
-
-# ============================================
-# BATCH 4: numpy với OpenBLAS (không Fortran)
-# Test trước khi thêm scipy/pandas
-# ============================================
-numpy
-
-# ============================================
-# KHÔNG build — cần Fortran thực sự
-# ============================================
-# scipy
-# pandas
-# scikit-learn
-# matplotlib
-# Package build wheel Android aarch64 / Python 
-3.13
-# Format: tên[==version]
 # Không có version → lấy bản mới nhất
-# Dấu # → comment, không build
 
 # ============================================
-# BATCH 1: C extension thuần — self-contained
-# Không cần thư viện native ngoài
+# BATCH 1: C ext thuần (chắc pass)
 # ============================================
 charset-normalizer
 MarkupSafe
 PyYAML
 cffi
-ujson
 msgpack
 regex
 simplejson
@@ -61,19 +19,14 @@ mmh3
 cython
 
 # ============================================
-# BATCH 2: cần thư viện native (đã cross-compile)
-# libxml2, libxslt, zlib, libjpeg, libpng
+# BATCH 2: cần build backend thêm
 # ============================================
-lxml
+ujson
 Pillow
+lz4
 
 # ============================================
-# BATCH 3: crypto (Rust + OpenSSL)
-# ============================================
-cryptography
-
-# ============================================
-# BATCH 4: async HTTP (nhiều C ext nhỏ)
+# BATCH 3: async HTTP
 # ============================================
 multidict
 yarl
@@ -82,38 +35,38 @@ aiohttp
 aiosignal
 
 # ============================================
-# BATCH 5: compression
+# BATCH 4: compression
 # ============================================
 zstandard
-lz4
 brotli
 
 # ============================================
-# BATCH 6: khác (thuần C, tự chứa)
+# BATCH 5: misc
 # ============================================
-psutil
 protobuf
 pyrsistent
 immutables
 greenlet
 
 # ============================================
-# KHÔNG build — cần Fortran hoặc numpy/scipy
+# BATCH 6: cần native libs (đã cross-compile)
 # ============================================
-# numpy
-# scipy
-# pandas
-# scikit-learn
-# matplotlib
-# h5py
+lxml
 
 # ============================================
-# KHÔNG build — cần thư viện C ngoài phức tạp
+# BATCH 7: crypto (Rust + OpenSSL)
 # ============================================
-# pyzmq      (cần libzmq)
-# pycurl     (cần libcurl)
-# pygit2     (cần libgit2)
-# psycopg2   (cần libpq)
-# mysqlclient (cần libmysqlclient)
-# pyarrow    (cần Arrow C++)
-# grpcio     (cần C++ toolchain phức tạp)
+cryptography
+
+# ============================================
+# BATCH 8: numpy (OpenBLAS)
+# ============================================
+numpy
+
+# ============================================
+# KHÔNG build — Android không hỗ trợ
+# ============================================
+# psutil     (utmpx.h không tồn tại)
+# scipy      (cần Fortran)
+# pandas     (cần numpy + scipy)
+# matplotlib (cần numpy)
