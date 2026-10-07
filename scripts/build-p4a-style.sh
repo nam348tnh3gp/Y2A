@@ -1,20 +1,22 @@
 #!/bin/bash
 # build-p4a-style.sh — Generic p4a-style builder cho MỌI lib
 #
-# Usage:
-#   bash scripts/build-p4a-style.sh <pkg_name> [extra_args...]
-#
-# Env từ workflow:
-#   HOST_PY, TARGET_ROOT, TARGET_SITE, TARGET_STDLIB
-#   CC, CXX, AR, RANLIB, STRIP, READELF
-#   DEPS_INSTALL, NDK, NDK_SYSROOT, ANDROID_API
-#   GITHUB_WORKSPACE
+# Env BẮT BUỘC đã export:
+#   HOST_PYTHON, TARGET_ROOT, TARGET_SITE, TARGET_STDLIB
+#   CC, CXX, AR, RANLIB, STRIP, READELF, CFLAGS, CPPFLAGS, LDFLAGS
+#   DEPS_INSTALL, NDK, NDK_SYSROOT, ANDROID_API, GITHUB_WORKSPACE
 
 set -eo pipefail
 
-PKG_NAME="$1"
+PKG_NAME="${1:-}"
 shift || true
 
+if [ -z "$PKG_NAME" ]; then
+  echo "❌ Missing package name"
+  exit 1
+fi
+
+HOST_PY="${HOST_PYTHON:-/tmp/host-python/bin/python3.13}"
 WHEELS_OUT="${WHEELS_OUT:-$GITHUB_WORKSPACE/wheels-out}"
 TMP_BUILD="/tmp/p4a-build-${PKG_NAME}"
 SRC_DIR="${TMP_BUILD}/src"
@@ -24,6 +26,9 @@ echo ""
 echo "════════════════════════════════════════════"
 echo "🔨 [p4a-style] Building: $PKG_NAME"
 echo "════════════════════════════════════════════"
+echo "  HOST_PY:     $HOST_PY"
+echo "  TARGET_ROOT: $TARGET_ROOT"
+echo "  WHEELS_OUT:  $WHEELS_OUT"
 
 # ============================================================
 # 1. TẢI SOURCE ĐỂ INSPECT
@@ -57,11 +62,10 @@ if [ -f "$SRC_PATH/pyproject.toml" ]; then
     | head -1 | sed -E 's/.*"([^"]+)".*/\1/' || echo "setuptools")
   [ -z "$BACKEND" ] && BACKEND="setuptools"
 fi
-
 echo "  Backend: $BACKEND"
 
 # ============================================================
-# 3. WRAPPER SCRIPTS (p4a logic — safe cho mọi lib)
+# 3. WRAPPER SCRIPTS
 # ============================================================
 cat > "$TMP_BUILD/target-python.sh" <<PYEOF
 #!$HOST_PY
@@ -88,13 +92,12 @@ chmod +x "$TMP_BUILD/pybind11-config"
 export PATH="$TMP_BUILD:$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
 
 # ============================================================
-# 4. ENV p4a-STYLE (safe cho mọi lib)
+# 4. ENV p4a-STYLE
 # ============================================================
 export _PYTHON_HOST_PLATFORM="android-24-arm64_v8a"
 export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
 export TARGET_PYTHON_EXE="$TARGET_ROOT/bin/python3.13"
 
-# BLAS/LAPACK (chỉ numpy/scipy cần, nhưng safe cho mọi lib)
 export NPY_BLAS_ORDER="openblas"
 export NPY_LAPACK_ORDER="openblas"
 export NPY_DISABLE_SVML=1
@@ -105,38 +108,31 @@ export LAPACK="$DEPS_INSTALL"
 export F77=""; export F90=""; export FC=""
 
 # ============================================================
-# 5. CHUẨN BỊ SETUP-ARGS THEO BACKEND
+# 5. SETUP-ARGS THEO BACKEND
 # ============================================================
 SETUP_ARGS=()
 
 case "$BACKEND" in
   *meson*)
-    echo "  → Meson backend, dùng p4a setup-args"
+    echo "  → Meson backend"
     SETUP_ARGS=(
       "-Csetup-args=-Dblas=auto"
       "-Csetup-args=-Dlapack=auto"
       "-Csetup-args=-Dallow-noblas=False"
       "-Csetup-args=-Dbuildtype=release"
+      "-Csetup-args=-Dlongdouble_format=IEEE_QUAD_LE"
     )
-    # longdouble_format cho ARM 64-bit
-    SETUP_ARGS+=("-Csetup-args=-Dlongdouble_format=IEEE_QUAD_LE")
-    ;;
-  *setuptools*)
-    echo "  → setuptools backend, không cần setup-args"
     ;;
   *maturin*)
-    echo "  → Maturin (Rust) backend"
+    echo "  → Maturin (Rust)"
     export PYO3_PYTHON="$HOST_PY"
     export PYO3_CROSS=1
     export PYO3_CROSS_PYTHON_VERSION="3.13"
     export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
     export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
     ;;
-  *flit*|*hatchling*|*poetry*)
-    echo "  → Pure Python backend, không cần cross-compile"
-    ;;
   *)
-    echo "  → Unknown backend, thử không setup-args"
+    echo "  → $BACKEND backend"
     ;;
 esac
 
@@ -148,26 +144,28 @@ case "$PKG_NAME" in
     echo "  → Patch Pillow setup.py"
     cd "$SRC_PATH"
     cp setup.py setup.py.bak 2>/dev/null || true
-    python3 - <<'PATCH_EOF'
-import re, sys
-try:
-    with open('setup.py', 'r') as f:
-        c = f.read()
-    q1, q2 = chr(34), chr(39)
-    for path in ['/usr/local/include', '/usr/include']:
-        c = c.replace(q1+path+q1, q1+'/nonexistent/usrdir'+q1)
-        c = c.replace(q2+path+q2, q2+'/nonexistent/usrdir'+q2)
-    with open('setup.py', 'w') as f:
-        f.write(c)
-    print('Pillow patched')
-except Exception as e:
-    print(f'Pillow patch failed: {e}', file=sys.stderr)
-PATCH_EOF
+
+    # Dùng printf để tạo script Python (tránh YAML heredoc)
+    printf '%s\n' \
+      'import re, sys' \
+      'with open("setup.py", "r") as f:' \
+      '    c = f.read()' \
+      'q1, q2 = chr(34), chr(39)' \
+      'skip = "/nonexistent/skip"' \
+      'for path in ["/usr/include", "/usr/local/include", "/usr/lib", "/usr/local/lib"]:' \
+      '    c = c.replace(q1+path+q1, q1+skip+q1)' \
+      '    c = c.replace(q2+path+q2, q2+skip+q2)' \
+      'c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/usr[^\x27\x22]*[\x27\x22]\)", "pass", c)' \
+      'with open("setup.py", "w") as f:' \
+      '    f.write(c)' \
+      'print("Pillow patched")' \
+      > /tmp/patch_pillow.py
+
+    python3 /tmp/patch_pillow.py
+    grep -c "nonexistent" setup.py || echo "(0)"
     ;;
   lxml)
-    echo "  → Patch lxml setup.py (bỏ -lrt)"
-    cd "$SRC_PATH"
-    # lxml cần stub librt.a (đã tạo trong workflow)
+    echo "  → lxml: dùng stub librt.a"
     ;;
 esac
 
@@ -176,7 +174,7 @@ esac
 # ============================================================
 cd "$SRC_PATH"
 
-echo "  Running pip wheel with args: ${SETUP_ARGS[*]}"
+echo "  setup-args: ${SETUP_ARGS[*]}"
 echo ""
 
 if [ "${#SETUP_ARGS[@]}" -gt 0 ]; then
