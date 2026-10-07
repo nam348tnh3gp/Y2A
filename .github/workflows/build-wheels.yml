@@ -26,7 +26,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     env:
       PYTHON_VERSION: "3.13.1"
@@ -35,10 +35,18 @@ jobs:
       SQLITE_VERSION: "3460100"
       SQLITE_YEAR: "2024"
       XZ_VERSION: "5.4.6"
+      ZLIB_VERSION: "1.3.1"
+      LIBXML2_VERSION: "2.12.6"
+      LIBXSLT_VERSION: "1.1.39"
+      LIBJPEGTURBO_VERSION: "3.0.3"
+      LIBPNG_VERSION: "1.6.43"
       ANDROID_API: "24"
       TARGET_HOST: "aarch64-linux-android"
 
     steps:
+      # ==========================================================
+      # 1. SETUP
+      # ==========================================================
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -48,7 +56,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential autoconf automake libtool \
-            pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf
+            pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf \
+            cmake ninja-build nasm
 
       - name: Setup Android NDK r25c
         run: |
@@ -59,6 +68,9 @@ jobs:
           echo "NDK=$HOME/ndk/android-ndk-r25c" >> "$GITHUB_ENV"
           echo "$HOME/ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
+      # ==========================================================
+      # 2. HOST PYTHON (x86_64) — dùng để CHẠY pip cross-compile
+      # ==========================================================
       - name: Build Host Python
         run: |
           mkdir -p /tmp/build-host
@@ -82,6 +94,7 @@ jobs:
           echo "AR=$TOOLCHAIN/bin/llvm-ar" >> "$GITHUB_ENV"
           echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> "$GITHUB_ENV"
           echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> "$GITHUB_ENV"
+          echo "READELF=$TOOLCHAIN/bin/llvm-readelf" >> "$GITHUB_ENV"
           echo "DEPS_INSTALL=$DEPS_INSTALL" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_LIBDIR=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_SYSROOT_DIR=$DEPS_INSTALL" >> "$GITHUB_ENV"
@@ -90,13 +103,17 @@ jobs:
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
           echo "LDFLAGS=-L$DEPS_INSTALL/lib -Wl,--hash-style=both" >> "$GITHUB_ENV"
 
+      # ==========================================================
+      # 3. CROSS-COMPILE CORE DEPS
+      # ==========================================================
       - name: Cross-Compile libffi
         run: |
           cd /tmp
           wget -q "https://github.com/libffi/libffi/releases/download/v${{ env.LIBFFI_VERSION }}/libffi-${{ env.LIBFFI_VERSION }}.tar.gz"
           tar -xf "libffi-${{ env.LIBFFI_VERSION }}.tar.gz"
           cd "libffi-${{ env.LIBFFI_VERSION }}"
-          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
+            --enable-static --disable-shared
           make -j$(nproc) install
 
       - name: Cross-Compile OpenSSL
@@ -130,7 +147,8 @@ jobs:
           wget -q "$SQLITE_URL"
           tar -xf "sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
           cd "sqlite-autoconf-${{ env.SQLITE_VERSION }}"
-          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
+            --enable-static --disable-shared
           make -j$(nproc) install
 
       - name: Cross-Compile XZ
@@ -139,9 +157,81 @@ jobs:
           wget -q "https://github.com/tukaani-project/xz/releases/download/v${{ env.XZ_VERSION }}/xz-${{ env.XZ_VERSION }}.tar.gz"
           tar -xf "xz-${{ env.XZ_VERSION }}.tar.gz"
           cd "xz-${{ env.XZ_VERSION }}"
-          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
+            --enable-static --disable-shared
           make -j$(nproc) install
 
+      - name: Cross-Compile zlib
+        run: |
+          cd /tmp
+          wget -q "https://zlib.net/zlib-${{ env.ZLIB_VERSION }}.tar.gz"
+          tar -xf "zlib-${{ env.ZLIB_VERSION }}.tar.gz"
+          cd "zlib-${{ env.ZLIB_VERSION }}"
+          CC="$CC" AR="$AR" RANLIB="$RANLIB" ./configure --prefix="$DEPS_INSTALL" --static
+          make -j$(nproc) install
+
+      # ==========================================================
+      # 4. CROSS-COMPILE DEPS CHO lxml
+      # ==========================================================
+      - name: Cross-Compile libxml2 (cho lxml)
+        run: |
+          cd /tmp
+          wget -q "https://download.gnome.org/sources/libxml2/2.12/libxml2-${{ env.LIBXML2_VERSION }}.tar.xz"
+          tar -xf "libxml2-${{ env.LIBXML2_VERSION }}.tar.xz"
+          cd "libxml2-${{ env.LIBXML2_VERSION }}"
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
+            --enable-static --disable-shared \
+            --without-python --without-lzma --without-zlib \
+            --without-iconv --without-icu
+          make -j$(nproc) install
+
+      - name: Cross-Compile libxslt (cho lxml)
+        run: |
+          cd /tmp
+          wget -q "https://download.gnome.org/sources/libxslt/1.1/libxslt-${{ env.LIBXSLT_VERSION }}.tar.xz"
+          tar -xf "libxslt-${{ env.LIBXSLT_VERSION }}.tar.xz"
+          cd "libxslt-${{ env.LIBXSLT_VERSION }}"
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
+            --enable-static --disable-shared \
+            --without-python --without-crypto
+          make -j$(nproc) install
+
+      # ==========================================================
+      # 5. CROSS-COMPILE DEPS CHO Pillow
+      # ==========================================================
+      - name: Cross-Compile libjpeg-turbo (cho Pillow)
+        run: |
+          cd /tmp
+          wget -q "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${{ env.LIBJPEGTURBO_VERSION }}/libjpeg-turbo-${{ env.LIBJPEGTURBO_VERSION }}.tar.gz"
+          tar -xf "libjpeg-turbo-${{ env.LIBJPEGTURBO_VERSION }}.tar.gz"
+          cd "libjpeg-turbo-${{ env.LIBJPEGTURBO_VERSION }}"
+          mkdir build && cd build
+          cmake -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-${{ env.ANDROID_API }} \
+            -DCMAKE_INSTALL_PREFIX="$DEPS_INSTALL" \
+            -DENABLE_SHARED=OFF \
+            -DENABLE_STATIC=ON \
+            -DWITH_TURBOJPEG=OFF \
+            -DWITH_SIMD=OFF \
+            ..
+          ninja
+          ninja install
+
+      - name: Cross-Compile libpng (cho Pillow)
+        run: |
+          cd /tmp
+          wget -q "https://download.sourceforge.net/libpng/libpng-${{ env.LIBPNG_VERSION }}.tar.gz"
+          tar -xf "libpng-${{ env.LIBPNG_VERSION }}.tar.gz"
+          cd "libpng-${{ env.LIBPNG_VERSION }}"
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
+            --enable-static --disable-shared
+          make -j$(nproc) install
+
+      # ==========================================================
+      # 6. CROSS-COMPILE CPYTHON 3.13
+      # ==========================================================
       - name: Cross-Compile CPython
         run: |
           cd /tmp
@@ -177,11 +267,24 @@ jobs:
 
           make -j$(nproc)
           make install
-          echo "✅ CPython built: $(ls $GITHUB_WORKSPACE/python-android/bin/ | head)"
+          echo "✅ CPython built"
 
+      # ==========================================================
+      # 7. SYMLINK PATH TARGET → RUNNER (fix hardcoded path)
+      # ==========================================================
+      - name: Symlink target Python path
+        run: |
+          sudo mkdir -p /data/data/com.nam2006.y2mate/files
+          sudo ln -sfn "$GITHUB_WORKSPACE/python-android" \
+                        /data/data/com.nam2006.y2mate/files/python
+          ls -la /data/data/com.nam2006.y2mate/files/
+          echo "✅ Symlink created"
+
+      # ==========================================================
+      # 8. CÀI PIP VÀO RUNTIME TARGET
+      # ==========================================================
       - name: Prepare pip for wheel building
         run: |
-          # Cài pip vào runtime vừa build (cho target aarch64)
           SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
           mkdir -p "$SITE" /tmp/wheels_bootstrap
           "$HOST_PYTHON" -m pip download pip setuptools wheel \
@@ -191,6 +294,9 @@ jobs:
           done
           echo "✅ pip installed into target runtime"
 
+      # ==========================================================
+      # 9. ĐỌC DANH SÁCH PACKAGE
+      # ==========================================================
       - name: Read package list
         id: pkglist
         run: |
@@ -202,18 +308,46 @@ jobs:
           echo "packages=$LIST" >> "$GITHUB_OUTPUT"
           echo "📦 Sẽ build: $LIST"
 
+      # ==========================================================
+      # 10. CÀI RUST (cho cryptography)
+      # ==========================================================
+      - name: Setup Rust for cross-compile
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain stable --profile minimal
+          source "$HOME/.cargo/env"
+          rustup target add aarch64-linux-android
+
+          mkdir -p "$HOME/.cargo"
+          cat > "$HOME/.cargo/config.toml" <<EOF
+          [target.aarch64-linux-android]
+          linker = "${{ env.CC }}"
+          ar = "${{ env.AR }}"
+          EOF
+
+          echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
+          echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
+          echo "✅ Rust installed"
+
+      # ==========================================================
+      # 11. BUILD WHEELS
+      # ==========================================================
       - name: Build wheels for Android aarch64
         run: |
-          set -e
-          PYTHON="$GITHUB_WORKSPACE/python-android/bin/python3.13"
-          SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
+          set -eo pipefail
+          HOST_PY="$HOST_PYTHON"
+          TARGET_ROOT="$GITHUB_WORKSPACE/python-android"
+          TARGET_SITE="$TARGET_ROOT/lib/python3.13/site-packages"
           mkdir -p wheels-out
 
-          # Cấu hình cross-compile cho setuptools/distutils
+          # ============================================================
+          # Cross-compile env cho setuptools/distutils
+          # ============================================================
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
-          export _PYTHON_PROJECT_BASE="$GITHUB_WORKSPACE/python-android"
-          export PYTHONPATH="$SITE"
-          export PATH="$GITHUB_WORKSPACE/python-android/bin:$PATH"
+          export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
+          export _PYTHON_SYSCONFIGDATA_NAME="_sysconfigdata__linux_aarch64-linux-android"
+          export PYTHONPATH="$TARGET_SITE"
           export CC="$CC"
           export CXX="$CXX"
           export AR="$AR"
@@ -221,21 +355,36 @@ jobs:
           export STRIP="$STRIP"
           export LDSHARED="$CC -shared"
           export CPP="$CC -E"
+          export READELF="$READELF"
 
-          # Chạy pip wheel cho từng package
+          # pkg-config tìm libs trong DEPS_INSTALL
+          export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
+          export PKG_CONFIG_SYSROOT_DIR="$DEPS_INSTALL"
+
+          # Cargo cho cryptography
+          export CARGO_BUILD_TARGET="aarch64-linux-android"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
+          export OPENSSL_DIR="$DEPS_INSTALL"
+          export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
+          export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
+
+          # ============================================================
+          # Build từng package
+          # ============================================================
           for pkg in ${{ steps.pkglist.outputs.packages }}; do
             echo ""
             echo "=========================================="
             echo "🔨 Building: $pkg"
             echo "=========================================="
-            if "$PYTHON" -m pip wheel "$pkg" \
-                --no-deps \
-                --no-build-isolation \
-                --wheel-dir wheels-out \
-                --config-settings="--build-option=--plat-name=linux_aarch64" 2>&1 | tail -40; then
+
+            if "$HOST_PY" -m pip wheel "$pkg" \
+                  --no-deps \
+                  --no-build-isolation \
+                  --wheel-dir wheels-out 2>&1 | tail -80; then
               echo "✅ $pkg OK"
             else
-              echo "⚠️ $pkg FAILED (bỏ qua, tiếp tục)"
+              echo "❌ $pkg FAILED (tiếp tục package khác)"
             fi
           done
 
@@ -243,37 +392,39 @@ jobs:
           echo "=== Wheels built ==="
           ls -lh wheels-out/ || echo "(rỗng)"
 
+      # ==========================================================
+      # 12. POST-PROCESS: đổi tag linux_aarch64 → android_24_arm64_v8a
+      # ==========================================================
       - name: Post-process wheels
         run: |
-          # Đổi tên wheel để tag platform = android_24_arm64_v8a
-          # (một số wheel có tag linux_aarch64 — pip có thể chấp nhận cả 2)
           mkdir -p wheels-final
+          shopt -s nullglob
           for whl in wheels-out/*.whl; do
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
-            # Chỉ đổi nếu chưa phải android_24_arm64_v8a
+            cp "$whl" "wheels-final/$base"
             if [[ "$base" == *"linux_aarch64"* ]]; then
               newname="${base//linux_aarch64/android_24_arm64_v8a}"
               cp "$whl" "wheels-final/$newname"
-              # Giữ cả bản gốc để pip dễ match
-              cp "$whl" "wheels-final/$base"
-              echo "Renamed: $base → $newname"
-            else
-              cp "$whl" "wheels-final/$base"
+              echo "Tagged: $base + $newname"
             fi
           done
           echo ""
           echo "=== Final wheels ==="
-          ls -lh wheels-final/
+          ls -lh wheels-final/ || echo "(rỗng)"
 
+      # ==========================================================
+      # 13. RELEASE
+      # ==========================================================
       - name: Generate release tag
         id: tag
         run: |
           TAG="wheels-$(date +%Y%m%d-%H%M%S)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Release tag sẽ là: $TAG"
+          echo "Tag: $TAG"
 
       - name: Create release with wheels
+        if: hashFiles('wheels-final/*.whl') != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
@@ -287,7 +438,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ==========================================================
+      # 14. SINH PIP INDEX + COMMIT VÀO docs/
+      # ==========================================================
       - name: Generate pip index HTML
+        if: hashFiles('wheels-final/*.whl') != ''
         run: |
           python3 scripts/gen_index.py \
             wheels-final \
@@ -297,6 +452,7 @@ jobs:
             ${{ steps.tag.outputs.tag }}
 
       - name: Commit docs index
+        if: hashFiles('wheels-final/*.whl') != ''
         run: |
           set -e
           git config user.name "github-actions[bot]"
@@ -307,21 +463,37 @@ jobs:
           else
             git commit -m "chore(wheels): update index [${{ steps.tag.outputs.tag }}] [skip ci]"
             for i in 1 2 3 4 5; do
-              if git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
+              if git pull --rebase origin "${{ github.ref_name }}" && \
+                 git push origin "HEAD:${{ github.ref_name }}"; then
+                echo "✅ Push OK (attempt $i)"
                 break
               fi
+              echo "⚠️ Retry push (attempt $i)"
               sleep 5
             done
           fi
 
+      # ==========================================================
+      # 15. SUMMARY
+      # ==========================================================
       - name: Summary
+        if: always()
         run: |
           echo "## 📦 Wheels Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Release:** \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Release tag:** \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Index URL:** https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/simple/" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Wheels" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          ls -lh wheels-final/ >> $GITHUB_STEP_SUMMARY || true
+          ls -lh wheels-final/ >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "(không có)" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload wheels artifact
+        if: hashFiles('wheels-final/*.whl') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ steps.tag.outputs.tag }}
+          path: wheels-final/*.whl
+          if-no-files-found: warn
+          retention-days: 30
