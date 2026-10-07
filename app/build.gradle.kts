@@ -57,7 +57,10 @@ android {
 
     packaging {
         jniLibs {
-            useLegacyPackaging = false
+            // BẮT BUỘC = true để .so được extract ra nativeLibraryDir
+            // (code C++ dlopen("/data/app/.../lib/arm64/libpython3.13.so"))
+            useLegacyPackaging = true
+
             pickFirsts += listOf(
                 "**/libffmpeg.so",
                 "**/libffprobe.so",
@@ -70,7 +73,8 @@ android {
                 "**/libz.so",
                 "**/libc++_shared.so"
             )
-            // Không strip các lib tự build — tránh làm mất DT_HASH
+
+            // Không strip các lib tự build — bảo toàn DT_HASH (Android 12)
             doNotStrip.add("**/libpython3.13.so")
             doNotStrip.add("**/libssl.so")
             doNotStrip.add("**/libcrypto.so")
