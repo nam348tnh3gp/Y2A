@@ -57,11 +57,11 @@ android {
 
     packaging {
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
             pickFirsts += listOf(
                 "**/libffmpeg.so",
                 "**/libffprobe.so",
-                "**/libpython3.13.so",     // ← đổi từ 3.11
+                "**/libpython3.13.so",
                 "**/libssl.so",
                 "**/libcrypto.so",
                 "**/libffi.so",
@@ -70,11 +70,15 @@ android {
                 "**/libz.so",
                 "**/libc++_shared.so"
             )
+            // Không strip các lib tự build — tránh làm mất DT_HASH
+            doNotStrip.add("**/libpython3.13.so")
+            doNotStrip.add("**/libssl.so")
+            doNotStrip.add("**/libcrypto.so")
         }
     }
 
     androidResources {
-        // Không nén .tar, .so, .py, .pyc để extract nhanh
+        // Không nén tar / so / py / pyc
         noCompress += listOf("tar", "tar.gz", "so", "py", "pyc")
     }
 
