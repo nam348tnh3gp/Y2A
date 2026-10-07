@@ -86,8 +86,12 @@ jobs:
           ./configure --prefix=/tmp/host-python --enable-optimizations=no
           make -j$(nproc)
           make install
-          ln -sf /tmp/host-python/bin/python3 /tmp/host-python/bin/python3.13
-          echo "HOST_PYTHON=/tmp/host-python/bin/python3" >> "$GITHUB_ENV"
+
+          echo "=== Python binaries ==="
+          ls -lh /tmp/host-python/bin/python*
+
+          # python3.13 là binary thật, dùng trực tiếp
+          echo "HOST_PYTHON=/tmp/host-python/bin/python3.13" >> "$GITHUB_ENV"
 
       - name: Export Cross-Compile Environment
         run: |
@@ -307,18 +311,18 @@ jobs:
             "setuptools_scm<8.2" Cython expandvars pkgconfig
 
           echo ""
-          echo "=== Symlink python3 → python3.13 (maturin cần version) ==="
-          ln -sf /tmp/host-python/bin/python3 /tmp/host-python/bin/python3.13
-          ln -sf /tmp/host-python/bin/python3 /tmp/host-python/bin/python3.13-config 2>/dev/null || true
-          ls -lh /tmp/host-python/bin/ | grep python
-
-          echo ""
           echo "=== Verify entry points ==="
           export PATH="$SITE/bin:$PATH"
           export PYTHONPATH="$SITE"
           which maturin meson ninja || true
           maturin --version || echo "⚠️ maturin FAIL"
           meson --version || echo "⚠️ meson FAIL"
+
+          echo ""
+          echo "=== Verify HOST_PYTHON ==="
+          echo "HOST_PYTHON=$HOST_PYTHON"
+          "$HOST_PYTHON" --version
+          ls -lh /tmp/host-python/bin/python*
 
       - name: Read package list
         id: pkglist
@@ -440,7 +444,7 @@ jobs:
 
           echo ""
           echo "=== Verify tools ==="
-          which maturin meson ninja cargo python3.13 || true
+          which maturin meson ninja cargo "$HOST_PY" || true
 
           SUCCESS_LIST=""
           FAIL_LIST=""
