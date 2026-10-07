@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   # ============================================================
-  # JOB 0: Detect thay đổi để quyết định build app / plugin / cả 2
+  # JOB 0: Detect thay đổi
   # ============================================================
   changes:
     runs-on: ubuntu-latest
@@ -55,7 +55,7 @@ jobs:
               - '.github/workflows/build.yml'
 
   # ============================================================
-  # JOB 1: Build App chính (317 MB self-built Python)
+  # JOB 1: Build App chính (có cache)
   # ============================================================
   build-app:
     needs: changes
@@ -70,8 +70,11 @@ jobs:
       SQLITE_VERSION: "3460100"
       SQLITE_YEAR: "2024"
       XZ_VERSION: "5.4.6"
+      NDK_VERSION: "r25c"
       ANDROID_API: "24"
       TARGET_HOST: "aarch64-linux-android"
+      # Bump CACHE_VERSION khi đổi build config để invalidate cache
+      CACHE_VERSION: "v1"
 
     steps:
       # ---------- SECTION 1: ENVIRONMENT SETUP ----------
@@ -89,21 +92,54 @@ jobs:
 
       - name: Install Host Tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential autoconf automake libtool \
+          # Fix apt mirror + timeout
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
+            /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null || true
+          sudo sed -i 's|https://azure.archive.ubuntu.com|https://archive.ubuntu.com|g' \
+            /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null || true
+
+          sudo apt-get update \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            -o Acquire::Retries=1 \
+            -o Acquire::ForceIPv4=true \
+            -qq || true
+
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool \
             pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Setup Android NDK r25c
+      # ---------- CACHE: NDK ----------
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: .cache/ndk
+          key: ndk-${{ env.NDK_VERSION }}-${{ runner.os }}-${{ env.CACHE_VERSION }}
+
+      - name: Download Android NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
-          mkdir -p "$HOME/ndk"
-          cd "$HOME/ndk"
+          mkdir -p .cache/ndk
+          cd .cache/ndk
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
           unzip -q android-ndk-r25c-linux.zip
-          echo "NDK=$HOME/ndk/android-ndk-r25c" >> "$GITHUB_ENV"
-          echo "$HOME/ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+          rm -f android-ndk-r25c-linux.zip
+          echo "✅ NDK downloaded"
+
+      - name: Setup NDK env
+        run: |
+          NDK_ABS="$GITHUB_WORKSPACE/.cache/ndk/android-ndk-r25c"
+          if [ ! -d "$NDK_ABS" ]; then
+            echo "❌ NDK không tồn tại: $NDK_ABS"
+            exit 1
+          fi
+          echo "NDK=$NDK_ABS" >> "$GITHUB_ENV"
+          echo "$NDK_ABS/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+          echo "✅ NDK=$NDK_ABS"
 
       - name: Setup Gradle 8.10.2
         uses: gradle/actions/setup-gradle@v4
@@ -114,12 +150,10 @@ jobs:
         run: |
           if [ ! -f app/src/main/python/yt_dlp_bridge.py ]; then
             echo "Missing app/src/main/python/yt_dlp_bridge.py"
-            find app -name "yt_dlp_bridge.py" || true
             exit 1
           fi
           if [ ! -f app/src/main/python/py_runner.py ]; then
             echo "Missing app/src/main/python/py_runner.py"
-            find app -name "py_runner.py" || true
             exit 1
           fi
           echo "✅ Bridge scripts found"
@@ -152,26 +186,46 @@ jobs:
             git commit -m "chore: bump version code to ${{ steps.bump.outputs.new_version }} [skip ci]"
             for i in 1 2 3 4 5; do
               if git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
-                echo "✅ Push OK (attempt $i)"
                 break
               fi
-              echo "⚠️ Retry push (attempt $i)"
               sleep 5
             done
           fi
 
+      # ---------- CACHE: HOST PYTHON ----------
+      - name: Cache Host Python + source
+        id: cache-host
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/build-host
+            .cache/host-python
+          key: host-python-${{ env.PYTHON_VERSION }}-${{ runner.os }}-${{ env.CACHE_VERSION }}
+
       # ---------- SECTION 3: HOST PYTHON ----------
       - name: Build Host Python
+        if: steps.cache-host.outputs.cache-hit != 'true'
         run: |
-          mkdir -p /tmp/build-host
-          cd /tmp/build-host
+          mkdir -p .cache/build-host
+          cd .cache/build-host
           wget -q "https://www.python.org/ftp/python/${{ env.PYTHON_VERSION }}/Python-${{ env.PYTHON_VERSION }}.tar.xz"
           tar -xf "Python-${{ env.PYTHON_VERSION }}.tar.xz"
           cd "Python-${{ env.PYTHON_VERSION }}"
-          ./configure --prefix=/tmp/host-python --enable-optimizations=no
+          ./configure --prefix="$GITHUB_WORKSPACE/.cache/host-python" --enable-optimizations=no
           make -j$(nproc)
           make install
-          echo "HOST_PYTHON=/tmp/host-python/bin/python3" >> "$GITHUB_ENV"
+          echo "✅ Host Python built"
+
+      - name: Setup Host Python env
+        run: |
+          HOST_PY_ABS="$GITHUB_WORKSPACE/.cache/host-python/bin/python3"
+          if [ ! -f "$HOST_PY_ABS" ]; then
+            echo "❌ Host Python không tồn tại: $HOST_PY_ABS"
+            exit 1
+          fi
+          echo "HOST_PYTHON=$HOST_PY_ABS" >> "$GITHUB_ENV"
+          echo "BUILD_HOST_SRC=$GITHUB_WORKSPACE/.cache/build-host" >> "$GITHUB_ENV"
+          "$HOST_PY_ABS" --version
 
       - name: Export Cross-Compile Environment
         run: |
@@ -184,6 +238,7 @@ jobs:
           echo "AR=$TOOLCHAIN/bin/llvm-ar" >> "$GITHUB_ENV"
           echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> "$GITHUB_ENV"
           echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> "$GITHUB_ENV"
+          echo "READELF=$TOOLCHAIN/bin/llvm-readelf" >> "$GITHUB_ENV"
           echo "DEPS_INSTALL=$DEPS_INSTALL" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_LIBDIR=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_SYSROOT_DIR=$DEPS_INSTALL" >> "$GITHUB_ENV"
@@ -192,8 +247,17 @@ jobs:
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
           echo "LDFLAGS=-L$DEPS_INSTALL/lib -Wl,--hash-style=both" >> "$GITHUB_ENV"
 
+      # ---------- CACHE: CROSS-COMPILE DEPS ----------
+      - name: Cache cross-compile deps
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: deps-install
+          key: deps-${{ env.PYTHON_VERSION }}-ssl${{ env.OPENSSL_VERSION }}-ffi${{ env.LIBFFI_VERSION }}-sqlite${{ env.SQLITE_VERSION }}-xz${{ env.XZ_VERSION }}-${{ runner.os }}-${{ env.CACHE_VERSION }}
+
       # ---------- SECTION 4: CROSS-COMPILE DEPENDENCIES ----------
       - name: Cross-Compile libffi
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           cd /tmp
           wget -q "https://github.com/libffi/libffi/releases/download/v${{ env.LIBFFI_VERSION }}/libffi-${{ env.LIBFFI_VERSION }}.tar.gz"
@@ -203,6 +267,7 @@ jobs:
           make -j$(nproc) install
 
       - name: Cross-Compile OpenSSL
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           cd /tmp
           wget -q "https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
@@ -217,24 +282,20 @@ jobs:
             --prefix="$DEPS_INSTALL" \
             --openssldir="$DEPS_INSTALL/ssl" \
             shared no-engine no-tests no-async \
-            CC="$CC" \
-            CXX="$CXX" \
-            AR="$AR" \
-            RANLIB="$RANLIB" \
-            STRIP="$STRIP" \
+            CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
             -Wl,--hash-style=both
 
           make -j$(nproc)
           make install_sw
 
       - name: Cross-Compile SQLite3
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           cd /tmp
           SQLITE_URL="https://www.sqlite.org/${{ env.SQLITE_YEAR }}/sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
           if ! curl --output /dev/null --silent --head --fail "$SQLITE_URL"; then
             SQLITE_URL="https://www.sqlite.org/2023/sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
           fi
-          echo "Downloading: $SQLITE_URL"
           wget -q "$SQLITE_URL"
           tar -xf "sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
           cd "sqlite-autoconf-${{ env.SQLITE_VERSION }}"
@@ -242,6 +303,7 @@ jobs:
           make -j$(nproc) install
 
       - name: Cross-Compile XZ
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           cd /tmp
           wget -q "https://github.com/tukaani-project/xz/releases/download/v${{ env.XZ_VERSION }}/xz-${{ env.XZ_VERSION }}.tar.gz"
@@ -250,24 +312,33 @@ jobs:
           ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
           make -j$(nproc) install
 
+      - name: Verify deps-install
+        run: |
+          echo "=== deps-install/lib ==="
+          ls -lh "$DEPS_INSTALL/lib/" | head -20
+          echo ""
+          echo "=== deps-install/include ==="
+          ls "$DEPS_INSTALL/include/" | head -10
+
+      # ---------- CACHE: CPYTHON RUNTIME ----------
+      - name: Cache python-android
+        id: cache-python
+        uses: actions/cache@v4
+        with:
+          path: python-android
+          key: python-android-${{ env.PYTHON_VERSION }}-ssl${{ env.OPENSSL_VERSION }}-ffi${{ env.LIBFFI_VERSION }}-sqlite${{ env.SQLITE_VERSION }}-xz${{ env.XZ_VERSION }}-${{ runner.os }}-${{ env.CACHE_VERSION }}
+
       # ---------- SECTION 5: CROSS-COMPILE CPYTHON 3.13 ----------
       - name: Cross-Compile CPython
+        if: steps.cache-python.outputs.cache-hit != 'true'
         run: |
           cd /tmp
-          tar -xf "/tmp/build-host/Python-${{ env.PYTHON_VERSION }}.tar.xz"
+          tar -xf "$BUILD_HOST_SRC/Python-${{ env.PYTHON_VERSION }}.tar.xz"
           cd "Python-${{ env.PYTHON_VERSION }}"
 
           printf '%s\n' \
-            '*disabled*' \
-            '_crypt' \
-            '_nis' \
-            'spwd' \
-            'ossaudiodev' \
-            '_curses' \
-            '_curses_panel' \
-            'readline' \
-            '_multiprocessing' \
-            'nis' \
+            '*disabled*' '_crypt' '_nis' 'spwd' 'ossaudiodev' \
+            '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' \
             > Modules/Setup.local
 
           LDFLAGS="-L$DEPS_INSTALL/lib -Wl,--hash-style=both" \
@@ -299,11 +370,12 @@ jobs:
           echo "Critical modules:"
           ls "$GITHUB_WORKSPACE/python-android/lib/python3.13/lib-dynload/" | grep -E "_ssl|_sqlite|_ctypes|_lzma|zlib" || true
 
-          echo "Verify hash style of libpython3.13.so:"
+          echo "Verify hash style:"
           readelf -d "$GITHUB_WORKSPACE/python-android/lib/libpython3.13.so" | grep -E "HASH" || true
 
       # ---------- SECTION 6: BOOTSTRAP WHEELS ----------
       - name: Bootstrap Pure-Python Wheels
+        if: steps.cache-python.outputs.cache-hit != 'true'
         run: |
           TARGET_SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
           mkdir -p /tmp/wheels "$TARGET_SITE"
@@ -317,19 +389,17 @@ jobs:
             unzip -o -q "$whl" -d "$TARGET_SITE"
           done
 
-          echo "=== site-packages contents (top 20) ==="
+          echo "=== site-packages ==="
           ls "$TARGET_SITE" | head -20
 
-          echo "=== verify pip ==="
           if [ ! -d "$TARGET_SITE/pip" ]; then
-            echo "❌ pip MISSING from site-packages!"
+            echo "❌ pip MISSING"
             exit 1
           fi
           echo "✅ pip bundled"
 
-          echo "=== verify yt_dlp ==="
           if [ ! -d "$TARGET_SITE/yt_dlp" ]; then
-            echo "❌ yt_dlp MISSING from site-packages!"
+            echo "❌ yt_dlp MISSING"
             exit 1
           fi
           echo "✅ yt_dlp bundled"
@@ -355,16 +425,12 @@ jobs:
           cp "$PY_LIB/libpython3.13.so" "$JNI/"
           find "$DEPS_INSTALL/lib" -maxdepth 1 -name "*.so*" -exec cp {} "$JNI/" \; 2>/dev/null || true
 
-          echo "Before rename:"
-          ls -lh "$JNI/"
-
           for f in "$JNI"/*.so.*; do
             [ -f "$f" ] || continue
             base=$(basename "$f")
             new=$(echo "$base" | sed -E 's/(\.so)\.[0-9]+(\.[0-9]+)*$/\1/')
             [ "$new" = "$base" ] && continue
             mv "$f" "$JNI/$new"
-            echo "Renamed: $base -> $new"
           done
 
           PATCHED=0
@@ -393,10 +459,6 @@ jobs:
             echo "CRITICAL: _ssl module missing!"
             exit 1
           fi
-          echo "ssl module: $(basename "$SSL_SO")"
-
-          echo "Verify hash style after patchelf:"
-          readelf -d "$JNI/libpython3.13.so" | grep -E "HASH" || echo "⚠️  No HASH section found!"
 
           echo "Final jniLibs:"
           ls -lh "$JNI/"
@@ -408,11 +470,9 @@ jobs:
 
           cp "$GITHUB_WORKSPACE/app/src/main/python/yt_dlp_bridge.py" \
              "$GITHUB_WORKSPACE/app/src/main/assets/yt_dlp_bridge.py"
-          echo "✅ yt_dlp_bridge.py copied"
 
           cp "$GITHUB_WORKSPACE/app/src/main/python/py_runner.py" \
              "$GITHUB_WORKSPACE/app/src/main/assets/py_runner.py"
-          echo "✅ py_runner.py copied"
 
           rm -f "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar" \
                 "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar.gz"
@@ -429,19 +489,12 @@ jobs:
             exit 1
           fi
 
-          echo "Tar contents (first 10):"
-          tar -tvf app/src/main/assets/python-runtime.tar | head -10
-
-          echo "Verify pip in tar:"
           if tar -tf app/src/main/assets/python-runtime.tar | grep -q "site-packages/pip/"; then
             echo "✅ pip in tar"
           else
             echo "❌ pip NOT in tar!"
             exit 1
           fi
-
-          echo "Assets:"
-          ls -lh app/src/main/assets/
 
       # ---------- SECTION 9: FFMPEG ----------
       - name: Download FFmpeg from Termux
@@ -469,36 +522,17 @@ jobs:
 
           chmod 755 app/src/main/jniLibs/arm64-v8a/libffmpeg.so
 
-          echo "jniLibs final:"
-          ls -lh app/src/main/jniLibs/arm64-v8a/
-
-      # ---------- SECTION 9.5: VERIFY ----------
       - name: Verify libpython in jniLibs
         run: |
           JNI="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-          echo "=== jniLibs contents ==="
           ls -lh "$JNI/"
-          echo ""
-
-          MISSING=0
           for lib in libpython3.13.so libssl.so libcrypto.so; do
             if [ ! -f "$JNI/$lib" ]; then
-              echo "❌ $lib MISSING from jniLibs!"
-              MISSING=1
-            else
-              echo "✅ $lib present"
+              echo "❌ $lib MISSING"
+              exit 1
             fi
           done
-
-          if [ "$MISSING" -eq 1 ]; then
-            echo "=== python-android/lib contents ==="
-            ls -lh "$GITHUB_WORKSPACE/python-android/lib/" || true
-            exit 1
-          fi
-
-          echo ""
-          echo "=== hash sections of libpython3.13.so ==="
-          readelf -d "$JNI/libpython3.13.so" | grep -E "HASH" || echo "❌ No hash section"
+          echo "✅ All required libs present"
 
       # ---------- SECTION 10: BUILD APK ----------
       - name: Setup debug keystore
@@ -532,7 +566,6 @@ jobs:
           echo "APK:"
           ls -lh app/build/outputs/apk/release/*.apk
           echo ""
-          echo "Component sizes:"
           du -sh app/src/main/jniLibs/arm64-v8a/ 2>/dev/null || true
           du -sh app/src/main/assets/ 2>/dev/null || true
 
@@ -544,7 +577,7 @@ jobs:
           retention-days: 30
 
   # ============================================================
-  # JOB 2: Build Plugin Repository (10 MB)
+  # JOB 2: Build Plugin Repository
   # ============================================================
   build-plugin:
     needs: changes
@@ -600,10 +633,8 @@ jobs:
             git commit -m "chore(plugin): bump version to ${{ steps.bump.outputs.new_version }} [skip ci]"
             for i in 1 2 3 4 5; do
               if git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
-                echo "✅ Push OK (attempt $i)"
                 break
               fi
-              echo "⚠️ Retry push (attempt $i)"
               sleep 5
             done
           fi
@@ -633,11 +664,6 @@ jobs:
             mv "$f" "${D}/${B}-v${V}.apk"
           done
           ls -lh plugin/build/outputs/apk/release/
-
-      - name: Report plugin size
-        run: |
-          echo "Plugin APK:"
-          ls -lh plugin/build/outputs/apk/release/*.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
