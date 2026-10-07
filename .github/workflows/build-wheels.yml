@@ -270,6 +270,8 @@ jobs:
           make -j$(nproc)
           make install
           echo "✅ CPython built"
+          echo "=== Include dir có gì ==="
+          ls "$GITHUB_WORKSPACE/python-android/include/python3.13/" | head -20
 
       # ==========================================================
       # 7. SYMLINK PATH TARGET → RUNNER
@@ -333,7 +335,7 @@ jobs:
           echo "✅ Rust installed"
 
       # ==========================================================
-      # 11. BUILD WHEELS
+      # 11. BUILD WHEELS (buộc build từ source: --no-binary=:all:)
       # ==========================================================
       - name: Build wheels for Android aarch64
         run: |
@@ -345,7 +347,7 @@ jobs:
           mkdir -p wheels-out
 
           # ============================================================
-          # 1. Detect tên file _sysconfigdata trong target stdlib
+          # 1. Detect _sysconfigdata
           # ============================================================
           echo "=== Target stdlib chứa sysconfig: ==="
           ls "$TARGET_STDLIB/" | grep -i sysconfig || echo "(không tìm thấy)"
@@ -359,14 +361,28 @@ jobs:
           SYSCONF_NAME=$(basename "$SYSCONF_FILE" .py)
           echo "✅ Sysconfig data name: $SYSCONF_NAME"
 
-          # ============================================================
-          # 2. Copy _sysconfigdata ra thư mục riêng
-          # ============================================================
           SYSCONF_DIR="$GITHUB_WORKSPACE/sysconfigdata-host"
           rm -rf "$SYSCONF_DIR"
           mkdir -p "$SYSCONF_DIR"
           cp "$SYSCONF_FILE" "$SYSCONF_DIR/"
           echo "✅ Copied: $(basename "$SYSCONF_FILE")"
+
+          # ============================================================
+          # 2. Copy Python headers từ TARGET đè HOST
+          #    → đảm bảo Python.h khớp target (Android aarch64)
+          # ============================================================
+          echo ""
+          echo "=== Copy target Python headers → host include ==="
+          HOST_INCLUDE="/tmp/host-python/include/python3.13"
+          TARGET_INCLUDE="$TARGET_ROOT/include/python3.13"
+          if [ -d "$TARGET_INCLUDE" ]; then
+            cp -rf "$TARGET_INCLUDE/." "$HOST_INCLUDE/"
+            echo "✅ Headers copied"
+            ls "$HOST_INCLUDE/" | head -10
+          else
+            echo "⚠️ Target include không tồn tại: $TARGET_INCLUDE"
+            ls "$TARGET_ROOT/include/" 2>/dev/null || echo "(không có include/)"
+          fi
 
           # ============================================================
           # 3. Cross-compile env
@@ -395,37 +411,25 @@ jobs:
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
 
           # ============================================================
-          # 4. Test import qua importlib (tên có dấu gạch ngang,
-          #    chỉ import được qua __import__/importlib)
+          # 4. Test
           # ============================================================
           echo ""
-          echo "=== Test import _sysconfigdata (via importlib) ==="
+          echo "=== Test sysconfig ==="
           "$HOST_PY" -c "
           import importlib, os
           name = os.environ['_PYTHON_SYSCONFIGDATA_NAME']
           s = importlib.import_module(name)
-          print('✅ Import OK:', name)
-          print('  CC =', s.build_time_vars.get('CC', 'n/a'))
-          print('  CFLAGS =', s.build_time_vars.get('CFLAGS', 'n/a'))
-          print('  host_platform =', s.build_time_vars.get('host_platform', 'n/a'))
           print('  EXT_SUFFIX =', s.build_time_vars.get('EXT_SUFFIX', 'n/a'))
-          print('  SOABI =', s.build_time_vars.get('SOABI', 'n/a'))
-          "
-
-          echo ""
-          echo "=== Test sysconfig.get_paths() ==="
-          "$HOST_PY" -c "
-          import sysconfig
-          paths = sysconfig.get_paths()
-          for k, v in paths.items():
-              print(f'  {k} = {v}')
-          print('  platform =', sysconfig.get_platform())
-          print('  EXT_SUFFIX =', sysconfig.get_config_var('EXT_SUFFIX'))
+          print('  CC         =', s.build_time_vars.get('CC', 'n/a'))
           "
 
           # ============================================================
-          # 5. Build từng package
+          # 5. Build từng package — BẮT BUỘC build từ source
+          #    --no-binary=:all: để pip KHÔNG lấy manylinux wheel từ PyPI
           # ============================================================
+          SUCCESS_LIST=""
+          FAIL_LIST=""
+
           for pkg in ${{ steps.pkglist.outputs.packages }}; do
             echo ""
             echo "=========================================="
@@ -435,19 +439,27 @@ jobs:
             if "$HOST_PY" -m pip wheel "$pkg" \
                   --no-deps \
                   --no-build-isolation \
+                  --no-binary=:all: \
                   --wheel-dir wheels-out 2>&1 | tail -80; then
               echo "✅ $pkg OK"
+              SUCCESS_LIST="$SUCCESS_LIST $pkg"
             else
-              echo "❌ $pkg FAILED (tiếp tục package khác)"
+              echo "❌ $pkg FAILED"
+              FAIL_LIST="$FAIL_LIST $pkg"
             fi
           done
 
+          echo ""
+          echo "=========================================="
+          echo "✅ Built OK:$SUCCESS_LIST"
+          echo "❌ Failed:$FAIL_LIST"
+          echo "=========================================="
           echo ""
           echo "=== Wheels built ==="
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
-      # 12. POST-PROCESS
+      # 12. POST-PROCESS: đổi tag linux_aarch64 → android_24_arm64_v8a
       # ==========================================================
       - name: Post-process wheels
         run: |
@@ -466,6 +478,31 @@ jobs:
           echo ""
           echo "=== Final wheels ==="
           ls -lh wheels-final/ || echo "(rỗng)"
+
+      # ==========================================================
+      # 12.5 VERIFY TAG TRONG FILE WHEEL
+      # ==========================================================
+      - name: Verify wheel tags
+        run: |
+          echo "=== Tags trong wheels-final ==="
+          shopt -s nullglob
+          found=0
+          for whl in wheels-final/*.whl; do
+            [ -f "$whl" ] || continue
+            found=1
+            echo ""
+            echo "File: $(basename "$whl")"
+            # WHEEL file nằm trong *.dist-info/WHEEL
+            content=$(unzip -p "$whl" "*.dist-info/WHEEL" 2>/dev/null || true)
+            if [ -n "$content" ]; then
+              echo "$content" | grep -iE "^Tag:|^Root-Is-Purelib:|^Generator:" || echo "  (không có Tag)"
+            else
+              echo "  (không đọc được WHEEL)"
+            fi
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "(không có wheel nào)"
+          fi
 
       # ==========================================================
       # 13. RELEASE
