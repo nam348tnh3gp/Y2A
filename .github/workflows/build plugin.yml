@@ -1,0 +1,16 @@
+name: Build Plugin APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - nam348tnh3gp-patch-1
+    paths:
+      - 'plugin/**'
+      - 'settings.gradle.kts'
+      - '.github/workflows/build-plugin.yml'
+
+concurrency:
+  group: build-plugin
+  cancel
