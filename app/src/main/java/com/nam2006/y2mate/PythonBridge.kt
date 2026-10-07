@@ -10,6 +10,7 @@ object PythonBridge {
     private const val TAG = "PythonBridge"
     private const val RUNTIME_TAR = "python-runtime.tar"
     private const val BRIDGE_FILE = "yt_dlp_bridge.py"
+    private const val RUNNER_FILE = "py_runner.py"
 
     @Volatile private var initialized = false
     @Volatile private var libLoaded = false
@@ -74,6 +75,17 @@ object PythonBridge {
                 Log.w(TAG, "Không copy được $BRIDGE_FILE", e)
             }
 
+            // 2b. Copy py_runner.py
+            val runnerFile = File(app.filesDir, RUNNER_FILE)
+            try {
+                app.assets.open(RUNNER_FILE).use { input ->
+                    FileOutputStream(runnerFile).use { output -> input.copyTo(output) }
+                }
+                Log.i(TAG, "✅ ${RUNNER_FILE} → ${runnerFile.absolutePath}")
+            } catch (e: Exception) {
+                Log.w(TAG, "Không copy được $RUNNER_FILE", e)
+            }
+
             // 3. Call nativeInit
             Log.i(TAG, "⏳ nativeInit...")
             Log.i(TAG, "  nativeLibDir = $nativeLibDir")
@@ -105,6 +117,7 @@ object PythonBridge {
      *   lib/python3.13/os.py
      *   lib/python3.13/lib-dynload/_ssl.*.so
      *   lib/python3.13/site-packages/yt_dlp/...
+     *   lib/python3.13/site-packages/pip/...
      */
     private fun extractRuntimeTar(app: Application, destDir: File) {
         destDir.mkdirs()
