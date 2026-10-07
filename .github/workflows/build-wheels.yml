@@ -96,7 +96,6 @@ jobs:
           echo "=== Python binaries ==="
           ls -lh /tmp/host-python/bin/python*
 
-          # python3.13 là binary thật, dùng trực tiếp
           echo "HOST_PYTHON=/tmp/host-python/bin/python3.13" >> "$GITHUB_ENV"
 
       - name: Export Cross-Compile Environment
@@ -383,7 +382,7 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # 11. BUILD WHEELS (KHÔNG có -nostdinc)
+      # 11. BUILD WHEELS
       # ==========================================================
       - name: Build wheels for Android aarch64
         run: |
@@ -413,13 +412,15 @@ jobs:
             echo "✅ Headers copied"
           fi
 
-          # STUB librt.a (Android gộp librt vào libc)
+          # STUB librt.a
           mkdir -p "$DEPS_INSTALL/lib"
           if [ ! -f "$DEPS_INSTALL/lib/librt.a" ]; then
             ar rcs "$DEPS_INSTALL/lib/librt.a"
+            echo "✅ Stub librt.a created"
           fi
 
           # --- Cross-compile env (KHÔNG dùng -nostdinc) ---
+          NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
@@ -428,11 +429,29 @@ jobs:
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
           export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
 
+          # Đưa NDK sysroot lên đầu để shadow /usr/include (glibc)
+          export CFLAGS="-fPIC -O2 \
+            -I$NDK_SYSROOT/usr/include \
+            -I$NDK_SYSROOT/usr/include/aarch64-linux-android \
+            -I$DEPS_INSTALL/include \
+            -I$TARGET_ROOT/include/python3.13 \
+            -Wno-implicit-function-declaration"
+          export CPPFLAGS="$CFLAGS"
+          export CXXFLAGS="$CFLAGS"
+          export LDFLAGS="-L$DEPS_INSTALL/lib -L$NDK_SYSROOT/usr/lib/aarch64-linux-android/${{ env.ANDROID_API }} -Wl,--hash-style=both"
+
           export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$DEPS_INSTALL"
 
-          # --- BLAS/LAPACK cho numpy ---
+          # Fix cryptography: cross-compile env cho maturin/pyo3
+          export PYO3_PYTHON="$HOST_PY"
+          export PYO3_CROSS=1
+          export PYO3_CROSS_PYTHON_VERSION="3.13"
+          export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
+          export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
+
+          # BLAS/LAPACK
           export NPY_BLAS_ORDER="openblas"
           export NPY_LAPACK_ORDER="openblas"
           export NPY_DISABLE_SVML=1
@@ -442,9 +461,10 @@ jobs:
           export LAPACK="$DEPS_INSTALL"
           export F77=""; export F90=""; export FC=""
 
-          # --- Cargo ---
+          # Cargo
           export CARGO_BUILD_TARGET="aarch64-linux-android"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L$DEPS_INSTALL/lib"
           export OPENSSL_DIR="$DEPS_INSTALL"
           export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
@@ -478,83 +498,6 @@ jobs:
           echo "❌ Failed:$FAIL_LIST"
           echo "=========================================="
           ls -lh wheels-out/ || echo "(rỗng)"
-
-      # ==========================================================
-      # 11.5. FLET FORGE — build các gói nâng cao (numpy, Pillow, cryptography)
-      # ==========================================================
-      - name: Build advanced packages with Flet Forge
-        continue-on-error: true
-        run: |
-          set -eo pipefail
-
-          echo "=== Clone Mobile Forge ==="
-          git clone --depth 1 https://github.com/flet-dev/mobile-forge /tmp/forge || {
-            echo "⚠️ Không clone được Mobile Forge — bỏ qua"
-            exit 0
-          }
-
-          cd /tmp/forge
-
-          echo "=== Setup Python deps cho forge ==="
-          "$HOST_PYTHON" -m pip install --quiet \
-            click pyyaml packaging requests toml tomlkit || true
-
-          echo ""
-          echo "=== Recipe có sẵn ==="
-          ls recipes/ 2>/dev/null | head -50 || echo "(không có recipes/)"
-
-          echo ""
-          echo "=== Cấu hình env cho forge ==="
-          export ANDROID_NDK_ROOT="$NDK"
-          export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP"
-          export CFLAGS="-fPIC -O2 -I$DEPS_INSTALL/include -Wno-implicit-function-declaration"
-          export CPPFLAGS="-I$DEPS_INSTALL/include"
-          export LDFLAGS="-L$DEPS_INSTALL/lib -Wl,--hash-style=both"
-          export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
-          export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
-          export PKG_CONFIG_SYSROOT_DIR="$DEPS_INSTALL"
-          export PATH="$HOST_PYTHON:$(dirname $HOST_PYTHON):$PATH"
-          export PYO3_PYTHON="$HOST_PYTHON"
-          export CARGO_BUILD_TARGET="aarch64-linux-android"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
-          export OPENSSL_DIR="$DEPS_INSTALL"
-          export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
-          export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
-
-          # --- Các gói nâng cao cần forge ---
-          ADVANCED="numpy pillow cryptography"
-
-          for pkg in $ADVANCED; do
-            echo ""
-            echo "=========================================="
-            echo "🔨 [FORGE] $pkg"
-            echo "=========================================="
-
-            if [ ! -d "recipes/$pkg" ]; then
-              echo "⚠️ Không có recipe cho $pkg — bỏ qua"
-              continue
-            fi
-
-            # Thử nhiều cú pháp gọi forge
-            "$HOST_PYTHON" -m forge build "$pkg" \
-              --platform android \
-              --arch arm64-v8a \
-              --output-dir "$GITHUB_WORKSPACE/wheels-out" 2>&1 | tail -50 || \
-            python3 -m forge build "$pkg" \
-              --platform android \
-              --arch arm64-v8a \
-              --output-dir "$GITHUB_WORKSPACE/wheels-out" 2>&1 | tail -50 || \
-            forge build "$pkg" \
-              --platform android \
-              --arch arm64-v8a \
-              --output-dir "$GITHUB_WORKSPACE/wheels-out" 2>&1 | tail -50 || {
-                echo "⚠️ Forge build $pkg thất bại — bỏ qua"
-              }
-          done
-
-          echo ""
-          echo "=== Wheels sau forge ==="
-          ls -lh "$GITHUB_WORKSPACE/wheels-out/" || true
 
       # ==========================================================
       # 12. POST-PROCESS
