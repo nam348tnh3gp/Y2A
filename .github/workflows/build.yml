@@ -143,11 +143,11 @@ jobs:
           echo "PKG_CONFIG_PATH=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "CFLAGS=-fPIC -O2 -I$DEPS_INSTALL/include -Wno-implicit-function-declaration" >> "$GITHUB_ENV"
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
-          echo "LDFLAGS=-L$DEPS_INSTALL/lib" >> "$GITHUB_ENV"
+          # QUAN TRỌNG: --hash-style=both để tương thích Android 12 linker
+          echo "LDFLAGS=-L$DEPS_INSTALL/lib -Wl,--hash-style=both" >> "$GITHUB_ENV"
 
       # ==========================================================
       # SECTION 4: CROSS-COMPILE DEPENDENCIES
-      # KHÔNG cross-compile zlib — NDK đã có libz.so + zlib.h trong sysroot
       # ==========================================================
 
       - name: Cross-Compile libffi
@@ -178,7 +178,8 @@ jobs:
             CXX="$CXX" \
             AR="$AR" \
             RANLIB="$RANLIB" \
-            STRIP="$STRIP"
+            STRIP="$STRIP" \
+            -Wl,--hash-style=both
 
           make -j$(nproc)
           make install_sw
@@ -228,6 +229,7 @@ jobs:
             'nis' \
             > Modules/Setup.local
 
+          LDFLAGS="-L$DEPS_INSTALL/lib -Wl,--hash-style=both" \
           OPENSSL_CFLAGS="-I$DEPS_INSTALL/include" \
           OPENSSL_LIBS="-L$DEPS_INSTALL/lib -lssl -lcrypto" \
           LIBFFI_CFLAGS="-I$DEPS_INSTALL/include" \
@@ -256,6 +258,9 @@ jobs:
           echo "Critical modules:"
           ls "$GITHUB_WORKSPACE/python-android/lib/python3.13/lib-dynload/" | grep -E "_ssl|_sqlite|_ctypes|_lzma|zlib" || true
 
+          echo "Verify hash style of libpython3.13.so:"
+          readelf -d "$GITHUB_WORKSPACE/python-android/lib/libpython3.13.so" | grep -E "HASH" || true
+
       # ==========================================================
       # SECTION 6: BOOTSTRAP WHEELS + PATCH PATHS
       # ==========================================================
@@ -275,6 +280,7 @@ jobs:
 
       - name: Strip Binaries and Patch Hardcoded Paths
         run: |
+          # Dùng strip từ NDK (llvm-strip) — nó giữ DT_HASH an toàn hơn strip của GNU
           find "$GITHUB_WORKSPACE/python-android" -name "*.so*" \
             -exec "$STRIP" --strip-unneeded {} \; 2>/dev/null || true
           "$STRIP" --strip-unneeded "$GITHUB_WORKSPACE/python-android/bin/python3.13" 2>/dev/null || true
@@ -336,6 +342,9 @@ jobs:
           fi
           echo "ssl module: $(basename "$SSL_SO")"
 
+          echo "Verify hash style after patchelf:"
+          readelf -d "$JNI/libpython3.13.so" | grep -E "HASH" || echo "⚠️  No HASH section found!"
+
           echo "Final jniLibs:"
           ls -lh "$JNI/"
 
@@ -350,12 +359,10 @@ jobs:
              "$GITHUB_WORKSPACE/app/src/main/assets/yt_dlp_bridge.py"
           echo "yt_dlp_bridge.py copied"
 
-          # Dọn asset cũ (nếu có) để tránh lẫn lộn giữa .tar và .tar.gz
           rm -f "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar" \
                 "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar.gz"
 
           cd "$GITHUB_WORKSPACE/python-android"
-          # tar thuần, KHÔNG nén gzip
           tar -cvf "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar" lib/python3.13
 
           cd "$GITHUB_WORKSPACE"
