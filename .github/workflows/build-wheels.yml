@@ -45,9 +45,6 @@ jobs:
       TARGET_HOST: "aarch64-linux-android"
 
     steps:
-      # ==========================================================
-      # 1. SETUP
-      # ==========================================================
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -79,9 +76,6 @@ jobs:
           echo "NDK=$HOME/ndk/android-ndk-r25c" >> "$GITHUB_ENV"
           echo "$HOME/ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
-      # ==========================================================
-      # 2. HOST PYTHON
-      # ==========================================================
       - name: Build Host Python
         run: |
           mkdir -p /tmp/build-host
@@ -92,6 +86,7 @@ jobs:
           ./configure --prefix=/tmp/host-python --enable-optimizations=no
           make -j$(nproc)
           make install
+          ln -sf /tmp/host-python/bin/python3 /tmp/host-python/bin/python3.13
           echo "HOST_PYTHON=/tmp/host-python/bin/python3" >> "$GITHUB_ENV"
 
       - name: Export Cross-Compile Environment
@@ -114,9 +109,6 @@ jobs:
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
           echo "LDFLAGS=-L$DEPS_INSTALL/lib -Wl,--hash-style=both" >> "$GITHUB_ENV"
 
-      # ==========================================================
-      # 3. CROSS-COMPILE CORE DEPS
-      # ==========================================================
       - name: Cross-Compile libffi
         run: |
           cd /tmp
@@ -134,10 +126,8 @@ jobs:
             || wget -q "https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
           tar -xf "openssl-${{ env.OPENSSL_VERSION }}.tar.gz"
           cd "openssl-${{ env.OPENSSL_VERSION }}"
-
           export ANDROID_NDK_ROOT="$NDK"
           export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-
           ./Configure android-arm64 \
             -D__ANDROID_API__=${{ env.ANDROID_API }} \
             --prefix="$DEPS_INSTALL" \
@@ -145,7 +135,6 @@ jobs:
             shared no-engine no-tests no-async \
             CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
             -Wl,--hash-style=both
-
           make -j$(nproc)
           make install_sw
 
@@ -182,9 +171,6 @@ jobs:
           CC="$CC" AR="$AR" RANLIB="$RANLIB" ./configure --prefix="$DEPS_INSTALL" --static
           make -j$(nproc) install
 
-      # ==========================================================
-      # 4. CROSS-COMPILE DEPS CHO lxml
-      # ==========================================================
       - name: Cross-Compile libxml2 (cho lxml)
         run: |
           cd /tmp
@@ -208,9 +194,6 @@ jobs:
             --without-python --without-crypto
           make -j$(nproc) install
 
-      # ==========================================================
-      # 5. CROSS-COMPILE DEPS CHO Pillow
-      # ==========================================================
       - name: Cross-Compile libjpeg-turbo (cho Pillow)
         run: |
           cd /tmp
@@ -242,54 +225,32 @@ jobs:
             --enable-static --disable-shared
           make -j$(nproc) install
 
-      # ==========================================================
-      # 6. CROSS-COMPILE OpenBLAS (C-only, no Fortran)
-      # ==========================================================
       - name: Cross-Compile OpenBLAS (C-only, no Fortran)
         run: |
           cd /tmp
           wget -q "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${{ env.OPENBLAS_VERSION }}/OpenBLAS-${{ env.OPENBLAS_VERSION }}.tar.gz"
           tar -xf "OpenBLAS-${{ env.OPENBLAS_VERSION }}.tar.gz"
           cd "OpenBLAS-${{ env.OPENBLAS_VERSION }}"
-
           MAKE_VARS=(
             "TARGET=ARMV8"
             "HOSTCC=gcc"
-            "CC=$CC"
-            "CXX=$CXX"
-            "AR=$AR"
-            "RANLIB=$RANLIB"
-            "FC="
-            "NOFORTRAN=1"
-            "NOLAPACK=0"
-            "USE_THREAD=1"
-            "USE_OPENMP=0"
-            "NUM_THREADS=64"
+            "CC=$CC" "CXX=$CXX" "AR=$AR" "RANLIB=$RANLIB"
+            "FC=" "NOFORTRAN=1" "NOLAPACK=0"
+            "USE_THREAD=1" "USE_OPENMP=0" "NUM_THREADS=64"
             "COMMON_OPT=-O2 -fPIC"
             "CFLAGS=-O2 -fPIC -I$DEPS_INSTALL/include"
           )
-
-          echo "=== BUILD ==="
           make -j$(nproc) "${MAKE_VARS[@]}"
-
-          echo "=== INSTALL ==="
           make "${MAKE_VARS[@]}" PREFIX="$DEPS_INSTALL" install
 
-          ls -lh "$DEPS_INSTALL/lib/" | grep -iE "openblas|lapack|blas" || echo "(không có)"
-
-      # ==========================================================
-      # 7. CROSS-COMPILE CPYTHON 3.13
-      # ==========================================================
       - name: Cross-Compile CPython
         run: |
           cd /tmp
           tar -xf "/tmp/build-host/Python-${{ env.PYTHON_VERSION }}.tar.xz"
           cd "Python-${{ env.PYTHON_VERSION }}"
-
           printf '%s\n' '*disabled*' '_crypt' '_nis' 'spwd' 'ossaudiodev' \
             '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' \
             > Modules/Setup.local
-
           LDFLAGS="-L$DEPS_INSTALL/lib -Wl,--hash-style=both" \
           OPENSSL_CFLAGS="-I$DEPS_INSTALL/include" \
           OPENSSL_LIBS="-L$DEPS_INSTALL/lib -lssl -lcrypto" \
@@ -304,28 +265,17 @@ jobs:
             --build=x86_64-pc-linux-gnu \
             --prefix="$GITHUB_WORKSPACE/python-android" \
             --with-build-python="$HOST_PYTHON" \
-            --enable-shared \
-            --disable-ipv6 \
-            --without-ensurepip \
+            --enable-shared --disable-ipv6 --without-ensurepip \
             --with-openssl="$DEPS_INSTALL" \
-            ac_cv_file__dev_ptmx=no \
-            ac_cv_file__dev_ptc=no \
-            ac_cv_buggy_getaddrinfo=no \
-            ac_cv_little_endian_double=yes
-
+            ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
+            ac_cv_buggy_getaddrinfo=no ac_cv_little_endian_double=yes
           make -j$(nproc)
           make install
-          echo "✅ CPython built"
 
-      # ==========================================================
-      # 8. SYMLINK + PIP
-      # ==========================================================
       - name: Symlink target Python path
         run: |
           sudo mkdir -p /data/data/com.nam2006.y2mate/files
-          sudo ln -sfn "$GITHUB_WORKSPACE/python-android" \
-                        /data/data/com.nam2006.y2mate/files/python
-          ls -la /data/data/com.nam2006.y2mate/files/
+          sudo ln -sfn "$GITHUB_WORKSPACE/python-android" /data/data/com.nam2006.y2mate/files/python
 
       - name: Prepare pip for wheel building
         run: |
@@ -336,65 +286,40 @@ jobs:
           for whl in /tmp/wheels_bootstrap/*.whl; do
             unzip -o -q "$whl" -d "$SITE"
           done
-          echo "✅ pip installed"
 
-      # ==========================================================
-      # 8.5. CÀI BUILD DEPENDENCIES (FIX vcs_versioning + entry points)
-      # ==========================================================
       - name: Install build dependencies for wheels
         run: |
           SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
           mkdir -p "$SITE"
 
-          echo "=== Cài build backends vào target site-packages ==="
+          echo "=== Cài build backends vào TARGET site-packages ==="
           "$HOST_PYTHON" -m pip install \
             --target="$SITE" \
-            --no-deps \
-            --no-cache-dir \
-            --only-binary=:all: \
-            --upgrade \
-            "setuptools_scm<8.2" \
-            pybind11 \
-            maturin \
-            meson-python \
-            meson \
-            ninja \
-            pkgconfig \
-            Cython \
-            expandvars \
-            packaging \
-            tomli \
-            poetry-core \
-            flit-core \
-            hatchling \
-            wheel \
-            setuptools-rust
+            --no-deps --no-cache-dir --only-binary=:all: --upgrade \
+            "setuptools_scm<8.2" pybind11 maturin meson-python meson ninja \
+            pkgconfig Cython expandvars packaging tomli \
+            poetry-core flit-core hatchling wheel setuptools-rust
 
           echo ""
-          echo "=== Entry points (maturin, meson, ninja) ==="
-          ls -lh "$SITE/bin/" 2>/dev/null || echo "(không có bin/)"
+          echo "=== Cài meson-python + maturin vào HOST python (cho pip subprocess) ==="
+          "$HOST_PYTHON" -m pip install --no-cache-dir \
+            meson-python meson ninja maturin pybind11 setuptools-rust \
+            "setuptools_scm<8.2" Cython expandvars pkgconfig
 
           echo ""
-          echo "=== Verify modules ==="
-          for m in setuptools_scm pybind11 maturin mesonpy pkgconfig expandvars Cython; do
-            if [ -d "$SITE/$m" ] || ls "$SITE"/${m}* >/dev/null 2>&1; then
-              echo "  ✅ $m"
-            else
-              echo "  ❌ $m MISSING"
-            fi
-          done
+          echo "=== Symlink python3 → python3.13 (maturin cần version) ==="
+          ln -sf /tmp/host-python/bin/python3 /tmp/host-python/bin/python3.13
+          ln -sf /tmp/host-python/bin/python3 /tmp/host-python/bin/python3.13-config 2>/dev/null || true
+          ls -lh /tmp/host-python/bin/ | grep python
 
           echo ""
-          echo "=== Verify entry points chạy được ==="
+          echo "=== Verify entry points ==="
           export PATH="$SITE/bin:$PATH"
           export PYTHONPATH="$SITE"
-          echo "maturin: $(maturin --version 2>&1 || echo FAIL)"
-          echo "meson:   $(meson --version 2>&1 || echo FAIL)"
-          echo "ninja:   $(ninja --version 2>&1 || echo FAIL)"
+          which maturin meson ninja || true
+          maturin --version || echo "⚠️ maturin FAIL"
+          meson --version || echo "⚠️ meson FAIL"
 
-      # ==========================================================
-      # 9. ĐỌC DANH SÁCH PACKAGE
-      # ==========================================================
       - name: Read package list
         id: pkglist
         run: |
@@ -403,7 +328,6 @@ jobs:
           else
             LIST=$(grep -v '^#' wheels/list.txt | grep -v '^$' | tr '\n' ' ')
           fi
-          # Loại bỏ token không phải package (số, ký tự đặc biệt)
           CLEAN=""
           for p in $LIST; do
             if echo "$p" | grep -qE '^[a-zA-Z][a-zA-Z0-9_.\-]*$'; then
@@ -414,30 +338,22 @@ jobs:
           echo "packages=$CLEAN" >> "$GITHUB_OUTPUT"
           echo "📦 Sẽ build: $CLEAN"
 
-      # ==========================================================
-      # 10. RUST
-      # ==========================================================
       - name: Setup Rust for cross-compile
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
             sh -s -- -y --default-toolchain stable --profile minimal
           source "$HOME/.cargo/env"
           rustup target add aarch64-linux-android
-
           mkdir -p "$HOME/.cargo"
           cat > "$HOME/.cargo/config.toml" <<EOF
           [target.aarch64-linux-android]
           linker = "${{ env.CC }}"
           ar = "${{ env.AR }}"
           EOF
-
           echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
           echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
-      # ==========================================================
-      # 11. BUILD WHEELS
-      # ==========================================================
       - name: Build wheels for Android aarch64
         run: |
           set -eo pipefail
@@ -447,7 +363,6 @@ jobs:
           TARGET_SITE="$TARGET_STDLIB/site-packages"
           mkdir -p wheels-out
 
-          # --- 1. Detect _sysconfigdata ---
           SYSCONF_FILE=$(ls "$TARGET_STDLIB"/_sysconfigdata__*.py 2>/dev/null | head -1)
           if [ -z "$SYSCONF_FILE" ]; then
             echo "❌ Không tìm thấy _sysconfigdata*.py"
@@ -460,7 +375,6 @@ jobs:
           rm -rf "$SYSCONF_DIR" && mkdir -p "$SYSCONF_DIR"
           cp "$SYSCONF_FILE" "$SYSCONF_DIR/"
 
-          # --- 2. Copy headers target → host ---
           HOST_INCLUDE="/tmp/host-python/include/python3.13"
           TARGET_INCLUDE="$TARGET_ROOT/include/python3.13"
           if [ -d "$TARGET_INCLUDE" ]; then
@@ -468,27 +382,38 @@ jobs:
             echo "✅ Headers copied"
           fi
 
-          # --- 3. STUB librt.a (Android gộp librt vào libc) ---
+          # STUB librt.a (Android gộp librt vào libc)
           mkdir -p "$DEPS_INSTALL/lib"
           if [ ! -f "$DEPS_INSTALL/lib/librt.a" ]; then
             ar rcs "$DEPS_INSTALL/lib/librt.a"
-            echo "✅ Stub librt.a created"
           fi
 
-          # --- 4. Cross-compile env ---
+          # --- Cross-compile env ---
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
           export PYTHONPATH="$SYSCONF_DIR:$TARGET_SITE"
-          export PATH="$TARGET_SITE/bin:$HOME/.cargo/bin:$PATH"
+          export PATH="$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
           export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
+
+          # --- Fix Pillow: chặn /usr/include, dùng NDK sysroot ---
+          NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          export CFLAGS="-fPIC -O2 -nostdinc \
+            -I$DEPS_INSTALL/include \
+            -I/tmp/host-python/include/python3.13 \
+            -I$NDK_SYSROOT/usr/include \
+            -I$NDK_SYSROOT/usr/include/aarch64-linux-android \
+            -Wno-implicit-function-declaration"
+          export CPPFLAGS="$CFLAGS"
+          export CXXFLAGS="$CFLAGS"
+          export LDFLAGS="-L$DEPS_INSTALL/lib -L$NDK_SYSROOT/usr/lib/aarch64-linux-android/24 -Wl,--hash-style=both"
 
           export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$DEPS_INSTALL"
 
-          # --- 5. BLAS/LAPACK ---
+          # --- BLAS/LAPACK cho numpy ---
           export NPY_BLAS_ORDER="openblas"
           export NPY_LAPACK_ORDER="openblas"
           export NPY_DISABLE_SVML=1
@@ -498,22 +423,25 @@ jobs:
           export LAPACK="$DEPS_INSTALL"
           export F77=""; export F90=""; export FC=""
 
-          # --- 6. Cargo ---
+          # --- Fix cryptography: chỉ định interpreter cho maturin ---
+          export PYO3_PYTHON="/tmp/host-python/bin/python3.13"
+          export PYO3_CROSS=1
+          export PYO3_CROSS_PYTHON_VERSION="3.13"
+          export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
+          export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
+
+          # --- Cargo ---
           export CARGO_BUILD_TARGET="aarch64-linux-android"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L$DEPS_INSTALL/lib"
           export OPENSSL_DIR="$DEPS_INSTALL"
           export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
 
-          # --- 7. Verify entry points trước khi build ---
           echo ""
           echo "=== Verify tools ==="
-          which maturin || echo "⚠️ maturin NOT in PATH"
-          which meson   || echo "⚠️ meson NOT in PATH"
-          which ninja   || echo "⚠️ ninja NOT in PATH"
-          which cargo   || echo "⚠️ cargo NOT in PATH"
+          which maturin meson ninja cargo python3.13 || true
 
-          # --- 8. Loop build ---
           SUCCESS_LIST=""
           FAIL_LIST=""
 
@@ -522,11 +450,8 @@ jobs:
             echo "=========================================="
             echo "🔨 Building: $pkg"
             echo "=========================================="
-
             if "$HOST_PY" -m pip wheel "$pkg" \
-                  --no-deps \
-                  --no-build-isolation \
-                  --no-binary=:all: \
+                  --no-deps --no-build-isolation --no-binary=:all: \
                   --wheel-dir wheels-out 2>&1 | tail -80; then
               echo "✅ $pkg OK"
               SUCCESS_LIST="$SUCCESS_LIST $pkg"
@@ -543,9 +468,6 @@ jobs:
           echo "=========================================="
           ls -lh wheels-out/ || echo "(rỗng)"
 
-      # ==========================================================
-      # 12. POST-PROCESS
-      # ==========================================================
       - name: Post-process wheels
         run: |
           mkdir -p wheels-final
@@ -557,38 +479,15 @@ jobs:
             if [[ "$base" == *"linux_aarch64"* ]]; then
               newname="${base//linux_aarch64/android_24_arm64_v8a}"
               cp "$whl" "wheels-final/$newname"
-              echo "Tagged: $base + $newname"
             fi
           done
-          echo ""
           ls -lh wheels-final/ || echo "(rỗng)"
 
-      # ==========================================================
-      # 12.5 VERIFY TAG
-      # ==========================================================
-      - name: Verify wheel tags
-        run: |
-          echo "=== Tags trong wheels-final ==="
-          shopt -s nullglob
-          for whl in wheels-final/*.whl; do
-            [ -f "$whl" ] || continue
-            echo ""
-            echo "File: $(basename "$whl")"
-            content=$(unzip -p "$whl" "*.dist-info/WHEEL" 2>/dev/null || true)
-            if [ -n "$content" ]; then
-              echo "$content" | grep -iE "^Tag:|^Root-Is-Purelib:" || echo "  (không có Tag)"
-            fi
-          done
-
-      # ==========================================================
-      # 13. RELEASE
-      # ==========================================================
       - name: Generate release tag
         id: tag
         run: |
           TAG="wheels-$(date +%Y%m%d-%H%M%S)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Tag: $TAG"
 
       - name: Create release with wheels
         if: hashFiles('wheels-final/*.whl') != ''
@@ -598,22 +497,17 @@ jobs:
           name: Wheels ${{ steps.tag.outputs.tag }}
           body: |
             Prebuilt wheels cho Android aarch64 / Python 3.13.
-
             Packages: ${{ steps.pkglist.outputs.packages }}
           files: wheels-final/*.whl
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ==========================================================
-      # 14. INDEX + COMMIT
-      # ==========================================================
       - name: Generate pip index HTML
         if: hashFiles('wheels-final/*.whl') != ''
         run: |
           python3 scripts/gen_index.py \
-            wheels-final \
-            docs \
+            wheels-final docs \
             ${{ github.repository_owner }} \
             ${{ github.event.repository.name }} \
             ${{ steps.tag.outputs.tag }}
@@ -630,33 +524,25 @@ jobs:
           else
             git commit -m "chore(wheels): update index [${{ steps.tag.outputs.tag }}] [skip ci]"
             for i in 1 2 3 4 5; do
-              if git pull --rebase origin "${{ github.ref_name }}" && \
-                 git push origin "HEAD:${{ github.ref_name }}"; then
+              if git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then
                 break
               fi
               sleep 5
             done
           fi
 
-      # ==========================================================
-      # 15. SUMMARY
-      # ==========================================================
       - name: Summary
         if: always()
         run: |
           echo "## 📦 Wheels Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Release tag:** \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Index URL:** https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/simple/" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Wheels" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Index:** https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/simple/" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           ls -lh wheels-final/ >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "(không có)" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload wheels artifact
+      - uses: actions/upload-artifact@v4
         if: hashFiles('wheels-final/*.whl') != ''
-        uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ steps.tag.outputs.tag }}
           path: wheels-final/*.whl
