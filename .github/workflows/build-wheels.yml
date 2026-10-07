@@ -33,7 +33,6 @@ permissions:
   contents: write
 
 env:
-  # [FIX] PYTHON_MINOR dùng chung, tránh hardcode python3.13
   PYTHON_VERSION: "3.13.1"
   PYTHON_MINOR: "3.13"
   OPENSSL_VERSION: "3.3.2"
@@ -49,9 +48,8 @@ env:
   OPENBLAS_VERSION: "0.3.28"
   ANDROID_API: "24"
   TARGET_HOST: "aarch64-linux-android"
-  ANDROID_TAG: "android_24_arm64_v8a"   # [FIX] tag chuẩn PEP 738
-  MAKEFLAGS: "-j2"                       # [FIX] tránh OOM
-  # [FIX] Prefix target — không hardcode /data/data/com.nam2006.y2mate
+  ANDROID_TAG: "android_24_arm64_v8a"
+  MAKEFLAGS: "-j2"
   ANDROID_APP_PREFIX: "/data/data/com.nam2006.y2mate/files"
 
 jobs:
@@ -99,7 +97,7 @@ jobs:
           echo "${{ github.workspace }}/ndk-cache/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
       # ============================================================
-      # [CACHE] Host Python 3.13.1
+      # [CACHE] Host Python
       # ============================================================
       - name: Cache Host Python
         id: cache-host-python
@@ -118,7 +116,6 @@ jobs:
           wget -q "https://www.python.org/ftp/python/${{ env.PYTHON_VERSION }}/Python-${{ env.PYTHON_VERSION }}.tar.xz"
           tar -xf "Python-${{ env.PYTHON_VERSION }}.tar.xz"
           cd "Python-${{ env.PYTHON_VERSION }}"
-          # [FIX] --disable-optimizations thay vì --enable-optimizations=no
           ./configure --prefix=/tmp/host-python --disable-optimizations
           make
           make install
@@ -171,7 +168,7 @@ jobs:
           echo "✅ Cleanup done"
 
       # ============================================================
-      # Tải wheel từ release gần nhất
+      # [FIX] Tải wheel cũ — lọc bỏ wheel link glibc
       # ============================================================
       - name: Download previous wheels
         id: prev
@@ -182,21 +179,49 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p wheels-out
-          if [ "$FORCE_REBUILD" = "true" ]; then
-            echo "⚡ force_rebuild"
-            echo "has_cache=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          LATEST_TAG=$(gh release list --limit 50 --json tagName -q '.[] | select(.tagName | startswith("wheels-")) | .tagName' | head -1 || echo "")
-          if [ -z "$LATEST_TAG" ]; then
-            echo "has_cache=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          [ "$FORCE_REBUILD" = "true" ] && { echo "has_cache=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          LATEST_TAG=$(gh release list --limit 50 --json tagName \
+            -q '.[] | select(.tagName | startswith("wheels-")) | .tagName' | head -1 || echo "")
+          [ -z "$LATEST_TAG" ] && { echo "has_cache=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
           echo "Tag: $LATEST_TAG"
-          gh release download "$LATEST_TAG" --pattern '*.whl' --dir wheels-out --clobber 2>&1 | tail -3 || true
-          COUNT=$(ls wheels-out/*.whl 2>/dev/null | wc -l)
-          echo "$COUNT wheel"
-          [ "$COUNT" -gt 0 ] && echo "has_cache=true" >> "$GITHUB_OUTPUT" || echo "has_cache=false" >> "$GITHUB_OUTPUT"
+          mkdir -p /tmp/prev-wheels
+          gh release download "$LATEST_TAG" --pattern '*.whl' --dir /tmp/prev-wheels --clobber 2>&1 | tail -3 || true
+
+          VALID=0
+          for whl in /tmp/prev-wheels/*.whl; do
+            [ -f "$whl" ] || continue
+            base=$(basename "$whl")
+
+            # Nếu tên wheel bị nhân tag → coi là hỏng
+            if echo "$base" | grep -qE '\.android_[0-9]+_[a-z0-9_]+\.'; then
+              echo "🗑️  Tên nhân tag: $base"
+              continue
+            fi
+
+            work=$(mktemp -d)
+            if ! unzip -q -o "$whl" -d "$work" 2>/dev/null; then
+              rm -rf "$work"
+              cp "$whl" wheels-out/ && VALID=$((VALID+1))
+              continue
+            fi
+            bad=0
+            while IFS= read -r so; do
+              if readelf -d "$so" 2>/dev/null | grep -qE 'libc\.so\.6|ld-linux'; then
+                bad=1; break
+              fi
+            done < <(find "$work" -name "*.so")
+            rm -rf "$work"
+            if [ "$bad" -eq 0 ]; then
+              cp "$whl" wheels-out/
+              VALID=$((VALID+1))
+            else
+              echo "🗑️  Link glibc: $base"
+            fi
+          done
+          echo "Valid cached wheels: $VALID"
+          [ "$VALID" -gt 0 ] && echo "has_cache=true" >> "$GITHUB_OUTPUT" || echo "has_cache=false" >> "$GITHUB_OUTPUT"
 
       # ============================================================
       # [CACHE] Cross-compile deps
@@ -223,7 +248,6 @@ jobs:
           echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> "$GITHUB_ENV"
           echo "READELF=$TOOLCHAIN/bin/llvm-readelf" >> "$GITHUB_ENV"
           echo "DEPS_INSTALL=$DEPS_INSTALL" >> "$GITHUB_ENV"
-          # [FIX] PKG_CONFIG_SYSROOT_DIR rỗng — tránh double-prefix
           echo "PKG_CONFIG_LIBDIR=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_SYSROOT_DIR=" >> "$GITHUB_ENV"
@@ -253,7 +277,6 @@ jobs:
           cd "openssl-${{ env.OPENSSL_VERSION }}"
           export ANDROID_NDK_ROOT="$NDK"
           export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-          # [FIX] -Wl,--hash-style=both vào LDFLAGS, không để bare arg
           LDFLAGS="-Wl,--hash-style=both" \
           ./Configure android-arm64 -D__ANDROID_API__=${{ env.ANDROID_API }} \
             --prefix="$DEPS_INSTALL" --openssldir="$DEPS_INSTALL/ssl" \
@@ -388,7 +411,6 @@ jobs:
 
       - name: Symlink target Python path
         run: |
-          # [FIX] Dùng ANDROID_APP_PREFIX thay vì hardcode
           sudo mkdir -p "$ANDROID_APP_PREFIX"
           sudo ln -sfn "$GITHUB_WORKSPACE/python-android" "$ANDROID_APP_PREFIX/python"
 
@@ -396,7 +418,6 @@ jobs:
         run: |
           SITE="$GITHUB_WORKSPACE/python-android/lib/python${PYTHON_MINOR}/site-packages"
           mkdir -p "$SITE"
-          # [FIX] pip install --target thay vì unzip wheel thủ công
           "$HOST_PYTHON" -m pip install \
             --target="$SITE" --no-deps --no-cache-dir --only-binary=:all: \
             pip setuptools wheel
@@ -411,7 +432,6 @@ jobs:
             "setuptools_scm<8.2" pybind11 maturin meson-python meson ninja \
             pkgconfig Cython expandvars packaging tomli \
             poetry-core flit-core hatchling wheel setuptools-rust
-          # [FIX] cài cho host để build system import được
           "$HOST_PYTHON" -m pip install --no-cache-dir \
             meson-python meson ninja maturin pybind11 setuptools-rust \
             "setuptools_scm<8.2" Cython expandvars pkgconfig cffi \
@@ -420,7 +440,6 @@ jobs:
       - name: Read package list
         id: pkglist
         env:
-          # [FIX] Truyền input qua env — tránh command injection
           INPUT_PACKAGES: ${{ github.event.inputs.packages }}
         run: |
           if [ -n "$INPUT_PACKAGES" ]; then
@@ -466,7 +485,6 @@ jobs:
           source "$HOME/.cargo/env"
           rustup target add aarch64-linux-android
           mkdir -p "$HOME/.cargo"
-          # [FIX] heredoc quoted, không thụt lề
           cat > "$HOME/.cargo/config.toml" <<EOF
           [target.aarch64-linux-android]
           linker = "${CC_VAL}"
@@ -477,7 +495,7 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # BUILD WHEELS
+      # BUILD WHEELS — [FIX] verify bionic sau từng tier
       # ==========================================================
       - name: Build wheels
         env:
@@ -522,7 +540,6 @@ jobs:
           echo "CLANG_BUILTIN: ${CLANG_BUILTIN:-NOT_FOUND}"
 
           export NDK_SYSROOT CLANG_BUILTIN
-          # [FIX] Tag Android đúng chuẩn ngay từ đầu (dấu gạch dưới)
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
@@ -545,7 +562,6 @@ jobs:
 
           export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
-          # [FIX] Không set PKG_CONFIG_SYSROOT_DIR
 
           export PYO3_PYTHON="$HOST_PY"
           export PYO3_CROSS=1
@@ -563,15 +579,32 @@ jobs:
           export HOST_PY TARGET_ROOT TARGET_SITE TARGET_STDLIB
           export WHEELS_OUT="$GITHUB_WORKSPACE/wheels-out"
 
-          # [FIX] wheel_exists dùng compgen
-          wheel_exists() {
+          # [NEW] Verify wheel có link bionic không
+          verify_bionic() {
+            local whl="$1"
+            [ -f "$whl" ] || return 0
+            local work
+            work=$(mktemp -d)
+            if ! unzip -q -o "$whl" -d "$work" 2>/dev/null; then
+              rm -rf "$work"; return 0
+            fi
+            local bad=0
+            while IFS= read -r so; do
+              if readelf -d "$so" 2>/dev/null | grep -qE 'libc\.so\.6|ld-linux'; then
+                bad=1; break
+              fi
+            done < <(find "$work" -name "*.so")
+            rm -rf "$work"
+            return $bad
+          }
+
+          # [NEW] Tìm wheel vừa build (mới nhất)
+          find_wheel() {
             local pkg="$1"
             local pkg_a pkg_b
             pkg_a=$(echo "$pkg" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
             pkg_b=$(echo "$pkg" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
-            compgen -G "wheels-out/${pkg_a}-*.whl" > /dev/null 2>&1 && return 0
-            compgen -G "wheels-out/${pkg_b}-*.whl" > /dev/null 2>&1 && return 0
-            return 1
+            ls -t wheels-out/${pkg_a}-*.whl wheels-out/${pkg_b}-*.whl 2>/dev/null | head -1
           }
 
           SUCCESS_T1=""; SUCCESS_T2=""; SKIP_LIST=""; FAIL_LIST=""
@@ -582,34 +615,53 @@ jobs:
             echo "📦 $pkg"
             echo "════════════════════════════════════════"
 
-            if wheel_exists "$pkg"; then
-              echo "⏭️  Skip (đã có wheel)"
+            # [FIX] Skip chỉ khi wheel cũ THỰC SỰ là bionic
+            existing=$(find_wheel "$pkg")
+            if [ -n "$existing" ] && verify_bionic "$existing"; then
+              echo "⏭️  Skip (đã có wheel bionic)"
               SKIP_LIST="$SKIP_LIST $pkg"
               continue
             fi
+            # Xoá wheel cũ nếu link glibc
+            if [ -n "$existing" ] && ! verify_bionic "$existing"; then
+              echo "🗑️  Xoá wheel cũ link glibc: $(basename "$existing")"
+              rm -f "$existing"
+            fi
 
-            # [FIX] Log ra file, không dùng pipe tail
+            # ─── TIER 1 ───
             echo "🔨 Tầng 1: pip wheel"
+            TIER1_OK=0
             if "$HOST_PY" -m pip wheel "$pkg" \
                   --no-deps --no-build-isolation --no-binary=:all: \
                   --wheel-dir wheels-out > "/tmp/pip_${pkg}.log" 2>&1; then
-              if wheel_exists "$pkg"; then
-                echo "✅ $pkg — Tầng 1"
+              whl=$(find_wheel "$pkg")
+              if [ -n "$whl" ] && verify_bionic "$whl"; then
+                echo "✅ $pkg — Tầng 1 (bionic)"
                 SUCCESS_T1="$SUCCESS_T1 $pkg"
-                continue
+                TIER1_OK=1
+              else
+                echo "⚠️  $pkg — Tier 1 wheel link glibc → XOÁ + fallback Tier 2"
+                [ -n "$whl" ] && rm -f "$whl"
               fi
             else
-              echo "--- pip log (tail 40) ---"
-              tail -40 "/tmp/pip_${pkg}.log" || true
+              echo "--- pip log (tail 30) ---"
+              tail -30 "/tmp/pip_${pkg}.log" || true
             fi
 
+            [ "$TIER1_OK" -eq 1 ] && continue
+
+            # ─── TIER 2 ───
             echo ""
             echo "🔨 Tầng 2: p4a-style"
             if bash "$GITHUB_WORKSPACE/scripts/build-p4a-style.sh" "$pkg" > "/tmp/p4a_${pkg}.log" 2>&1; then
-              if wheel_exists "$pkg"; then
-                echo "✅ $pkg — Tầng 2"
+              whl=$(find_wheel "$pkg")
+              if [ -n "$whl" ] && verify_bionic "$whl"; then
+                echo "✅ $pkg — Tầng 2 (bionic)"
                 SUCCESS_T2="$SUCCESS_T2 $pkg"
                 continue
+              else
+                echo "❌ $pkg — Tier 2 vẫn link glibc"
+                [ -n "$whl" ] && rm -f "$whl"
               fi
             else
               echo "--- p4a log (tail 30) ---"
@@ -674,7 +726,6 @@ jobs:
           echo "=== Sau patch ==="
           readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH"
 
-          # [FIX] Cập nhật RECORD sau patch
           CRYPTO_WHL="$CRYPTO_WHL" RUST_SO_REL="$RUST_SO" "$HOST_PYTHON" - <<'PYEOF'
           import base64, hashlib, csv, os, zipfile, tempfile, shutil
           whl = os.environ["CRYPTO_WHL"]
@@ -716,16 +767,17 @@ jobs:
           echo "✅ Đã patch: $CRYPTO_WHL"
 
       # ==========================================================
-      # POST-PROCESS — [FIX] handle nhiều tag
+      # POST-PROCESS — [FIX] parse & ghi đè tag chính xác
       # ==========================================================
       - name: Post-process wheels
         env:
           ANDROID_TAG: ${{ env.ANDROID_TAG }}
         run: |
           set -eo pipefail
-          mkdir -p wheels-final
+          rm -rf wheels-final && mkdir -p wheels-final
           shopt -s nullglob
-          COPIED=0; RENAMED=0; WARNED=0
+
+          COPIED=0; RENAMED=0
 
           for whl in wheels-out/*.whl; do
             [ -f "$whl" ] || continue
@@ -733,43 +785,43 @@ jobs:
 
             # Pure-python → giữ nguyên
             if [[ "$base" == *"none-any"* ]]; then
-              cp -n "$whl" "wheels-final/$base" 2>/dev/null && COPIED=$((COPIED+1)) || true
-              continue
-            fi
-
-            # Đã đúng tag Android → giữ nguyên
-            if [[ "$base" == *"${ANDROID_TAG}"* ]]; then
-              cp -n "$whl" "wheels-final/$base" 2>/dev/null && COPIED=$((COPIED+1)) || true
-              echo "✅ $base (giữ nguyên)"
-              continue
-            fi
-
-            # Cần đổi tên: các tag glibc → android
-            newname="$base"
-            newname="${newname//manylinux_2_28_aarch64/${ANDROID_TAG}}"
-            newname="${newname//manylinux2014_aarch64/${ANDROID_TAG}}"
-            newname="${newname//manylinux_2_17_aarch64/${ANDROID_TAG}}"
-            newname="${newname//linux_aarch64/${ANDROID_TAG}}"
-
-            if [ "$newname" != "$base" ]; then
-              cp "$whl" "wheels-final/$newname"
-              RENAMED=$((RENAMED+1))
-              echo "🔄 $base → $newname"
-            else
-              echo "⚠️  $base — không match pattern nào, giữ nguyên"
               cp "$whl" "wheels-final/$base"
-              WARNED=$((WARNED+1))
+              COPIED=$((COPIED+1))
+              echo "✅ $base (pure python)"
+              continue
+            fi
+
+            # [FIX] Parse wheel filename chính xác:
+            # Format: name-version-pytag-abitag-platformtag.whl
+            # name không chứa '-'
+            if [[ "$base" =~ ^([^-]+)-([^-]+)-([^-]+)-([^-]+)-(.+)\.whl$ ]]; then
+              PKG_N="${BASH_REMATCH[1]}"
+              VER="${BASH_REMATCH[2]}"
+              PY_TAG="${BASH_REMATCH[3]}"
+              ABI_TAG="${BASH_REMATCH[4]}"
+              # Ghi đè platform tag bằng ANDROID_TAG — không quan tâm tag cũ
+              newname="${PKG_N}-${VER}-${PY_TAG}-${ABI_TAG}-${ANDROID_TAG}.whl"
+
+              if [ "$newname" == "$base" ]; then
+                cp "$whl" "wheels-final/$newname"
+                COPIED=$((COPIED+1))
+                echo "✅ $base"
+              else
+                cp "$whl" "wheels-final/$newname"
+                RENAMED=$((RENAMED+1))
+                echo "🔄 $base → $newname"
+              fi
+            else
+              echo "⚠️  $base — không parse được, bỏ qua"
             fi
           done
 
           echo ""
-          echo "Copied (giữ nguyên): $COPIED"
-          echo "Renamed:             $RENAMED"
-          echo "Warned (giữ lạ):     $WARNED"
+          echo "Copied: $COPIED / Renamed: $RENAMED"
           ls -lh wheels-final/ || echo "(rỗng)"
 
       # ==========================================================
-      # [NEW] Verify bionic + tag
+      # VERIFY Android wheels
       # ==========================================================
       - name: Verify Android wheels
         run: |
@@ -782,18 +834,24 @@ jobs:
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
 
-            # Tag check
             if [[ "$base" == *"none-any"* ]]; then
               echo "⏭️  $base (pure python)"
               continue
             fi
+
+            # Check tên không bị nhân tag
+            if echo "$base" | grep -qE '\.android_[0-9]+_[a-z0-9_]+\.'; then
+              echo "❌ $base — tên bị nhân tag"
+              FAIL=$((FAIL+1))
+              continue
+            fi
+
             if ! [[ "$base" =~ $TAG_PAT ]]; then
               echo "❌ $base — tag không phải Android"
               FAIL=$((FAIL+1))
               continue
             fi
 
-            # Bionic check
             work=$(mktemp -d)
             unzip -q -o "$whl" -d "$work"
             bad=0
@@ -851,6 +909,78 @@ jobs:
             ${{ github.repository_owner }} \
             ${{ github.event.repository.name }} \
             ${{ steps.tag.outputs.tag }}
+
+      # ==========================================================
+      # [NEW] Verify docs/simple/ cấu trúc PEP 503
+      # ==========================================================
+      - name: Verify pip index (docs/simple)
+        if: hashFiles('wheels-final/*.whl') != ''
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -eo pipefail
+          FAIL=0
+
+          echo "=== Cấu trúc docs/ ==="
+          find docs -maxdepth 3 -type f | sort | head -50
+          echo ""
+
+          if [ ! -f "docs/index.html" ]; then
+            echo "❌ Thiếu docs/index.html"
+            FAIL=$((FAIL+1))
+          else
+            echo "✅ docs/index.html"
+          fi
+
+          if [ ! -f "docs/simple/index.html" ]; then
+            echo "❌ Thiếu docs/simple/index.html"
+            FAIL=$((FAIL+1))
+          else
+            echo "✅ docs/simple/index.html"
+            if ! grep -q '<a ' docs/simple/index.html; then
+              echo "⚠️  docs/simple/index.html không có link package nào"
+              FAIL=$((FAIL+1))
+            fi
+          fi
+
+          echo ""
+          echo "=== Verify từng wheel có entry ==="
+          for whl in wheels-final/*.whl; do
+            [ -f "$whl" ] || continue
+            base=$(basename "$whl")
+            pkg_raw=$(echo "$base" | cut -d'-' -f1)
+            pkg_norm=$(echo "$pkg_raw" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
+
+            found=0
+            for variant in "$pkg_raw" "$pkg_norm"; do
+              if [ -f "docs/simple/${variant}/index.html" ]; then
+                found=1
+                pkg_dir="$variant"
+                break
+              fi
+            done
+
+            if [ "$found" -eq 0 ]; then
+              echo "❌ $base — không có docs/simple/${pkg_norm}/index.html"
+              FAIL=$((FAIL+1))
+              continue
+            fi
+
+            if grep -q "${TAG}" "docs/simple/${pkg_dir}/index.html"; then
+              echo "✅ $base → docs/simple/${pkg_dir}/ (tag $TAG)"
+            else
+              echo "⚠️  $base → docs/simple/${pkg_dir}/ (không thấy tag $TAG)"
+            fi
+          done
+
+          echo ""
+          if [ "$FAIL" -gt 0 ]; then
+            echo "❌ $FAIL lỗi trong docs/simple/ — dừng workflow"
+            exit 1
+          fi
+          echo "✅ docs/simple/ OK"
 
       - name: Commit docs
         if: hashFiles('wheels-final/*.whl') != ''
