@@ -53,12 +53,56 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Debug apt sources
+        run: |
+          echo "=== /etc/apt/sources.list ==="
+          cat /etc/apt/sources.list 2>/dev/null || echo "(trống)"
+          echo ""
+          echo "=== /etc/apt/sources.list.d/*.list ==="
+          for f in /etc/apt/sources.list.d/*.list; do
+            [ -f "$f" ] && echo "--- $f ---" && cat "$f"
+          done
+
       - name: Install Host Tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential autoconf automake libtool \
+          # ============================================================
+          # Thay mirror azure (chậm/timeout) → archive.ubuntu.com
+          # ============================================================
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
+            /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null || true
+          sudo sed -i 's|https://azure.archive.ubuntu.com|https://archive.ubuntu.com|g' \
+            /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null || true
+
+          # ============================================================
+          # Update với timeout ngắn, không treo
+          # ============================================================
+          sudo apt-get update \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            -o Acquire::Retries=1 \
+            -o Acquire::ForceIPv4=true \
+            -qq || true
+
+          # ============================================================
+          # Cài packages
+          # ============================================================
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool \
             pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf \
             cmake ninja-build nasm
+
+          # ============================================================
+          # Verify tools có mặt
+          # ============================================================
+          echo "=== Verify tools ==="
+          for tool in gcc g++ make autoconf automake libtool pkg-config \
+                       wget curl unzip git xz python3 pip3 patchelf cmake ninja nasm; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "✅ $tool: $(command -v $tool)"
+            else
+              echo "❌ $tool MISSING"
+            fi
+          done
 
       - name: Setup Android NDK r25c
         run: |
@@ -234,7 +278,7 @@ jobs:
 
       # ==========================================================
       # 6. CROSS-COMPILE OpenBLAS (C-only, no Fortran)
-      #    Build và install phải tách 2 lệnh make riêng
+      #    Build và install tách 2 lệnh make riêng
       # ==========================================================
       - name: Cross-Compile OpenBLAS (C-only, no Fortran)
         run: |
@@ -243,9 +287,6 @@ jobs:
           tar -xf "OpenBLAS-${{ env.OPENBLAS_VERSION }}.tar.gz"
           cd "OpenBLAS-${{ env.OPENBLAS_VERSION }}"
 
-          # ============================================================
-          # Biến chung cho cả build và install
-          # ============================================================
           MAKE_VARS=(
             "TARGET=ARMV8"
             "HOSTCC=gcc"
@@ -428,7 +469,6 @@ jobs:
           export OPENBLAS="$DEPS_INSTALL"
           export BLAS="$DEPS_INSTALL"
           export LAPACK="$DEPS_INSTALL"
-          # Tránh numpy tự đi tìm Fortran compiler
           export F77=""
           export F90=""
           export FC=""
