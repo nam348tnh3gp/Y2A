@@ -326,17 +326,36 @@ object Downloader {
 
     // ==========================================================
     // FORMAT SELECTOR
+    // Ưu tiên H.264 (avc1) + AAC (mp4a) để tránh nhòe trên Android:
+    // - H.264 bitrate cao hơn VP9/AV1 cùng resolution
+    // - Hầu hết chip Android có hardware decode H.264 → mượt, nét
+    // - VP9/AV1 thường phải decode CPU → nhòe, giật khi chuyển động
     // ==========================================================
     private fun formatSelector(o: Options): String {
         if (o.audioOnly) return "bestaudio/best"
         val h = o.quality.removeSuffix("p")
         return when (o.platform) {
             Platform.FACEBOOK -> "best[height<=$h]/best"
-            Platform.TIKTOK -> "bestvideo[height<=$h][ext=mp4]+bestaudio/best[height<=$h]/best"
+
+            Platform.TIKTOK ->
+                "bestvideo[height<=$h][ext=mp4]+bestaudio[ext=m4a]/best[height<=$h][ext=mp4]/best[height<=$h]/best"
+
             Platform.YOUTUBE ->
-                if (o.iphone) "bestvideo[height<=$h][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4][vcodec^=avc1]"
-                else if (o.playlist && o.quality == "2160p") "bestvideo+bestaudio/best"
-                else "bestvideo[height<=$h]+bestaudio/best"
+                if (o.iphone) {
+                    // iPhone mode: avc1 + mp4a, container mp4
+                    "bestvideo[height<=$h][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/" +
+                    "best[height<=$h][ext=mp4]/best"
+                } else {
+                    // Ưu tiên H.264 + AAC (bitrate cao, tương thích tốt)
+                    // → H.264 + audio bất kỳ
+                    // → video-only bất kỳ (VP9/AV1)
+                    // → progressive (đã merge sẵn)
+                    // → best
+                    "bestvideo[height<=$h][vcodec^=avc1]+bestaudio[acodec^=mp4a]/" +
+                    "bestvideo[height<=$h][vcodec^=avc1]+bestaudio/" +
+                    "bestvideo[height<=$h]+bestaudio/" +
+                    "best[height<=$h]/best"
+                }
         }
     }
 
