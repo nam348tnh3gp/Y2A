@@ -391,7 +391,6 @@ jobs:
           NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           NDK_PREBUILT="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 
-          # Hỏi trực tiếp clang
           CLANG_BUILTIN=$("$CC" -print-resource-dir 2>/dev/null)/include
 
           if [ ! -f "$CLANG_BUILTIN/stddef.h" ]; then
@@ -523,11 +522,19 @@ jobs:
       - name: Patch cryptography wheel
         run: |
           set -eo pipefail
-          CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1)
+
+          # Ưu tiên wheel mới build (linux_aarch64), fallback bất kỳ
+          CRYPTO_WHL=$(ls wheels-out/cryptography-*linux_aarch64.whl 2>/dev/null | head -1)
+          if [ -z "$CRYPTO_WHL" ]; then
+            CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1)
+          fi
           if [ -z "$CRYPTO_WHL" ]; then
             echo "⚠️ Không có wheel cryptography"
             exit 0
           fi
+
+          # Absolute path TRƯỚC khi cd
+          CRYPTO_WHL=$(realpath "$CRYPTO_WHL")
           echo "Wheel: $CRYPTO_WHL"
 
           WORK="/tmp/patch-whl"
@@ -542,16 +549,17 @@ jobs:
           fi
           echo "SO: $RUST_SO"
 
+          # Skip nếu đã patch rồi
+          if readelf -d "$RUST_SO" | grep -q "libpython3.13.so"; then
+            echo "✅ Wheel đã patch từ trước — skip"
+            exit 0
+          fi
+
           echo "=== Trước patch ==="
           readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH" || echo "(không có)"
 
           patchelf --remove-rpath "$RUST_SO" 2>/dev/null || true
-
-          if ! readelf -d "$RUST_SO" | grep -q "libpython3.13.so"; then
-            patchelf --add-needed libpython3.13.so "$RUST_SO"
-            echo "  Added NEEDED libpython3.13.so"
-          fi
-
+          patchelf --add-needed libpython3.13.so "$RUST_SO"
           patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
 
           echo "=== Sau patch ==="
