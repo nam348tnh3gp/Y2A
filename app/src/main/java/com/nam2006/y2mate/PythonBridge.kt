@@ -3,13 +3,12 @@ package com.nam2006.y2mate
 import android.app.Application
 import android.util.Log
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
-import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import java.io.File
 import java.io.FileOutputStream
 
 object PythonBridge {
     private const val TAG = "PythonBridge"
-    private const val RUNTIME_TAR = "python-runtime.tar.gz"
+    private const val RUNTIME_TAR = "python-runtime.tar"
     private const val BRIDGE_FILE = "yt_dlp_bridge.py"
 
     @Volatile private var initialized = false
@@ -100,47 +99,44 @@ object PythonBridge {
     }
 
     /**
-     * Extract python-runtime.tar.gz từ assets vào filesDir/python.
-     * Cấu trúc tar:
-     *   ./bin/python3.11
-     *   ./lib/libpython3.11.so
-     *   ./lib/python3.11/os.py
-     *   ./lib/python3.11/lib-dynload/_ssl.*.so
-     *   ./lib/python3.11/site-packages/yt_dlp/...
+     * Extract python-runtime.tar (uncompressed tar) từ assets vào filesDir/python.
+     *
+     * Cấu trúc tar (top-level là thư mục "lib"):
+     *   lib/python3.13/os.py
+     *   lib/python3.13/lib-dynload/_ssl.*.so
+     *   lib/python3.13/site-packages/yt_dlp/...
      */
     private fun extractRuntimeTar(app: Application, destDir: File) {
         destDir.mkdirs()
 
         app.assets.open(RUNTIME_TAR).use { input ->
-            GzipCompressorInputStream(input).use { gzip ->
-                TarArchiveInputStream(gzip).use { tar ->
-                    var entry = tar.nextEntry
-                    var fileCount = 0
+            TarArchiveInputStream(input).use { tar ->
+                var entry = tar.nextEntry
+                var fileCount = 0
 
-                    while (entry != null) {
-                        val name = entry.name.removePrefix("./")
-                        if (name.isNotEmpty()) {
-                            val outFile = File(destDir, name)
+                while (entry != null) {
+                    val name = entry.name.removePrefix("./")
+                    if (name.isNotEmpty()) {
+                        val outFile = File(destDir, name)
 
-                            if (entry.isDirectory) {
-                                outFile.mkdirs()
-                            } else {
-                                outFile.parentFile?.mkdirs()
-                                FileOutputStream(outFile).use { output ->
-                                    tar.copyTo(output)
-                                }
-                                // Preserve executable bit
-                                if (entry.mode and 0b001_000_000 != 0) {
-                                    outFile.setExecutable(true)
-                                }
-                                fileCount++
+                        if (entry.isDirectory) {
+                            outFile.mkdirs()
+                        } else {
+                            outFile.parentFile?.mkdirs()
+                            FileOutputStream(outFile).use { output ->
+                                tar.copyTo(output)
                             }
+                            // Preserve executable bit
+                            if (entry.mode and 0b001_000_000 != 0) {
+                                outFile.setExecutable(true)
+                            }
+                            fileCount++
                         }
-                        entry = tar.nextEntry
                     }
-
-                    Log.i(TAG, "Extracted $fileCount files")
+                    entry = tar.nextEntry
                 }
+
+                Log.i(TAG, "Extracted $fileCount files")
             }
         }
     }
