@@ -1,11 +1,10 @@
 #!/bin/bash
 # build-p4a-style.sh — Generic p4a-style builder cho MỌI lib
 #
-# Env BẮT BUỘC đã export:
+# Env BẮT BUỘC:
 #   HOST_PYTHON, TARGET_ROOT, TARGET_SITE, TARGET_STDLIB
 #   CC, CXX, AR, RANLIB, STRIP, READELF, CFLAGS, CPPFLAGS, LDFLAGS
-#   DEPS_INSTALL, NDK, NDK_SYSROOT, ANDROID_API, GITHUB_WORKSPACE
-#   PYTHON_MINOR (3.13)
+#   DEPS_INSTALL, NDK, NDK_SYSROOT, ANDROID_API, GITHUB_WORKSPACE, PYTHON_MINOR
 
 set -eo pipefail
 
@@ -17,7 +16,6 @@ if [ -z "$PKG_SPEC" ]; then
   exit 1
 fi
 
-# [FIX] Strip version specifier cho case matching
 PKG_NAME="${PKG_SPEC%%[<>=!~]*}"
 
 HOST_PY="${HOST_PYTHON:-/tmp/host-python/bin/python3.13}"
@@ -69,7 +67,6 @@ if [ -z "$TARBALL" ]; then
   exit 1
 fi
 
-# [FIX] Extract vào subdir riêng để isolate
 mkdir -p "$SRC_DIR/extracted"
 tar -xf "$TARBALL" -C "$SRC_DIR/extracted"
 SRC_PATH=$(find "$SRC_DIR/extracted" -maxdepth 1 -type d | tail -n +2 | head -1)
@@ -77,7 +74,7 @@ SRC_PATH=$(find "$SRC_DIR/extracted" -maxdepth 1 -type d | tail -n +2 | head -1)
 echo "  Source: $SRC_PATH"
 
 # ============================================================
-# 2. DETECT BUILD BACKEND (Python tomllib)
+# 2. DETECT BACKEND
 # ============================================================
 BACKEND=$(SRC_PATH="$SRC_PATH" "$HOST_PY" - <<'PYEOF'
 import tomllib, os
@@ -93,7 +90,7 @@ PYEOF
 echo "  Backend: $BACKEND"
 
 # ============================================================
-# 3. WRAPPER SCRIPTS (chỉ numpy-config, pybind11-config)
+# 3. WRAPPER SCRIPTS
 # ============================================================
 cat > "$TMP_BUILD/numpy-config" <<NCEOF
 #!/bin/sh
@@ -116,12 +113,10 @@ export PATH="$TMP_BUILD:$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$
 # ============================================================
 # 4. ENV p4a-STYLE
 # ============================================================
-# [FIX] Dùng dấu gạch dưới — tag PEP 738
 export _PYTHON_HOST_PLATFORM="$ANDROID_TAG"
 export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
 export TARGET_PYTHON_EXE="$TARGET_ROOT/bin/python${PY_MINOR}"
 
-# [FIX] Bỏ FC="" gây lỗi meson
 unset FC F77 F90
 
 export NPY_DISABLE_SVML=1
@@ -131,7 +126,7 @@ export NPY_CBLAS_LIBS="-lopenblas"
 export NPY_LAPACK_LIBS="-lopenblas"
 
 # ============================================================
-# 5. site.cfg cho numpy/scipy (BLAS)
+# 5. site.cfg cho numpy/scipy
 # ============================================================
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
   cat > "$SRC_PATH/site.cfg" <<EOF
@@ -195,21 +190,91 @@ with open("setup.py", "w") as f:
 print("Pillow patched")
 PYEOF
 
-    # [FIX] Dùng $HOST_PY, không dùng python3 hệ thống
     "$HOST_PY" /tmp/patch_pillow.py
     grep -c "nonexistent" setup.py || echo "(0)"
+
+    export CC="$CC"
+    export CXX="$CXX"
+    export LD="$CC"
+    export LDSHARED="$CC -shared"
     ;;
-  lxml)
-    echo "  → lxml: dùng stub librt.a"
+
+  # [FIX] Setuptools bỏ qua CC env — force lại + set sysconfig
+  greenlet|frozenlist|ujson|markupsafe|regex|multidict|yarl|aiohttp|bitarray|brotli|mmh3|msgpack|lz4|zstandard|xxhash|pyrsistent|immutables|simplejson|pycryptodome|protobuf|pyyaml|cython)
+    echo "  → $PKG_NAME: force CC/CXX/LDSHARED cho setuptools"
+    export CC="$CC"
+    export CXX="$CXX"
+    export LD="$CC"
+    export LDSHARED="$CC -shared"
+    export CCSHARED="$CC -shared"
     ;;
+
+  # [FIX] numpy 2.x dùng meson — cần cross-file
   numpy)
-    echo "  → numpy: dùng site.cfg + OpenBLAS"
+    echo "  → numpy: meson cross-file + OpenBLAS"
+    cat > "$TMP_BUILD/android-cross.ini" <<EOF
+[binaries]
+c = '$CC'
+cpp = '$CXX'
+ar = '$AR'
+strip = '$STRIP'
+ranlib = '$RANLIB'
+
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+
+[properties]
+longdouble_format = 'IEEE_QUAD_LE'
+needs_exe_wrapper = true
+EOF
+    SETUP_ARGS=(
+      "-Csetup-args=--cross-file=$TMP_BUILD/android-cross.ini"
+      "-Csetup-args=-Dblas=openblas"
+      "-Csetup-args=-Dlapack=openblas"
+      "-Csetup-args=-Dallow-noblas=false"
+      "-Csetup-args=-Dbuildtype=release"
+    )
     ;;
+
   scipy)
-    echo "  → scipy: dùng site.cfg + OpenBLAS (NOLAPACK=0 đã build)"
+    echo "  → scipy: meson cross-file + OpenBLAS"
+    cat > "$TMP_BUILD/android-cross.ini" <<EOF
+[binaries]
+c = '$CC'
+cpp = '$CXX'
+ar = '$AR'
+strip = '$STRIP'
+ranlib = '$RANLIB'
+
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+
+[properties]
+needs_exe_wrapper = true
+EOF
+    SETUP_ARGS=(
+      "-Csetup-args=--cross-file=$TMP_BUILD/android-cross.ini"
+      "-Csetup-args=-Dblas=openblas"
+      "-Csetup-args=-Dlapack=openblas"
+      "-Csetup-args=-Dbuildtype=release"
+    )
     ;;
+
+  lxml)
+    echo "  → lxml: dùng stub librt.a + force CC"
+    export CC="$CC"
+    export CXX="$CXX"
+    export LDSHARED="$CC -shared"
+    ;;
+
   cryptography)
-    echo "  → cryptography: sẽ patch RPATH ở workflow"
+    echo "  → cryptography: Rust build, sẽ patch RPATH ở workflow"
     ;;
 esac
 
@@ -254,9 +319,8 @@ fi
 tail -20 "$LOG"
 echo "✅ [p4a-style] $PKG_NAME DONE"
 
-# [NEW] Verify bionic ngay tại đây
 echo ""
-echo "🔍 Verify bionic cho wheel vừa build..."
+echo "🔍 Verify bionic..."
 GLIBC_PAT='libc\.so\.6|ld-linux|libm\.so\.6|libpthread\.so\.0'
 for whl in "$WHEELS_OUT"/${PKG_NAME//-/_}-*.whl "$WHEELS_OUT"/${PKG_NAME}-*.whl; do
   [ -f "$whl" ] || continue
