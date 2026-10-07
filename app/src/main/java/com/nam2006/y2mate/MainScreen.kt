@@ -1,5 +1,6 @@
 package com.nam2006.y2mate
 
+import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -505,28 +506,89 @@ private fun HistoryDialog(vm: MainViewModel, ctx: Context, onClose: () -> Unit) 
 private fun SettingsDialog(vm: MainViewModel, ctx: Context, onPick: () -> Unit, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     var updating by remember { mutableStateOf(false) }
+    val repoCfg = remember {
+        try {
+            RepoPlugin.detect(ctx.applicationContext as Application)
+        } catch (_: Exception) {
+            RepoPlugin.Config(false, "", "", "", 0)
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onClose,
         containerColor = CardBg,
-        title = { Text("🍪 Cookies & yt-dlp") },
+        title = { Text("🍪 Cookies & Plugin") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+
+                // ===== Cookies =====
+                Text("🍪 Cookies YouTube", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Spacer(Modifier.height(4.dp))
                 Text(
-                    if (vm.hasCookies) "✅ Đang dùng cookies.txt" else "⚠️ Chưa có cookies — YouTube có thể yêu cầu đăng nhập (lỗi \"Sign in to confirm you're not a bot\").",
+                    if (vm.hasCookies) "✅ Đang dùng cookies.txt" else "⚠️ Chưa có cookies — YouTube có thể yêu cầu đăng nhập (\"Sign in to confirm you're not a bot\").",
                     color = if (vm.hasCookies) Ok else Color(0xFFFBBF24), fontSize = 13.sp,
                 )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
                 Text(
-                    "Cách lấy: cài tiện ích \"Get cookies.txt LOCALLY\" trên Chrome/Firefox máy tính, mở youtube.com đã đăng nhập, Export rồi chép file sang điện thoại và chọn bên dưới.",
-                    fontSize = 12.sp, color = Muted,
+                    "Cách lấy: cài tiện ích \"Get cookies.txt LOCALLY\" trên Chrome/Firefox máy tính, mở youtube.com đã đăng nhập, Export rồi chép file sang điện thoại.",
+                    fontSize = 11.sp, color = Muted,
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(10.dp))
                 Button(onClick = onPick, modifier = Modifier.fillMaxWidth()) { Text("📁 Nhập cookies.txt") }
                 if (vm.hasCookies) {
                     OutlinedButton(onClick = { vm.clearCookies() }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) { Text("🗑️ Xóa cookies", color = Err) }
                 }
-                Spacer(Modifier.height(14.dp))
 
+                Spacer(Modifier.height(18.dp))
+
+                // ===== Plugin Repository =====
+                Text("📦 Plugin Repository", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Spacer(Modifier.height(4.dp))
+                when {
+                    repoCfg.installed -> {
+                        Text("✅ Đã cài (v${repoCfg.pluginVersion})", color = Ok, fontSize = 13.sp)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Pip sẽ ưu tiên tải wheel từ index của plugin trước PyPI.",
+                            fontSize = 11.sp, color = Muted,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            repoCfg.indexUrl,
+                            fontSize = 10.sp, color = Muted,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    else -> {
+                        Text(
+                            "⚠️ Chưa cài — pip sẽ dùng PyPI mặc định.\n" +
+                            "Cài plugin để tải được wheel Android build sẵn (nhanh hơn, nhiều package hơn).",
+                            fontSize = 12.sp, color = Color(0xFFFBBF24),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                val i = Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse("https://github.com/nam348tnh3gp/Y2A/releases/latest")
+                                )
+                                ctx.startActivity(i)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("📥 Tải Plugin Repository", color = Fg) }
+                    }
+                }
+
+                Spacer(Modifier.height(18.dp))
+
+                // ===== yt-dlp update =====
+                Text("🔄 Cập nhật yt-dlp", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Vào tab 🐍 Python để pip install yt-dlp --upgrade",
+                    fontSize = 11.sp, color = Muted,
+                )
+                Spacer(Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = {
                         updating = true
@@ -538,13 +600,7 @@ private fun SettingsDialog(vm: MainViewModel, ctx: Context, onPick: () -> Unit, 
                     },
                     enabled = !updating,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text(if (updating) "Đang kiểm tra…" else "🔄 Kiểm tra cập nhật yt-dlp", color = Fg) }
-
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "ℹ️ yt-dlp được quản lý bởi Python/pip. Vào tab 🐍 Python để cập nhật.",
-                    fontSize = 11.sp, color = Muted,
-                )
+                ) { Text(if (updating) "Đang kiểm tra…" else "🔄 Kiểm tra phiên bản yt-dlp", color = Fg) }
             }
         },
         confirmButton = { TextButton(onClick = onClose) { Text("Đóng") } },
