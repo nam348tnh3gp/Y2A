@@ -411,6 +411,9 @@ jobs:
 
       # ==========================================================
       # SECTION 9.5: VERIFY libpython3.13.so CÓ TRONG jniLibs
+      # CHỈ kiểm tra các lib được copy thủ công vào jniLibs.
+      # libpython_jni.so và libffmpeg_jni.so do CMake build ở bước assembleRelease,
+      # KHÔNG nằm trong jniLibs nguồn.
       # ==========================================================
       - name: Verify libpython in jniLibs
         run: |
@@ -420,7 +423,7 @@ jobs:
           echo ""
 
           MISSING=0
-          for lib in libpython3.13.so libpython_jni.so libffmpeg_jni.so; do
+          for lib in libpython3.13.so libssl.so libcrypto.so; do
             if [ ! -f "$JNI/$lib" ]; then
               echo "❌ $lib MISSING from jniLibs!"
               MISSING=1
