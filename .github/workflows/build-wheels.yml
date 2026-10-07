@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       packages:
-        description: 'Packages (cách nhau bằng dấu cách). Để trống = đọc từ wheels/list.txt'
+        description: 'Packages (cách nhau bằng dấu cách)'
         required: false
         default: ''
       force_rebuild:
-        description: 'Force rebuild tất cả (bỏ qua cache) — true/false'
+        description: 'Force rebuild — true/false'
         required: false
         default: 'false'
   push:
@@ -50,23 +50,19 @@ jobs:
       TARGET_HOST: "aarch64-linux-android"
 
     steps:
-      # ==========================================================
-      # 1. SETUP
-      # ==========================================================
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify p4a script exists
+      - name: Verify p4a script
         run: |
           if [ ! -f scripts/build-p4a-style.sh ]; then
             echo "❌ Missing scripts/build-p4a-style.sh"
-            echo "Please add the file to your repo (see workflow comments)"
             exit 1
           fi
           chmod +x scripts/build-p4a-style.sh
-          echo "✅ scripts/build-p4a-style.sh found"
+          echo "✅ OK"
 
       - name: Install Host Tools
         run: |
@@ -75,20 +71,14 @@ jobs:
           sudo sed -i 's|https://azure.archive.ubuntu.com|https://archive.ubuntu.com|g' \
             /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null || true
           sudo apt-get update \
-            -o Acquire::http::Timeout=15 \
-            -o Acquire::https::Timeout=15 \
-            -o Acquire::Retries=1 \
-            -o Acquire::ForceIPv4=true \
-            -qq || true
+            -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
+            -o Acquire::Retries=1 -o Acquire::ForceIPv4=true -qq || true
           sudo apt-get install -y --no-install-recommends \
             build-essential autoconf automake libtool \
             pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf \
             cmake ninja-build nasm
 
-      # ============================================================
-      # 1.5. TẢI WHEEL TỪ RELEASE GẦN NHẤT
-      # ============================================================
-      - name: Download previous wheels from latest release
+      - name: Download previous wheels
         id: prev
         continue-on-error: true
         env:
@@ -96,27 +86,20 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p wheels-out
-
           if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
-            echo "⚡ force_rebuild=true → bỏ qua cache"
+            echo "⚡ force_rebuild"
             echo "has_cache=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           LATEST_TAG=$(gh release list --limit 50 --json tagName -q '.[] | select(.tagName | startswith("wheels-")) | .tagName' | head -1 || echo "")
-
           if [ -z "$LATEST_TAG" ]; then
-            echo "Không có release wheels nào — build từ đầu"
             echo "has_cache=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
-          echo "Latest wheels tag: $LATEST_TAG"
-          gh release download "$LATEST_TAG" \
-            --pattern '*.whl' --dir wheels-out --clobber 2>&1 | tail -3 || true
-
+          echo "Tag: $LATEST_TAG"
+          gh release download "$LATEST_TAG" --pattern '*.whl' --dir wheels-out --clobber 2>&1 | tail -3 || true
           COUNT=$(ls wheels-out/*.whl 2>/dev/null | wc -l)
-          echo "Đã tải $COUNT wheel từ $LATEST_TAG"
+          echo "$COUNT wheel"
           [ "$COUNT" -gt 0 ] && echo "has_cache=true" >> "$GITHUB_OUTPUT" || echo "has_cache=false" >> "$GITHUB_OUTPUT"
 
       - name: Setup Android NDK r25c
@@ -128,9 +111,6 @@ jobs:
           echo "NDK=$HOME/ndk/android-ndk-r25c" >> "$GITHUB_ENV"
           echo "$HOME/ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
-      # ==========================================================
-      # 2. HOST PYTHON
-      # ==========================================================
       - name: Build Host Python
         run: |
           mkdir -p /tmp/build-host
@@ -164,9 +144,7 @@ jobs:
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
           echo "LDFLAGS=-L$DEPS_INSTALL/lib -Wl,--hash-style=both" >> "$GITHUB_ENV"
 
-      # ==========================================================
-      # 3. CROSS-COMPILE CORE DEPS
-      # ==========================================================
+      # ───────── Cross-compile deps (giữ nguyên như cũ) ─────────
       - name: Cross-Compile libffi
         run: |
           cd /tmp
@@ -188,8 +166,7 @@ jobs:
           ./Configure android-arm64 -D__ANDROID_API__=${{ env.ANDROID_API }} \
             --prefix="$DEPS_INSTALL" --openssldir="$DEPS_INSTALL/ssl" \
             shared no-engine no-tests no-async \
-            CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
-            -Wl,--hash-style=both
+            CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" -Wl,--hash-style=both
           make -j$(nproc)
           make install_sw
 
@@ -284,9 +261,6 @@ jobs:
           make -j$(nproc) "${MAKE_VARS[@]}"
           make "${MAKE_VARS[@]}" PREFIX="$DEPS_INSTALL" install
 
-      # ==========================================================
-      # 7. CROSS-COMPILE CPYTHON 3.13
-      # ==========================================================
       - name: Cross-Compile CPython
         run: |
           cd /tmp
@@ -315,7 +289,7 @@ jobs:
           sudo mkdir -p /data/data/com.nam2006.y2mate/files
           sudo ln -sfn "$GITHUB_WORKSPACE/python-android" /data/data/com.nam2006.y2mate/files/python
 
-      - name: Prepare pip for wheel building
+      - name: Prepare pip
         run: |
           SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
           mkdir -p "$SITE" /tmp/wheels_bootstrap
@@ -325,7 +299,7 @@ jobs:
             unzip -o -q "$whl" -d "$SITE"
           done
 
-      - name: Install build dependencies for wheels
+      - name: Install build dependencies
         run: |
           SITE="$GITHUB_WORKSPACE/python-android/lib/python3.13/site-packages"
           mkdir -p "$SITE"
@@ -355,9 +329,9 @@ jobs:
           done
           CLEAN=$(echo "$CLEAN" | xargs)
           echo "packages=$CLEAN" >> "$GITHUB_OUTPUT"
-          echo "📦 Sẽ build: $CLEAN"
+          echo "📦 $CLEAN"
 
-      - name: Setup Rust for cross-compile
+      - name: Setup Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
             sh -s -- -y --default-toolchain stable --profile minimal
@@ -374,9 +348,9 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # 11. BUILD WHEELS — 3 tầng fallback
+      # 11. BUILD WHEELS
       # ==========================================================
-      - name: Build wheels for Android aarch64
+      - name: Build wheels
         run: |
           set -eo pipefail
           HOST_PY="$HOST_PYTHON"
@@ -387,7 +361,7 @@ jobs:
 
           SYSCONF_FILE=$(ls "$TARGET_STDLIB"/_sysconfigdata__*.py 2>/dev/null | head -1)
           if [ -z "$SYSCONF_FILE" ]; then
-            echo "❌ Không tìm thấy _sysconfigdata*.py"
+            echo "❌ Không có _sysconfigdata"
             exit 1
           fi
           SYSCONF_NAME=$(basename "$SYSCONF_FILE" .py)
@@ -401,20 +375,23 @@ jobs:
           TARGET_INCLUDE="$TARGET_ROOT/include/python3.13"
           if [ -d "$TARGET_INCLUDE" ]; then
             cp -rf "$TARGET_INCLUDE/." "$HOST_INCLUDE/"
-            echo "✅ Headers copied"
           fi
 
-          # STUB librt.a
           mkdir -p "$DEPS_INSTALL/lib"
           if [ ! -f "$DEPS_INSTALL/lib/librt.a" ]; then
             ar rcs "$DEPS_INSTALL/lib/librt.a"
           fi
 
-          # ========================================================
-          # ENV CHUNG CHO CẢ 3 TẦNG
-          # ========================================================
+          # ─── NDK sysroot + clang builtin include ───
           NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          export NDK_SYSROOT
+          CLANG_VER=$(ls "$NDK/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/" | head -1)
+          CLANG_BUILTIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/$CLANG_VER/include"
+
+          echo "NDK_SYSROOT:   $NDK_SYSROOT"
+          echo "CLANG_BUILTIN: $CLANG_BUILTIN"
+
+          # ─── Cross-compile env ───
+          export NDK_SYSROOT CLANG_BUILTIN
           export _PYTHON_HOST_PLATFORM="linux_aarch64"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
@@ -423,7 +400,10 @@ jobs:
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
           export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
 
+          # QUAN TRỌNG: -nostdinc để bỏ hoàn toàn /usr/include + clang builtin
           export CFLAGS="-fPIC -O2 \
+            -nostdinc \
+            -I$CLANG_BUILTIN \
             -I$NDK_SYSROOT/usr/include \
             -I$NDK_SYSROOT/usr/include/aarch64-linux-android \
             -I$DEPS_INSTALL/include \
@@ -450,11 +430,11 @@ jobs:
           export OPENSSL_LIB_DIR="$DEPS_INSTALL/lib"
           export OPENSSL_INCLUDE_DIR="$DEPS_INSTALL/include"
 
+          # ─── EXPORT cho script con ───
+          export HOST_PY TARGET_ROOT TARGET_SITE TARGET_STDLIB
           export WHEELS_OUT="$GITHUB_WORKSPACE/wheels-out"
 
-          # ========================================================
-          # Helper: check wheel đã tồn tại
-          # ========================================================
+          # Helper: check wheel tồn tại
           wheel_exists() {
             local pkg="$1"
             local pkg_a pkg_b
@@ -463,9 +443,6 @@ jobs:
             ls wheels-out/${pkg_a}-*.whl wheels-out/${pkg_b}-*.whl 2>/dev/null | head -1 | grep -q '.whl'
           }
 
-          # ========================================================
-          # LOOP BUILD — 3 tầng fallback cho MỌI lib
-          # ========================================================
           SUCCESS_T1=""
           SUCCESS_T2=""
           SKIP_LIST=""
@@ -473,9 +450,9 @@ jobs:
 
           for pkg in ${{ steps.pkglist.outputs.packages }}; do
             echo ""
-            echo "════════════════════════════════════════════"
+            echo "════════════════════════════════════════"
             echo "📦 $pkg"
-            echo "════════════════════════════════════════════"
+            echo "════════════════════════════════════════"
 
             if wheel_exists "$pkg"; then
               echo "⏭️  Skip (đã có wheel)"
@@ -483,84 +460,93 @@ jobs:
               continue
             fi
 
-            # ────────────────────────────────────────────────
-            # TẦNG 1: pip wheel chuẩn
-            # ────────────────────────────────────────────────
-            echo "🔨 Tầng 1: pip wheel (chuẩn)"
+            # Tầng 1: pip wheel chuẩn
+            echo "🔨 Tầng 1: pip wheel"
             if "$HOST_PY" -m pip wheel "$pkg" \
                   --no-deps --no-build-isolation --no-binary=:all: \
-                  --wheel-dir wheels-out 2>&1 | tail -30; then
+                  --wheel-dir wheels-out 2>&1 | tail -20; then
               if wheel_exists "$pkg"; then
-                echo "✅ $pkg — Tầng 1 OK"
+                echo "✅ $pkg — Tầng 1"
                 SUCCESS_T1="$SUCCESS_T1 $pkg"
                 continue
               fi
             fi
 
-            # ────────────────────────────────────────────────
-            # TẦNG 2: p4a-style (safe cho mọi backend)
-            # ────────────────────────────────────────────────
+            # Tầng 2: p4a-style
             echo ""
             echo "🔨 Tầng 2: p4a-style"
-            if bash "$GITHUB_WORKSPACE/scripts/build-p4a-style.sh" "$pkg" 2>&1 | tail -40; then
+            if bash "$GITHUB_WORKSPACE/scripts/build-p4a-style.sh" "$pkg" 2>&1 | tail -30; then
               if wheel_exists "$pkg"; then
-                echo "✅ $pkg — Tầng 2 OK (p4a)"
+                echo "✅ $pkg — Tầng 2"
                 SUCCESS_T2="$SUCCESS_T2 $pkg"
                 continue
               fi
             fi
 
-            # ────────────────────────────────────────────────
-            # TẦNG 3: Fallback đặc biệt (meson + custom args)
-            # ────────────────────────────────────────────────
-            echo ""
-            echo "🔨 Tầng 3: p4a + meson setup-args"
-
-            # Danh sách lib cần meson args đặc biệt
-            MESON_ARGS=()
-            case "$pkg" in
-              numpy)
-                MESON_ARGS=("-Dblas=auto" "-Dlapack=auto" "-Dallow-noblas=False" "-Dlongdouble_format=IEEE_QUAD_LE")
-                ;;
-              scipy)
-                MESON_ARGS=("-Dblas=openblas" "-Dlapack=openblas" "-Dfortran_link_args=-L$DEPS_INSTALL/lib")
-                ;;
-              pandas)
-                MESON_ARGS=("-Dbuildtype=release")
-                ;;
-              *)
-                # Thử generic
-                MESON_ARGS=("-Dbuildtype=release")
-                ;;
-            esac
-
-            ARGS_BUILT=()
-            for a in "${MESON_ARGS[@]}"; do
-              ARGS_BUILT+=("--setup-args=$a")
-            done
-
-            if bash "$GITHUB_WORKSPACE/scripts/build-p4a-style.sh" "$pkg" "${ARGS_BUILT[@]}" 2>&1 | tail -40; then
-              if wheel_exists "$pkg"; then
-                echo "✅ $pkg — Tầng 3 OK (meson)"
-                SUCCESS_T2="$SUCCESS_T2 $pkg"
-                continue
-              fi
-            fi
-
-            echo "❌ $pkg — FAILED tất cả tầng"
+            echo "❌ $pkg — FAILED"
             FAIL_LIST="$FAIL_LIST $pkg"
           done
 
           echo ""
-          echo "════════════════════════════════════════════"
+          echo "════════════════════════════════════════"
           echo "📊 KẾT QUẢ"
-          echo "════════════════════════════════════════════"
-          echo "⏭️  Skipped:    $SKIP_LIST"
-          echo "✅ Tầng 1 OK:  $SUCCESS_T1"
-          echo "✅ Tầng 2/3 OK:$SUCCESS_T2"
+          echo "════════════════════════════════════════"
+          echo "⏭️  Skipped:   $SKIP_LIST"
+          echo "✅ Tầng 1:     $SUCCESS_T1"
+          echo "✅ Tầng 2:     $SUCCESS_T2"
           echo "❌ Failed:     $FAIL_LIST"
-          echo ""
           ls -lh wheels-out/ || echo "(rỗng)"
+
+      # ==========================================================
+      # 11.5. PATCH cryptography wheel — link libpython3.13.so
+      # ==========================================================
+      - name: Patch cryptography wheel
+        run: |
+          set -eo pipefail
+          CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1)
+          if [ -z "$CRYPTO_WHL" ]; then
+            echo "⚠️ Không có wheel cryptography"
+            exit 0
+          fi
+          echo "Wheel: $CRYPTO_WHL"
+
+          WORK="/tmp/patch-whl"
+          rm -rf "$WORK" && mkdir -p "$WORK"
+          cd "$WORK"
+          unzip -o -q "$CRYPTO_WHL"
+
+          RUST_SO=$(find . -name "_rust*.so" | head -1)
+          if [ -z "$RUST_SO" ]; then
+            echo "⚠️ Không có _rust.abi3.so"
+            exit 0
+          fi
+          echo "SO: $RUST_SO"
+
+          echo "=== Trước patch ==="
+          readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH" || echo "(không có)"
+
+          # Xoá RUNPATH cũ (nếu có) để tránh conflict
+          patchelf --remove-rpath "$RUST_SO" 2>/dev/null || true
+
+          # Thêm NEEDED libpython3.13.so (nếu chưa có)
+          if ! readelf -d "$RUST_SO" | grep -q "libpython3.13.so"; then
+            patchelf --add-needed libpython3.13.so "$RUST_SO"
+            echo "  Added NEEDED libpython3.13.so"
+          fi
+
+          # Set RUNPATH trỏ 5 cấp lên (tới python/lib/)
+          patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
+
+          echo "=== Sau patch ==="
+          readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH"
+
+          # Đóng gói lại
+          cd "$WORK"
+          rm -f "$CRYPTO_WHL"
+          zip -rq "$CRYPTO_WHL" .
+          echo ""
+          echo "✅ Đã patch: $CRYPTO_WHL"
+          ls -lh "$CRYPTO_WHL"
 
       # ==========================================================
       # 12. POST-PROCESS
@@ -593,26 +579,23 @@ jobs:
             fi
           done
 
-          echo "Copied mới: $COPIED / Skipped: $SKIPPED"
+          echo "Copied: $COPIED / Skipped: $SKIPPED"
           ls -lh wheels-final/ || echo "(rỗng)"
 
-      # ==========================================================
-      # 13. RELEASE
-      # ==========================================================
       - name: Generate release tag
         id: tag
         run: |
           TAG="wheels-$(date +%Y%m%d-%H%M%S)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Create release with wheels
+      - name: Create release
         if: hashFiles('wheels-final/*.whl') != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: Wheels ${{ steps.tag.outputs.tag }}
           body: |
-            Prebuilt wheels cho Android aarch64 / Python 3.13.
+            Wheels cho Android aarch64 / Python 3.13.
             Packages: ${{ steps.pkglist.outputs.packages }}
           files: wheels-final/*.whl
           generate_release_notes: false
@@ -620,10 +603,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ==========================================================
-      # 14. INDEX + COMMIT
-      # ==========================================================
-      - name: Generate pip index HTML
+      - name: Generate pip index
         if: hashFiles('wheels-final/*.whl') != ''
         run: |
           python3 scripts/gen_index.py \
@@ -632,7 +612,7 @@ jobs:
             ${{ github.event.repository.name }} \
             ${{ steps.tag.outputs.tag }}
 
-      - name: Commit docs index
+      - name: Commit docs
         if: hashFiles('wheels-final/*.whl') != ''
         run: |
           set -e
@@ -651,15 +631,11 @@ jobs:
             done
           fi
 
-      # ==========================================================
-      # 15. SUMMARY
-      # ==========================================================
       - name: Summary
         if: always()
         run: |
           echo "## 📦 Wheels Summary" >> $GITHUB_STEP_SUMMARY
           echo "**Release:** \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Index:** https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/simple/" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           ls -lh wheels-final/ >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "(không có)" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
