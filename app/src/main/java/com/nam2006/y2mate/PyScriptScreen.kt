@@ -80,10 +80,11 @@ fun PyScriptScreen() {
     var showPackages by remember { mutableStateOf(false) }
     var showEnv by remember { mutableStateOf(false) }
 
+    // KHÔNG dùng verticalScroll ở đây — MainContent đã scroll.
+    // Nếu để sẽ gây: "Vertically scrollable component was measured
+    // with an infinity maximum height constraints".
     Column(
-        Modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState()),
+        Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -190,6 +191,8 @@ fun PyScriptScreen() {
             }
         }
 
+        // Box này CÓ verticalScroll riêng — hợp lệ vì nằm trong Box
+        // có heightIn giới hạn (không phải infinite constraint).
         Box(
             Modifier
                 .fillMaxWidth()
