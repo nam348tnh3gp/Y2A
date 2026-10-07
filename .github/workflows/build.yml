@@ -280,7 +280,6 @@ jobs:
 
       - name: Strip Binaries and Patch Hardcoded Paths
         run: |
-          # Dùng strip từ NDK (llvm-strip) — nó giữ DT_HASH an toàn hơn strip của GNU
           find "$GITHUB_WORKSPACE/python-android" -name "*.so*" \
             -exec "$STRIP" --strip-unneeded {} \; 2>/dev/null || true
           "$STRIP" --strip-unneeded "$GITHUB_WORKSPACE/python-android/bin/python3.13" 2>/dev/null || true
@@ -409,6 +408,36 @@ jobs:
 
           echo "jniLibs final:"
           ls -lh app/src/main/jniLibs/arm64-v8a/
+
+      # ==========================================================
+      # SECTION 9.5: VERIFY libpython3.13.so CÓ TRONG jniLibs
+      # ==========================================================
+      - name: Verify libpython in jniLibs
+        run: |
+          JNI="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+          echo "=== jniLibs contents ==="
+          ls -lh "$JNI/"
+          echo ""
+
+          MISSING=0
+          for lib in libpython3.13.so libpython_jni.so libffmpeg_jni.so; do
+            if [ ! -f "$JNI/$lib" ]; then
+              echo "❌ $lib MISSING from jniLibs!"
+              MISSING=1
+            else
+              echo "✅ $lib present"
+            fi
+          done
+
+          if [ "$MISSING" -eq 1 ]; then
+            echo "=== python-android/lib contents ==="
+            ls -lh "$GITHUB_WORKSPACE/python-android/lib/" || true
+            exit 1
+          fi
+
+          echo ""
+          echo "=== hash sections of libpython3.13.so ==="
+          readelf -d "$JNI/libpython3.13.so" | grep -E "HASH" || echo "❌ No hash section"
 
       # ==========================================================
       # SECTION 10: BUILD APK
