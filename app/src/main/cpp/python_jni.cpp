@@ -90,10 +90,19 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     std::string sitePkgs = stdlib + "/site-packages";
     std::string pythonPath = stdlib + ":" + dynload + ":" + sitePkgs + ":" + filesDir;
     setenv("PYTHONPATH", pythonPath.c_str(), 1);
+    LOGI("PYTHONPATH = %s", pythonPath.c_str());
 
-    // Loader path cho libssl/libcrypto/etc.
-    std::string ldPath = std::string(nativeLibDir) + ":" + stdlib;
+    // ========================================================
+    // LD_LIBRARY_PATH — QUAN TRỌNG
+    // Bao gồm:
+    //   1. nativeLibDir   → chứa libpython3.13.so, libssl.so, libcrypto.so, ...
+    //   2. stdlib         → chứa thư viện phụ thuộc trong stdlib
+    //   3. pythonHome/lib → chứa libpython3.13.so gốc + các .so phụ
+    // ========================================================
+    std::string pyLibDir = std::string(pythonHome) + "/lib";
+    std::string ldPath = std::string(nativeLibDir) + ":" + stdlib + ":" + pyLibDir;
     setenv("LD_LIBRARY_PATH", ldPath.c_str(), 1);
+    LOGI("LD_LIBRARY_PATH = %s", ldPath.c_str());
 
     // SSL certs
     std::string caBundle = sitePkgs + "/certifi/cacert.pem";
