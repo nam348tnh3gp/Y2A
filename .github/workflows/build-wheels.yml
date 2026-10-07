@@ -544,29 +544,23 @@ jobs:
               echo "=== Patch Pillow setup.py ==="
               cp setup.py setup.py.bak
 
-              python3 - <<'PYEOF'
-import re
-with open('setup.py', 'r') as f:
-    content = f.read()
+              # Dùng printf để tránh vấn đề YAML block scalar
+              printf '%s\n' \
+                'import re' \
+                'with open("setup.py", "r") as f:' \
+                '    content = f.read()' \
+                'q1 = chr(34)' \
+                'q2 = chr(39)' \
+                'content = content.replace(q1+"/usr/local/include"+q1, q1+"/nonexistent/usrdir"+q1)' \
+                'content = content.replace(q2+"/usr/local/include"+q2, q2+"/nonexistent/usrdir"+q2)' \
+                'content = content.replace(q1+"/usr/include"+q1, q1+"/nonexistent/usrdir"+q1)' \
+                'content = content.replace(q2+"/usr/include"+q2, q2+"/nonexistent/usrdir"+q2)' \
+                'with open("setup.py", "w") as f:' \
+                '    f.write(content)' \
+                'print("Patched")' \
+                > /tmp/patch_pillow.py
 
-patterns = [
-    r'_include_dirs\.append\(["\']/usr/include["\']\)',
-    r'_include_dirs\.append\(["\']/usr/local/include["\']\)',
-    r'_include_dirs\s*=\s*\[["\']/usr/local/include["\'],\s*["\']/usr/include["\']\]',
-    r'_include_dirs\s*\+=\s*\[["\']/usr/local/include["\'],\s*["\']/usr/include["\']\]',
-]
-for p in patterns:
-    content = re.sub(p, 'pass  # patched out', content)
-
-content = content.replace('"/usr/local/include"', '"/nonexistent/usrdir"')
-content = content.replace("'/usr/local/include'", "'/nonexistent/usrdir'")
-content = content.replace('"/usr/include"', '"/nonexistent/usrdir"')
-content = content.replace("'/usr/include'", "'/nonexistent/usrdir'")
-
-with open('setup.py', 'w') as f:
-    f.write(content)
-print("✅ Patched")
-PYEOF
+              python3 /tmp/patch_pillow.py
 
               echo "=== setup.py đã patch ==="
               grep -c "nonexistent" setup.py || echo "(0)"
