@@ -70,14 +70,19 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      - name: Verify bridge script exists
+      - name: Verify bridge scripts exist
         run: |
           if [ ! -f app/src/main/python/yt_dlp_bridge.py ]; then
             echo "Missing app/src/main/python/yt_dlp_bridge.py"
             find app -name "yt_dlp_bridge.py" || true
             exit 1
           fi
-          echo "Bridge script found"
+          if [ ! -f app/src/main/python/py_runner.py ]; then
+            echo "Missing app/src/main/python/py_runner.py"
+            find app -name "py_runner.py" || true
+            exit 1
+          fi
+          echo "✅ Bridge scripts found"
 
       # ==========================================================
       # SECTION 2: VERSION BUMP
@@ -278,6 +283,23 @@ jobs:
             unzip -o -q "$whl" -d "$TARGET_SITE"
           done
 
+          echo "=== site-packages contents (top 20) ==="
+          ls "$TARGET_SITE" | head -20
+
+          echo "=== verify pip ==="
+          if [ ! -d "$TARGET_SITE/pip" ]; then
+            echo "❌ pip MISSING from site-packages!"
+            exit 1
+          fi
+          echo "✅ pip bundled"
+
+          echo "=== verify yt_dlp ==="
+          if [ ! -d "$TARGET_SITE/yt_dlp" ]; then
+            echo "❌ yt_dlp MISSING from site-packages!"
+            exit 1
+          fi
+          echo "✅ yt_dlp bundled"
+
       - name: Strip Binaries and Patch Hardcoded Paths
         run: |
           find "$GITHUB_WORKSPACE/python-android" -name "*.so*" \
@@ -348,7 +370,7 @@ jobs:
           ls -lh "$JNI/"
 
       # ==========================================================
-      # SECTION 8: PACKAGE RUNTIME TAR (không nén — dùng .tar thuần)
+      # SECTION 8: PACKAGE RUNTIME TAR + SCRIPTS
       # ==========================================================
       - name: Package Python Runtime into Assets
         run: |
@@ -356,7 +378,11 @@ jobs:
 
           cp "$GITHUB_WORKSPACE/app/src/main/python/yt_dlp_bridge.py" \
              "$GITHUB_WORKSPACE/app/src/main/assets/yt_dlp_bridge.py"
-          echo "yt_dlp_bridge.py copied"
+          echo "✅ yt_dlp_bridge.py copied"
+
+          cp "$GITHUB_WORKSPACE/app/src/main/python/py_runner.py" \
+             "$GITHUB_WORKSPACE/app/src/main/assets/py_runner.py"
+          echo "✅ py_runner.py copied"
 
           rm -f "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar" \
                 "$GITHUB_WORKSPACE/app/src/main/assets/python-runtime.tar.gz"
@@ -373,8 +399,17 @@ jobs:
             exit 1
           fi
 
-          echo "Tar contents:"
+          echo "Tar contents (first 10):"
           tar -tvf app/src/main/assets/python-runtime.tar | head -10
+
+          echo "Verify pip in tar:"
+          if tar -tf app/src/main/assets/python-runtime.tar | grep -q "site-packages/pip/"; then
+            echo "✅ pip in tar"
+          else
+            echo "❌ pip NOT in tar!"
+            exit 1
+          fi
+
           echo "Assets:"
           ls -lh app/src/main/assets/
 
@@ -411,9 +446,6 @@ jobs:
 
       # ==========================================================
       # SECTION 9.5: VERIFY libpython3.13.so CÓ TRONG jniLibs
-      # CHỈ kiểm tra các lib được copy thủ công vào jniLibs.
-      # libpython_jni.so và libffmpeg_jni.so do CMake build ở bước assembleRelease,
-      # KHÔNG nằm trong jniLibs nguồn.
       # ==========================================================
       - name: Verify libpython in jniLibs
         run: |
