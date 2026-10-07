@@ -1,5 +1,44 @@
 # Package build wheel Android aarch64 / Python 3.13
 # Format: tên[==version]
+
+# ============================================
+# BATCH 1: C ext thuần (tự chứa)
+# ============================================
+charset-normalizer
+MarkupSafe
+PyYAML
+cffi
+ujson
+msgpack
+regex
+
+# ============================================
+# BATCH 2: cần thư viện native (đã cross-compile)
+# ============================================
+lxml
+Pillow
+
+# ============================================
+# BATCH 3: crypto (Rust + OpenSSL)
+# ============================================
+cryptography
+
+# ============================================
+# BATCH 4: numpy với OpenBLAS (không Fortran)
+# Test trước khi thêm scipy/pandas
+# ============================================
+numpy
+
+# ============================================
+# KHÔNG build — cần Fortran thực sự
+# ============================================
+# scipy
+# pandas
+# scikit-learn
+# matplotlib
+# Package build wheel Android aarch64 / Python 
+3.13
+# Format: tên[==version]
 # Không có version → lấy bản mới nhất
 # Dấu # → comment, không build
 
