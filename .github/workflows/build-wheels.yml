@@ -137,7 +137,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential autoconf automake libtool \
             pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf \
-            cmake ninja-build nasm
+            cmake ninja-build nasm binutils
 
       # ============================================================
       # Cleanup releases cũ
@@ -168,7 +168,7 @@ jobs:
           echo "✅ Cleanup done"
 
       # ============================================================
-      # Tải wheel cũ — lọc bỏ wheel link glibc
+      # Tải wheel cũ — lọc bỏ wheel link glibc + wheel cryptography cũ
       # ============================================================
       - name: Download previous wheels
         id: prev
@@ -196,6 +196,12 @@ jobs:
 
             if echo "$base" | grep -qE '\.android_[0-9]+_[a-z0-9_]+\.'; then
               echo "🗑️  Tên nhân tag: $base"
+              continue
+            fi
+
+            # [FIX] Bỏ cryptography cũ — phải rebuild với PyO3 config
+            if [[ "$base" == cryptography-* ]]; then
+              echo "🗑️  cryptography cũ (rebuild với PyO3 config): $base"
               continue
             fi
 
@@ -392,6 +398,13 @@ jobs:
           cd "Python-${{ env.PYTHON_VERSION }}"
           printf '%s\n' '*disabled*' '_crypt' '_nis' 'spwd' 'ossaudiodev' \
             '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' > Modules/Setup.local
+
+          export LDSHARED="$CC -shared -Wl,--hash-style=both"
+          export BLDSHARED="$CC -shared -Wl,--hash-style=both"
+          export CCSHARED="-fPIC -Wl,--hash-style=both"
+          export LDCXXSHARED="$CXX -shared -Wl,--hash-style=both"
+          export LINKFORSHARED="-Wl,--hash-style=both -Xlinker -export-dynamic"
+
           LDFLAGS="-L$DEPS_INSTALL/lib -Wl,--hash-style=both" \
           OPENSSL_CFLAGS="-I$DEPS_INSTALL/include" OPENSSL_LIBS="-L$DEPS_INSTALL/lib -lssl -lcrypto" \
           LIBFFI_CFLAGS="-I$DEPS_INSTALL/include" LIBFFI_LIBS="-L$DEPS_INSTALL/lib -lffi" \
@@ -405,7 +418,17 @@ jobs:
             --with-openssl="$DEPS_INSTALL" \
             ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
             ac_cv_buggy_getaddrinfo=no ac_cv_little_endian_double=yes
-          make
+
+          sed -i "s|^LDSHARED=.*|LDSHARED= $CC -shared -Wl,--hash-style=both|" Makefile
+          sed -i "s|^BLDSHARED=.*|BLDSHARED= $CC -shared -Wl,--hash-style=both|" Makefile
+          sed -i "s|^CCSHARED=.*|CCSHARED= -fPIC -Wl,--hash-style=both|" Makefile
+          sed -i "s|^LDCXXSHARED=.*|LDCXXSHARED= $CXX -shared -Wl,--hash-style=both|" Makefile
+          sed -i "s|^LINKFORSHARED=.*|LINKFORSHARED= -Wl,--hash-style=both -Xlinker -export-dynamic|" Makefile
+
+          make \
+            LDSHARED="$CC -shared -Wl,--hash-style=both" \
+            BLDSHARED="$CC -shared -Wl,--hash-style=both" \
+            CCSHARED="-fPIC -Wl,--hash-style=both"
           make install
 
       - name: Symlink target Python path
@@ -545,7 +568,7 @@ jobs:
           export PYTHONPATH="$SYSCONF_DIR:$TARGET_SITE"
           export PATH="$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
-          export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
+          export STRIP="$STRIP" LDSHARED="$CC -shared -Wl,--hash-style=both" CPP="$CC -E" READELF="$READELF"
 
           export CFLAGS="-fPIC -O2 \
             -nostdinc \
@@ -679,9 +702,9 @@ jobs:
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
-      # PATCH cryptography wheel
+      # VERIFY cryptography wheel links libpython (p4a-style)
       # ==========================================================
-      - name: Patch cryptography wheel
+      - name: Verify cryptography wheel links libpython
         run: |
           set -eo pipefail
           CRYPTO_WHL=$(ls wheels-out/cryptography-*linux_aarch64.whl 2>/dev/null | head -1 || true)
@@ -689,13 +712,13 @@ jobs:
             CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1 || true)
           fi
           if [ -z "$CRYPTO_WHL" ]; then
-            echo "⚠️ Không có wheel cryptography"
+            echo "⚠️ Không có wheel cryptography — skip"
             exit 0
           fi
           CRYPTO_WHL=$(realpath "$CRYPTO_WHL")
           echo "Wheel: $CRYPTO_WHL"
 
-          WORK="/tmp/patch-whl"
+          WORK="/tmp/verify-crypto"
           rm -rf "$WORK" && mkdir -p "$WORK"
           cd "$WORK"
           unzip -o -q "$CRYPTO_WHL"
@@ -707,48 +730,43 @@ jobs:
           fi
           echo "SO: $RUST_SO"
 
-          if readelf -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
-            echo "✅ Wheel đã patch — skip"
-            exit 0
-          fi
-
-          echo "=== Trước patch ==="
+          echo "=== Dynamic section ==="
           readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH" || echo "(không có)"
 
-          patchelf --remove-rpath "$RUST_SO" 2>/dev/null || true
-          patchelf --add-needed "libpython${PYTHON_MINOR}.so" "$RUST_SO"
-          patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
+          # Verify cứng — fail nếu thiếu NEEDED libpython
+          if ! readelf -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
+            echo ""
+            echo "❌ FAIL: _rust.abi3.so THIẾU NEEDED libpython${PYTHON_MINOR}.so"
+            echo "   PyO3 build không link tường minh"
+            exit 1
+          fi
 
-          echo "=== Sau patch ==="
-          readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH"
-
-          CRYPTO_WHL="$CRYPTO_WHL" RUST_SO_REL="$RUST_SO" "$HOST_PYTHON" - <<'PYEOF'
+          if ! readelf -d "$RUST_SO" | grep -qE "RPATH|RUNPATH"; then
+            echo "⚠️  Thiếu RPATH — patching để thêm"
+            patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
+            # Repack
+            CRYPTO_WHL="$CRYPTO_WHL" "$HOST_PYTHON" - <<'PYEOF'
           import base64, hashlib, csv, os, zipfile, tempfile, shutil
           whl = os.environ["CRYPTO_WHL"]
-          rust_rel = os.environ["RUST_SO_REL"].lstrip("./")
           tmp = tempfile.mkdtemp()
           try:
               with zipfile.ZipFile(whl, 'r') as z:
                   z.extractall(tmp)
-              record_path = None
               for root, _, files in os.walk(tmp):
                   if 'RECORD' in files and '.dist-info' in root:
-                      record_path = os.path.join(root, 'RECORD')
-              if record_path:
-                  with open(record_path, 'r', newline='') as f:
-                      rows = list(csv.reader(f))
-                  new_rows = []
-                  for row in rows:
-                      if len(row) >= 3 and row[0] == rust_rel:
-                          full = os.path.join(tmp, rust_rel)
-                          with open(full, 'rb') as fh:
-                              data = fh.read()
-                          digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()
-                          row = [row[0], f'sha256={digest}', str(len(data))]
-                      new_rows.append(row)
-                  with open(record_path, 'w', newline='') as f:
-                      csv.writer(f).writerows(new_rows)
-                  print("✅ RECORD updated")
+                      rp = os.path.join(root, 'RECORD')
+                      with open(rp, 'r', newline='') as f:
+                          rows = list(csv.reader(f))
+                      for r in rows:
+                          if len(r) >= 3 and r[0].endswith('_rust.abi3.so'):
+                              full = os.path.join(tmp, r[0])
+                              with open(full, 'rb') as fh:
+                                  data = fh.read()
+                              d = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()
+                              r[1] = f'sha256={d}'
+                              r[2] = str(len(data))
+                      with open(rp, 'w', newline='') as f:
+                          csv.writer(f).writerows(rows)
               out = whl + '.tmp'
               with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
                   for root, _, files in os.walk(tmp):
@@ -759,11 +777,13 @@ jobs:
           finally:
               shutil.rmtree(tmp, ignore_errors=True)
           PYEOF
+          fi
 
-          echo "✅ Đã patch: $CRYPTO_WHL"
+          echo ""
+          echo "✅ cryptography wheel OK — có NEEDED libpython${PYTHON_MINOR}.so"
 
       # ==========================================================
-      # POST-PROCESS — parse & ghi đè tag
+      # POST-PROCESS
       # ==========================================================
       - name: Post-process wheels
         env:
@@ -900,9 +920,6 @@ jobs:
             ${{ github.event.repository.name }} \
             ${{ steps.tag.outputs.tag }}
 
-      # ==========================================================
-      # VERIFY pip index — docs/index.html auto-create, không fail
-      # ==========================================================
       - name: Verify pip index (docs/simple)
         if: hashFiles('wheels-final/*.whl') != ''
         env:
@@ -941,7 +958,7 @@ jobs:
           fi
 
           if [ ! -f "docs/simple/index.html" ]; then
-            echo "❌ Thiếu docs/simple/index.html — pip sẽ không dùng được"
+            echo "❌ Thiếu docs/simple/index.html"
             FAIL=$((FAIL+1))
           else
             echo "✅ docs/simple/index.html"
@@ -993,9 +1010,6 @@ jobs:
           echo "✅ docs/simple/ OK"
           exit 0
 
-      # ==========================================================
-      # COMMIT docs — push lên Pages
-      # ==========================================================
       - name: Commit docs
         if: hashFiles('wheels-final/*.whl') != ''
         env:
@@ -1013,8 +1027,6 @@ jobs:
           git checkout -- . 2>/dev/null || true
           git reset --hard HEAD 2>/dev/null || true
           git clean -fd -x -e wheels-out -e wheels-final 2>/dev/null || true
-          echo "=== git status sau cleanup ==="
-          git status --short || true
           for i in 1 2 3 4 5; do
             echo "=== Attempt $i ==="
             if git pull --rebase origin "${{ github.ref_name }}" && \
