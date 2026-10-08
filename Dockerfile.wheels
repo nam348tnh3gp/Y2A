@@ -31,13 +31,16 @@ ENV PYTHON_VERSION=3.13.1 \
     ANDROID_TAG=android_24_arm64_v8a \
     NDK_VERSION=r25c
 
-# ---- Build tools ----
+# ---- Build tools + dev headers cho host Python ----
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         build-essential autoconf automake libtool \
         pkg-config wget curl unzip git xz-utils \
         python3 python3-pip patchelf cmake ninja-build nasm \
-        binutils file sudo jq && \
+        binutils file sudo jq \
+        zlib1g-dev libssl-dev libffi-dev libbz2-dev libreadline-dev \
+        libsqlite3-dev liblzma-dev libncurses5-dev libgdbm-dev \
+        libnss3-dev uuid-dev tk-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # ============================================================
@@ -51,11 +54,18 @@ RUN mkdir -p /tmp/build-host && cd /tmp/build-host && \
     tar -xf "Python-${PYTHON_VERSION}.tar.xz" && \
     cd "Python-${PYTHON_VERSION}" && \
     env -u CC -u CXX -u AR -u RANLIB -u STRIP -u READELF -u LDSHARED -u CFLAGS -u LDFLAGS -u CPPFLAGS \
-        ./configure --prefix=/opt/host-python --disable-optimizations --enable-shared && \
+        ./configure \
+            --prefix=/opt/host-python \
+            --disable-optimizations \
+            --enable-shared \
+            --with-ensurepip=install && \
     env -u CC -u CXX make -j$(nproc) && \
     make install && \
     ldconfig && \
+    echo "/opt/host-python/lib" > /etc/ld.so.conf.d/host-python.conf && \
+    ldconfig && \
     ${HOST_PYTHON} --version && \
+    ${HOST_PYTHON} -c "import zlib, ssl, sqlite3, ctypes; print('OK: zlib+ssl+sqlite3+ctypes')" && \
     rm -rf /tmp/build-host
 
 # ============================================================
