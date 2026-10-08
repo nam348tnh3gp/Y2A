@@ -37,7 +37,6 @@ rm -rf "/tmp/Python-${PYTHON_VERSION}"
 tar -xf "$TARBALL"
 cd "Python-${PYTHON_VERSION}"
 
-# Disable modules không có trên Android
 printf '%s\n' '*disabled*' '_crypt' '_nis' 'spwd' 'ossaudiodev' \
     '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' \
     '_uuid' > Modules/Setup.local
@@ -75,13 +74,13 @@ make -j$(nproc) \
 make install
 
 # ════════════════════════════════════════════════════════════
-# Verify hash tables
+# Verify — [FIX] tất cả `$(...)` thêm `|| true`
 # ════════════════════════════════════════════════════════════
 echo ""
 echo "🔍 Verify DT_HASH + DT_GNU_HASH trên libpython..."
 LP="${TARGET_ROOT}/lib/libpython3.13.so"
 if [ -f "$LP" ]; then
-    SYSV=$(${READELF} --dynamic "$LP" 2>/dev/null | grep -E "\(HASH\)" | grep -v "GNU_HASH" | wc -l)
+    SYSV=$(${READELF} --dynamic "$LP" 2>/dev/null | grep -E "\(HASH\)" | grep -v "GNU_HASH" | wc -l || true)
     GNU=$(${READELF} --dynamic "$LP" 2>/dev/null | grep -c "GNU_HASH" || true)
     echo "  libpython3.13.so: SysV=$SYSV GNU=$GNU"
     if [ "$SYSV" -eq 0 ]; then
@@ -93,9 +92,6 @@ else
     exit 1
 fi
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Verify PyLong_Type — dùng llvm-nm thay vì readelf
-# ════════════════════════════════════════════════════════════
 echo ""
 echo "🔍 Verify PyLong_Type trong .dynsym..."
 LLVM_NM="${NDK_TOOLCHAIN}/bin/llvm-nm"
@@ -116,22 +112,39 @@ else
     exit 1
 fi
 
-# ════════════════════════════════════════════════════════════
-# Verify critical extensions
-# ════════════════════════════════════════════════════════════
+echo ""
+echo "🔍 Verify critical extensions..."
 LIBDYLOAD="${TARGET_ROOT}/lib/python3.13/lib-dynload"
 if [ -d "$LIBDYLOAD" ]; then
-    echo ""
-    echo "🔍 Verify critical extensions..."
     CRITICAL="_lzma _sqlite3 _ssl _ctypes _hashlib _socket _posixsubprocess zlib binascii"
+    MISSING=""
+    OK_COUNT=0
     for mod in $CRITICAL; do
-        FOUND=$(ls "$LIBDYLOAD"/${mod}.*.so 2>/dev/null | head -1)
+        # [FIX] `|| true` để set -e không crash khi glob không match
+        FOUND=$(ls "$LIBDYLOAD"/${mod}.*.so 2>/dev/null | head -1 || true)
         if [ -n "$FOUND" ]; then
             echo "  ✅ $(basename "$FOUND")"
+            OK_COUNT=$((OK_COUNT+1))
         else
             echo "  ⚠️  Thiếu: $mod"
+            MISSING="$MISSING $mod"
         fi
     done
+    echo ""
+    echo "  Tổng: $OK_COUNT OK / bị thiếu:$MISSING"
+
+    # [FIX] Chỉ fail nếu thiếu module CRITICAL (bắt buộc cho pip + yt-dlp)
+    MUST_HAVE="_sqlite3 _ssl _ctypes zlib binascii"
+    HARD_FAIL=""
+    for mod in $MUST_HAVE; do
+        if echo "$MISSING" | grep -qw "$mod"; then
+            HARD_FAIL="$HARD_FAIL $mod"
+        fi
+    done
+    if [ -n "$HARD_FAIL" ]; then
+        echo "  ❌ Thiếu module bắt buộc:$HARD_FAIL"
+        exit 1
+    fi
 fi
 
 echo ""
