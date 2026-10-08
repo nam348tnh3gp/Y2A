@@ -1,5 +1,13 @@
 #!/bin/bash
-# build-p4a-style.sh — Generic p4a-style builder cho MỌI lib
+# build-p4a-style.sh — Generic p4a-style builder
+#
+# Áp dụng chuẩn p4a:
+#   - _PYTHON_HOST_PLATFORM = aarch64-linux-android (không phải linux_aarch64)
+#   - --plat-name=android_24_arm64_v8a (wheel tag đúng ngay từ đầu)
+#   - TARGET_PYTHON_EXE (build system biết python target)
+#   - BLAS qua CXXFLAGS (numpy 2.x meson)
+#   - Sandbox compiler wrapper
+
 set -eo pipefail
 
 PKG_SPEC="${1:-}"
@@ -47,6 +55,7 @@ if ! "$HOST_PY" -m pip download "$PKG_SPEC" \
   cd "$TMP_BUILD"
   if "$HOST_PY" -m pip wheel "$PKG_SPEC" \
         --no-deps --no-build-isolation \
+        --config-settings="--build-option=--plat-name=${ANDROID_TAG}" \
         --wheel-dir "$WHEELS_OUT" > "$LOG" 2>&1; then
     tail -20 "$LOG"
     exit 0
@@ -143,16 +152,21 @@ make_wrapper gcc-ar "$AR"
 make_wrapper gcc-ranlib "$RANLIB"
 
 # ============================================================
-# 5. ENV p4a-STYLE
+# 5. ENV p4a-STYLE — [FIX] theo chuẩn p4a
 # ============================================================
 export PATH="$SANDBOX:$TMP_BUILD:$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
 
 echo "  which gcc:  $(which gcc 2>/dev/null || echo NOT_FOUND)"
 echo "  which g++:  $(which g++ 2>/dev/null || echo NOT_FOUND)"
 
-export _PYTHON_HOST_PLATFORM="$ANDROID_TAG"
+# [FIX] p4a dùng target triplet, KHÔNG dùng linux_aarch64
+export _PYTHON_HOST_PLATFORM="aarch64-linux-android"
 export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
 export TARGET_PYTHON_EXE="$TARGET_ROOT/bin/python${PY_MINOR}"
+
+# [FIX] p4a-style: pass target triplet cho autoconf
+export ac_cv_host="aarch64-linux-android"
+export host_alias="aarch64-linux-android"
 
 unset FC F77 F90
 
@@ -180,6 +194,11 @@ export CMAKE_ANDROID_API="$ANDROID_API"
 export ac_cv_prog_CC="$CC"
 export ac_cv_prog_CXX="$CXX"
 
+# [FIX] BLAS qua CXXFLAGS thay vì site.cfg (numpy 2.x meson)
+export CXXFLAGS="${CXXFLAGS:-} -I$DEPS_INSTALL/include -L$DEPS_INSTALL/lib"
+export CFLAGS="${CFLAGS:-} -I$DEPS_INSTALL/include -L$DEPS_INSTALL/lib"
+
+# NumPy BLAS env
 export NPY_DISABLE_SVML=1
 export NPY_USE_BLAS_ILP64=0
 export NPY_BLAS_LIBS="-lopenblas"
@@ -211,7 +230,7 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
 echo "  RUSTFLAGS:        $RUSTFLAGS"
 
 # ============================================================
-# 6. site.cfg cho numpy/scipy
+# 6. site.cfg cho numpy/scipy (fallback, vẫn giữ để an toàn)
 # ============================================================
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
   cat > "$SRC_PATH/site.cfg" <<EOF
@@ -227,6 +246,7 @@ fi
 # 7. SETUP-ARGS THEO BACKEND
 # ============================================================
 SETUP_ARGS=()
+PLAT_NAME_ARG="--config-settings=--build-option=--plat-name=${ANDROID_TAG}"
 
 case "$BACKEND" in
   *meson*)
@@ -248,6 +268,8 @@ case "$BACKEND" in
     export PYO3_CONFIG_FILE="$PYO3_CONFIG"
     export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -C link-arg=-Wl,--hash-style=both"
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
+    # Maturin dùng --plat-name khác
+    PLAT_NAME_ARG="--compatibility=android"
     ;;
   *)
     echo "  → $BACKEND backend"
@@ -346,20 +368,8 @@ EOF
     echo "  → lxml: dùng stub librt.a + force CC"
     ;;
 
-  cryptography)
-    echo "  → cryptography: Rust + PyO3 link tường minh libpython"
-    export PYO3_PYTHON="$HOST_PY"
-    export PYO3_CROSS=1
-    export PYO3_CROSS_PYTHON_VERSION="$PY_MINOR"
-    export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
-    export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
-    export PYO3_CONFIG_FILE="$PYO3_CONFIG"
-    export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -C link-arg=-Wl,--hash-style=both"
-    export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
-    ;;
-
-  bcrypt|nh3|pydantic-core|orjson|tokenizers)
-    echo "  → $PKG_NAME: Rust + PyO3 link tường minh"
+  cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
+    echo "  → $PKG_NAME: Rust + PyO3 link tường minh libpython"
     export PYO3_PYTHON="$HOST_PY"
     export PYO3_CROSS=1
     export PYO3_CROSS_PYTHON_VERSION="$PY_MINOR"
@@ -372,18 +382,20 @@ EOF
 esac
 
 # ============================================================
-# 9. BUILD WHEEL
+# 9. BUILD WHEEL — [FIX] thêm --plat-name
 # ============================================================
 cd "$SRC_PATH"
 
 echo ""
 echo "  setup-args: ${SETUP_ARGS[*]}"
+echo "  plat-name:  $ANDROID_TAG"
 echo ""
 
 RC=0
 if [ "${#SETUP_ARGS[@]}" -gt 0 ]; then
   if "$HOST_PY" -m pip wheel . \
         --no-deps --no-build-isolation \
+        "${PLAT_NAME_ARG}" \
         "${SETUP_ARGS[@]}" \
         --wheel-dir "$WHEELS_OUT" > "$LOG" 2>&1; then
     RC=0
@@ -393,6 +405,7 @@ if [ "${#SETUP_ARGS[@]}" -gt 0 ]; then
 else
   if "$HOST_PY" -m pip wheel . \
         --no-deps --no-build-isolation \
+        "${PLAT_NAME_ARG}" \
         --wheel-dir "$WHEELS_OUT" > "$LOG" 2>&1; then
     RC=0
   else
@@ -436,15 +449,27 @@ fi
 rm -f "$CT" "$CO"
 
 # ============================================================
-# 12. VERIFY WHEEL BIONIC
+# 12. VERIFY WHEEL BIONIC + TAG
 # ============================================================
 echo ""
-echo "🔍 Verify bionic cho wheel vừa build..."
+echo "🔍 Verify wheel vừa build..."
 GLIBC_PAT='libc\.so\.6|ld-linux|libm\.so\.6|libpthread\.so\.0'
 WHEEL_FOUND=0
 for whl in "$WHEELS_OUT"/${PKG_NAME//-/_}-*.whl "$WHEELS_OUT"/${PKG_NAME}-*.whl; do
   [ -f "$whl" ] || continue
   WHEEL_FOUND=1
+  base=$(basename "$whl")
+
+  # [FIX] Verify tag đúng
+  if [[ "$base" == *"${ANDROID_TAG}"* ]]; then
+    echo "  ✅ tag OK: $base"
+  elif [[ "$base" == *"none-any"* ]]; then
+    echo "  ⏭️  pure python: $base"
+  else
+    echo "  ⚠️  tag không phải ${ANDROID_TAG}: $base"
+  fi
+
+  # Verify bionic
   work=$(mktemp -d)
   unzip -q -o "$whl" -d "$work"
   bad=0
@@ -457,7 +482,7 @@ for whl in "$WHEELS_OUT"/${PKG_NAME//-/_}-*.whl "$WHEELS_OUT"/${PKG_NAME}-*.whl;
   done < <(find "$work" -name "*.so")
   rm -rf "$work"
   if [ "$bad" -eq 0 ]; then
-    echo "  ✅ $(basename "$whl")"
+    echo "  ✅ bionic OK: $(basename "$whl")"
   fi
 done
 
