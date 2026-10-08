@@ -36,6 +36,7 @@ typedef void        (*PyGILState_Release_t)(PyGILState_STATE);
 typedef void*       (*PyEval_SaveThread_t)();
 typedef void        (*PyEval_RestoreThread_t)(void*);
 typedef void        (*PyErr_Clear_t)();
+typedef int         (*Py_IsInitialized_t)();
 
 static void* g_libpython = nullptr;
 static bool  g_initialized = false;
@@ -60,6 +61,7 @@ static PyGILState_Release_t    p_PyGILState_Release = nullptr;
 static PyEval_SaveThread_t     p_PyEval_SaveThread = nullptr;
 static PyEval_RestoreThread_t  p_PyEval_RestoreThread = nullptr;
 static PyErr_Clear_t           p_PyErr_Clear = nullptr;
+static Py_IsInitialized_t      p_Py_IsInitialized = nullptr;
 
 extern "C" {
 
@@ -99,6 +101,9 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     //   2. stdlib         → chứa thư viện phụ thuộc trong stdlib
     //   3. pythonHome/lib → chứa libpython3.13.so gốc + các .so phụ
     // ========================================================
+    // [FIX] Bắt buộc phải có pythonHome/lib ở đây — thiếu sẽ khiến
+    //       linker resolve _posixsubprocess.so → libpython3.13.so
+    //       sang bản khác không có DT_HASH → dlopen fail.
     std::string pyLibDir = std::string(pythonHome) + "/lib";
     std::string ldPath = std::string(nativeLibDir) + ":" + stdlib + ":" + pyLibDir;
     setenv("LD_LIBRARY_PATH", ldPath.c_str(), 1);
@@ -160,6 +165,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     LOAD(PyEval_SaveThread)
     LOAD(PyEval_RestoreThread)
     LOAD(PyErr_Clear)
+    LOAD(Py_IsInitialized)
     #undef LOAD
 
     if (!p_Py_Initialize || !p_PyRun_SimpleString ||
@@ -175,6 +181,16 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     // ========================================================
     // Init Python
     // ========================================================
+    // [FIX] Chống double-init nếu có nhiều entry-point gọi nativeInit
+    if (p_Py_IsInitialized && p_Py_IsInitialized()) {
+        LOGW("⚠️ Python đã init trước đó — skip Py_Initialize");
+        g_initialized = true;
+        env->ReleaseStringUTFChars(jNativeLibDir, nativeLibDir);
+        env->ReleaseStringUTFChars(jPythonHome, pythonHome);
+        env->ReleaseStringUTFChars(jFilesDir, filesDir);
+        return JNI_TRUE;
+    }
+
     p_Py_Initialize();
 
     if (p_Py_GetVersion) {
@@ -206,6 +222,22 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     LOGI("Test import sqlite3: rc=%d", rc);
     if (rc != 0) {
         LOGW("⚠️ _sqlite3 không load được");
+        if (p_PyErr_Print) p_PyErr_Print();
+    }
+
+    // Test import _posixsubprocess (extension hay bị lỗi DT_HASH)
+    rc = p_PyRun_SimpleString("import _posixsubprocess; print('POSIX_SUBPROCESS_OK')");
+    LOGI("Test import _posixsubprocess: rc=%d", rc);
+    if (rc != 0) {
+        LOGW("⚠️ _posixsubprocess không load được — pip sẽ fail");
+        if (p_PyErr_Print) p_PyErr_Print();
+    }
+
+    // Test import subprocess (dùng _posixsubprocess)
+    rc = p_PyRun_SimpleString("import subprocess; print('SUBPROCESS_OK')");
+    LOGI("Test import subprocess: rc=%d", rc);
+    if (rc != 0) {
+        LOGW("⚠️ subprocess không load được");
         if (p_PyErr_Print) p_PyErr_Print();
     }
 
@@ -271,8 +303,12 @@ Java_com_nam2006_y2mate_PythonBridge_nativeCallFunction(
                     PyObject *pStr = p_PyObject_Str(pResult);
                     if (pStr) {
                         const char *r = p_PyUnicode_AsUTF8 ? p_PyUnicode_AsUTF8(pStr) : nullptr;
-                        if (r) out = r;
-                        else if (p_PyErr_Clear) p_PyErr_Clear();
+                        if (r) {
+                            out = r;
+                        } else {
+                            if (p_PyErr_Clear) p_PyErr_Clear();
+                            out = "{\"success\":false,\"error\":\"Cannot serialize result\"}";
+                        }
                         if (p_Py_DecRef) p_Py_DecRef(pStr);
                     }
                     if (p_Py_DecRef) p_Py_DecRef(pResult);
@@ -308,10 +344,15 @@ Java_com_nam2006_y2mate_PythonBridge_nativeFinalize(
         p_Py_Finalize();
         g_initialized = false;
     }
-    if (g_libpython) {
-        dlclose(g_libpython);
-        g_libpython = nullptr;
-    }
+    // [FIX] KHÔNG dlclose(libpython) — extension .so (_ssl, _sqlite3,
+    //       _posixsubprocess) vẫn giữ con trỏ symbol tới libpython.
+    //       dlclose sẽ unmap symbol table → crash nếu Py_Initialize lại
+    //       hoặc có native thread còn dùng. Để OS dọn khi process exit.
+    //
+    // if (g_libpython) {
+    //     dlclose(g_libpython);
+    //     g_libpython = nullptr;
+    // }
 }
 
 } // extern "C"
