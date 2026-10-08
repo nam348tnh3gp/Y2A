@@ -19,7 +19,7 @@ COMMON_LDFLAGS="-Wl,--hash-style=both"
 COMMON_CONFIGURE_FLAGS="--host=${TARGET_HOST} --prefix=${DEPS_INSTALL} --enable-static --disable-shared"
 
 # KHÔNG thêm DEPS_INSTALL/bin vào PATH global
-# (tránh shadow host binary xz, xmllint, ... khi extract tar)
+# (tránh shadow host binary xz, xmllint, ...)
 export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="${DEPS_INSTALL}/lib/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR=""
@@ -91,8 +91,7 @@ cd "xz-${XZ_VERSION}"
 make -j$(nproc) install
 cd ..
 
-# [FIX] Xoá ARM binary khỏi DEPS_INSTALL/bin
-# (chỉ giữ .pc + *-config scripts chạy được trên host)
+# Xoá ARM binary khỏi DEPS_INSTALL/bin
 for bin in xz xzdec lzma unlzma unxz lzcat lzma-config xz-config; do
     if [ -f "${DEPS_INSTALL}/bin/${bin}" ]; then
         if file "${DEPS_INSTALL}/bin/${bin}" 2>/dev/null | grep -q "ELF"; then
@@ -141,22 +140,20 @@ echo "  ✅ libxml2 + xml2-config OK"
 echo "  xml2-config --cflags: $(${DEPS_INSTALL}/bin/xml2-config --cflags)"
 
 # ═══════════════════════════════════════════════════════════
-# libxslt
+# libxslt — chỉ build libxslt + libexslt (skip xsltproc)
 # ═══════════════════════════════════════════════════════════
 echo ""
-echo "═══ libxslt ═══"
+echo "═══ libxslt (skip xsltproc) ═══"
 wget -q "https://download.gnome.org/sources/libxslt/1.1/libxslt-${LIBXSLT_VERSION}.tar.xz"
 tar -xf "libxslt-${LIBXSLT_VERSION}.tar.xz"
 cd "libxslt-${LIBXSLT_VERSION}"
 
-# [FIX] Ép cứng include path của libxml2 vào CPPFLAGS/CFLAGS
-# để libtool compile .lo file dùng đúng header (không phụ thuộc
-# xml2-config output bị lỗi khi cross-compile)
+# Ép cứng include path của libxml2 vào CPPFLAGS/CFLAGS
 export CPPFLAGS="-I${DEPS_INSTALL}/include -I${DEPS_INSTALL}/include/libxml2 ${CPPFLAGS:-}"
 export CFLAGS="-I${DEPS_INSTALL}/include -I${DEPS_INSTALL}/include/libxml2 ${CFLAGS:-}"
 export LDFLAGS="${COMMON_LDFLAGS} -L${DEPS_INSTALL}/lib"
 
-# Temp PATH cho configure tìm xml2-config
+# Temp PATH để configure tìm xml2-config
 OLD_PATH="${PATH}"
 export PATH="${DEPS_INSTALL}/bin:${PATH}"
 export XML_CONFIG="${DEPS_INSTALL}/bin/xml2-config"
@@ -171,15 +168,25 @@ export XML_CONFIG="${DEPS_INSTALL}/bin/xml2-config"
     CFLAGS="${CFLAGS}" \
     LDFLAGS="${LDFLAGS}"
 
-# Restore PATH
 export PATH="${OLD_PATH}"
 unset XML_CONFIG
 
-make -j$(nproc) install
+# [FIX] Chỉ build + install libxslt + libexslt subdirs — bỏ qua xsltproc
+make -j$(nproc) -C libxslt
+make -j$(nproc) -C libexslt
+
+make -C libxslt install
+make -C libexslt install
+
+# Install thêm pkg-config + xslt-config script (skip xsltproc binary)
+[ -f xslt-config ] && install -m 755 xslt-config "${DEPS_INSTALL}/bin/xslt-config"
+[ -f libxslt.pc ] && install -m 644 libxslt.pc "${DEPS_INSTALL}/lib/pkgconfig/"
+[ -f libexslt.pc ] && install -m 644 libexslt.pc "${DEPS_INSTALL}/lib/pkgconfig/"
+
 cd ..
 
-# Xoá ARM binary
-for bin in xslt-config xsltproc; do
+# Xoá ARM binary còn sót
+for bin in xsltproc xslt-config; do
     if [ -f "${DEPS_INSTALL}/bin/${bin}" ]; then
         if file "${DEPS_INSTALL}/bin/${bin}" 2>/dev/null | grep -q "ELF"; then
             rm -f "${DEPS_INSTALL}/bin/${bin}"
@@ -187,6 +194,13 @@ for bin in xslt-config xsltproc; do
         fi
     fi
 done
+
+# Verify
+if [ ! -f "${DEPS_INSTALL}/lib/libxslt.a" ] || [ ! -f "${DEPS_INSTALL}/lib/libexslt.a" ]; then
+    echo "❌ libxslt.a hoặc libexslt.a không tồn tại"
+    exit 1
+fi
+echo "  ✅ libxslt + libexslt OK"
 
 # ═══════════════════════════════════════════════════════════
 # libjpeg-turbo
@@ -238,7 +252,7 @@ make PREFIX="${DEPS_INSTALL}" install
 cd ..
 
 # ═══════════════════════════════════════════════════════════
-# Summary
+# Summary + verify
 # ═══════════════════════════════════════════════════════════
 echo ""
 echo "════════════════════════════════════════════"
