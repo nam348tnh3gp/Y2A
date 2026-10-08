@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cross-compile core deps: libffi, OpenSSL, SQLite3, XZ, zlib, libxml2, libxslt, libjpeg-turbo, libpng, OpenBLAS
+# Cross-compile core deps — p4a-style, dùng container
 set -eo pipefail
 
 cd /tmp
@@ -9,12 +9,11 @@ DEPS_INSTALL="${DEPS_INSTALL:?}"
 TARGET_HOST="${TARGET_HOST:-aarch64-linux-android}"
 ANDROID_API="${ANDROID_API:-24}"
 
-# Shared flags
 COMMON_LDFLAGS="-Wl,--hash-style=both"
 COMMON_CONFIGURE_FLAGS="--host=${TARGET_HOST} --prefix=${DEPS_INSTALL} --enable-static --disable-shared"
 
-# [FIX] Ensure DEPS_INSTALL/bin nằm đầu PATH để tìm xml2-config, xslt-config, ...
-export PATH="${DEPS_INSTALL}/bin:${PATH}"
+# [FIX] KHÔNG thêm DEPS_INSTALL/bin vào PATH nữa!
+# Chỉ set PKG_CONFIG — không ảnh hưởng tar/xz/gcc host.
 export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="${DEPS_INSTALL}/lib/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR=""
@@ -33,7 +32,6 @@ wget -q "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_
 tar -xf "openssl-${OPENSSL_VERSION}.tar.gz"
 cd "openssl-${OPENSSL_VERSION}"
 export ANDROID_NDK_ROOT="${NDK}"
-export PATH="${NDK_PREBUILT}/bin:${PATH}"
 LDFLAGS="${COMMON_LDFLAGS}" \
 ./Configure android-arm64 -D__ANDROID_API__=${ANDROID_API} \
     --prefix="${DEPS_INSTALL}" --openssldir="${DEPS_INSTALL}/ssl" \
@@ -58,6 +56,8 @@ tar -xf "xz-${XZ_VERSION}.tar.gz"
 cd "xz-${XZ_VERSION}"
 ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
 make -j$(nproc) install
+# [FIX] Xoá xz binary ARM để tránh shadow host xz
+rm -f "${DEPS_INSTALL}/bin/xz" "${DEPS_INSTALL}/bin/xzdec" "${DEPS_INSTALL}/bin/lzma"* "${DEPS_INSTALL}/bin/unxz" 2>/dev/null || true
 cd ..
 
 echo "═══ zlib ═══"
@@ -78,26 +78,23 @@ cd "libxml2-${LIBXML2_VERSION}"
 make -j$(nproc) install
 cd ..
 
-# [FIX] Verify xml2-config
+# Verify xml2-config
 if [ ! -x "${DEPS_INSTALL}/bin/xml2-config" ]; then
-    echo "❌ xml2-config không tồn tại sau khi build libxml2"
-    ls -la "${DEPS_INSTALL}/bin/" || true
+    echo "❌ xml2-config không tồn tại"
     exit 1
 fi
-echo "✅ xml2-config OK: ${DEPS_INSTALL}/bin/xml2-config"
-echo "   version: $(${DEPS_INSTALL}/bin/xml2-config --version 2>&1 || echo '?')"
+echo "✅ xml2-config OK"
 
 echo "═══ libxslt ═══"
 wget -q "https://download.gnome.org/sources/libxslt/1.1/libxslt-${LIBXSLT_VERSION}.tar.xz"
 tar -xf "libxslt-${LIBXSLT_VERSION}.tar.xz"
 cd "libxslt-${LIBXSLT_VERSION}"
 
-# [FIX] Export lại để chắc chắn configure của libxslt tìm thấy libxml2
+# [FIX] Tạm thời thêm DEPS_INSTALL/bin vào PATH + set XML_CONFIG
+# để configure tìm thấy xml2-config, sau đó KHÔI PHỤC PATH
+OLD_PATH="${PATH}"
 export PATH="${DEPS_INSTALL}/bin:${PATH}"
 export XML_CONFIG="${DEPS_INSTALL}/bin/xml2-config"
-export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig"
-export PKG_CONFIG_LIBDIR="${DEPS_INSTALL}/lib/pkgconfig"
-export PKG_CONFIG_SYSROOT_DIR=""
 
 ./configure ${COMMON_CONFIGURE_FLAGS} \
     --without-python --without-crypto \
@@ -106,6 +103,11 @@ export PKG_CONFIG_SYSROOT_DIR=""
     --with-libxml-libs-prefix="${DEPS_INSTALL}/lib" \
     XML_CONFIG="${DEPS_INSTALL}/bin/xml2-config" \
     LDFLAGS="${COMMON_LDFLAGS}"
+
+# Khôi phục PATH để không ảnh hưởng bước sau
+export PATH="${OLD_PATH}"
+unset XML_CONFIG
+
 make -j$(nproc) install
 cd ..
 
@@ -146,9 +148,11 @@ make -j$(nproc) \
 make PREFIX="${DEPS_INSTALL}" install
 cd ..
 
+echo ""
 echo "✅ All deps built"
 echo ""
-echo "=== DEPS_INSTALL summary ==="
-ls -lh "${DEPS_INSTALL}/lib/" | head -30
+echo "=== DEPS_INSTALL/bin (chỉ .pc + config scripts, không có binary ARM) ==="
+ls -la "${DEPS_INSTALL}/bin/" 2>/dev/null || true
 echo ""
-ls -la "${DEPS_INSTALL}/bin/" 2>/dev/null | head -10 || true
+echo "=== DEPS_INSTALL/lib ==="
+ls -lh "${DEPS_INSTALL}/lib/"*.a 2>/dev/null | head -20 || true
