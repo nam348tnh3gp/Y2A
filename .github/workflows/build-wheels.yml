@@ -12,11 +12,13 @@ on:
         required: false
         default: 'false'
       clean_old_releases:
-        description: 'Xóa release cũ (giữ 3) — true/false'
+        description: 'Xóa release wheels cũ (giữ 3 gần nhất) — true/false'
         required: false
         default: 'false'
   push:
-    branches: [main, nam348tnh3gp-patch-1]
+    branches:
+      - main
+      - nam348tnh3gp-patch-1
     paths:
       - 'wheels/list.txt'
       - 'scripts/**'
@@ -47,10 +49,36 @@ jobs:
                       /opt/ghc /usr/local/share/boost 2>/dev/null || true
           df -h / | tail -1
 
+      # ============================================================
+      # [CACHE] deps-install (cross-compiled deps)
+      # ============================================================
+      - name: Cache deps-install
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/deps-install
+          key: deps-aarch64-api24-v6-docker
+          restore-keys: |
+            deps-aarch64-api24-
+
+      # ============================================================
+      # [CACHE] python-android (cross-compiled CPython)
+      # ============================================================
+      - name: Cache python-android
+        id: cache-python
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/python-android
+          key: python-android-3.13.1-v13-docker-${{ hashFiles('Dockerfile.wheels') }}
+          restore-keys: |
+            python-android-3.13.1-v13-docker-
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build Docker image — layer cache cho NDK/host-python/rust
+      # ============================================================
+      # Build Docker image (cached layers)
+      # ============================================================
       - name: Build wheel-builder image
         uses: docker/build-push-action@v5
         with:
@@ -61,26 +89,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Cache cross-compiled python (deps-install + python-android)
-      - name: Cache deps-install
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/deps-install
-          key: deps-aarch64-api24-v3-docker
-
-      - name: Cache python-android
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/python-android
-          key: python-android-3.13.1-v3-docker-${{ hashFiles('Dockerfile.wheels') }}
-
-      - name: Fix permissions
+      # ============================================================
+      # Prepare workspace dirs + fix ownership
+      # ============================================================
+      - name: Prepare workspace dirs
         run: |
-          mkdir -p deps-install python-android wheels-out wheels-final
-          sudo chown -R 1000:1000 \
-            deps-install python-android wheels-out wheels-final docs 2>/dev/null || true
+          mkdir -p deps-install python-android wheels-out wheels-final docs
+          # [FIX] Chown workspace to match container user (uid 1000)
+          sudo chown -R 1000:1000 "${{ github.workspace }}"
+          ls -la "${{ github.workspace }}"
 
-      # Chạy container
+      # ============================================================
+      # Run build in container
+      # ============================================================
       - name: Run build in container
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -99,7 +120,13 @@ jobs:
             p4a-wheels:latest \
             bash /work/scripts/entrypoint.sh
 
-      # Upload artifact
+      # ============================================================
+      # Fix ownership back (để upload-artifact đọc được)
+      # ============================================================
+      - name: Fix ownership back
+        if: always()
+        run: sudo chown -R $(id -u):$(id -g) "${{ github.workspace }}" || true
+
       - uses: actions/upload-artifact@v4
         if: hashFiles('wheels-final/*.whl') != ''
         with:
