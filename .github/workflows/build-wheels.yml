@@ -170,7 +170,7 @@ jobs:
           echo "✅ Cleanup done"
 
       # ============================================================
-      # Tải wheel cũ — lọc bỏ wheel link glibc + wheel cryptography cũ
+      # Tải wheel cũ — lọc bỏ wheel link glibc + native packages cũ
       # ============================================================
       - name: Download previous wheels
         id: prev
@@ -196,24 +196,27 @@ jobs:
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
 
+            # Bỏ wheel tên nhân tag
             if echo "$base" | grep -qE '\.android_[0-9]+_[a-z0-9_]+\.'; then
               echo "🗑️  Tên nhân tag: $base"
               continue
             fi
 
-            # [FIX] Bỏ native packages cũ — phải rebuild với p4a-style
+            # [FIX] Bỏ native packages cũ — phải rebuild p4a-style
             if [[ "$base" == cryptography-* ]] || \
                [[ "$base" == bcrypt-* ]] || \
                [[ "$base" == numpy-* ]] || \
                [[ "$base" == scipy-* ]] || \
-               [[ "$base" == pillow-* ]] || \
-               [[ "$base" == Pillow-* ]] || \
+               [[ "$base" == pillow-* ]] || [[ "$base" == Pillow-* ]] || \
                [[ "$base" == lxml-* ]] || \
                [[ "$base" == greenlet-* ]] || \
                [[ "$base" == frozenlist-* ]] || \
                [[ "$base" == ujson-* ]] || \
-               [[ "$base" == cffi-* ]]; then
-              echo "🗑️  Native package cũ (rebuild với p4a): $base"
+               [[ "$base" == cffi-* ]] || \
+               [[ "$base" == multidict-* ]] || \
+               [[ "$base" == yarl-* ]] || \
+               [[ "$base" == aiohttp-* ]]; then
+              echo "🗑️  Native package cũ (rebuild p4a): $base"
               continue
             fi
 
@@ -545,7 +548,7 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # BUILD WHEELS — [FIX] p4a-style: no Tier 1 for native packages
+      # BUILD WHEELS
       # ==========================================================
       - name: Build wheels
         env:
@@ -590,26 +593,24 @@ jobs:
           echo "CLANG_BUILTIN: ${CLANG_BUILTIN:-NOT_FOUND}"
 
           export NDK_SYSROOT CLANG_BUILTIN
-          # [FIX] p4a-style: dùng target triplet
-          export _PYTHON_HOST_PLATFORM="aarch64-linux-android"
+          export _PYTHON_HOST_PLATFORM="$ANDROID_TAG"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
           export TARGET_PYTHON_EXE="$TARGET_ROOT/bin/python${PYTHON_MINOR}"
           export PYTHONPATH="$SYSCONF_DIR:$TARGET_SITE"
           export PATH="$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
-          export STRIP="$STRIP" LDSHARED="$CC -shared -Wl,--hash-style=both" CPP="$CC -E" READELF="$READELF"
+          export STRIP="$STRIP" LDSHARED="$CC -shared" CPP="$CC -E" READELF="$READELF"
 
           export CFLAGS="-fPIC -O2 \
-            -nostdinc \
-            -I$CLANG_BUILTIN \
             -I$NDK_SYSROOT/usr/include \
             -I$NDK_SYSROOT/usr/include/aarch64-linux-android \
+            -I$CLANG_BUILTIN \
             -I$DEPS_INSTALL/include \
             -I$TARGET_ROOT/include/python${PYTHON_MINOR} \
             -Wno-implicit-function-declaration"
           export CPPFLAGS="$CFLAGS"
-          export CXXFLAGS="$CFLAGS -I$DEPS_INSTALL/include -L$DEPS_INSTALL/lib"
+          export CXXFLAGS="$CFLAGS"
           export LDFLAGS="-L$DEPS_INSTALL/lib -L$NDK_SYSROOT/usr/lib/aarch64-linux-android/${ANDROID_API} -Wl,--hash-style=both"
 
           export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
@@ -662,7 +663,7 @@ jobs:
 
           SUCCESS_T1=""; SUCCESS_T2=""; SKIP_LIST=""; FAIL_LIST=""
 
-          # [FIX] p4a-style: native packages chỉ đi Tier 2 (PyO3 config, sandbox, đúng target)
+          # [p4a] Native packages chỉ đi Tier 2
           NATIVE_PACKAGES="cryptography bcrypt nh3 pydantic-core orjson tokenizers numpy scipy lxml Pillow pillow greenlet frozenlist ujson cffi aiohttp yarl multidict"
 
           for pkg in $PKGLIST; do
@@ -671,7 +672,6 @@ jobs:
             echo "📦 $pkg"
             echo "════════════════════════════════════════"
 
-            # Check native
             IS_NATIVE=0
             for np in $NATIVE_PACKAGES; do
               if [ "$pkg" = "$np" ]; then IS_NATIVE=1; break; fi
@@ -679,7 +679,6 @@ jobs:
 
             existing=$(find_wheel "$pkg")
             if [ -n "$existing" ] && verify_bionic "$existing"; then
-              # Native phải rebuild, không skip
               if [ "$IS_NATIVE" -eq 0 ]; then
                 echo "⏭️  Skip (đã có wheel bionic)"
                 SKIP_LIST="$SKIP_LIST $pkg"
@@ -701,19 +700,12 @@ jobs:
               echo "🔨 Tầng 1: pip wheel"
               if "$HOST_PY" -m pip wheel "$pkg" \
                     --no-deps --no-build-isolation --no-binary=:all: \
-                    --config-settings="--build-option=--plat-name=${ANDROID_TAG}" \
                     --wheel-dir wheels-out > "/tmp/pip_${pkg}.log" 2>&1; then
                 whl=$(find_wheel "$pkg")
                 if [ -n "$whl" ] && verify_bionic "$whl"; then
-                  # Verify tag đúng
-                  if [[ "$(basename "$whl")" == *"${ANDROID_TAG}"* ]] || [[ "$(basename "$whl")" == *"none-any"* ]]; then
-                    echo "✅ $pkg — Tầng 1 (bionic + tag OK)"
-                    SUCCESS_T1="$SUCCESS_T1 $pkg"
-                    TIER1_OK=1
-                  else
-                    echo "⚠️  $pkg — Tier 1 tag sai → XOÁ + fallback Tier 2"
-                    rm -f "$whl"
-                  fi
+                  echo "✅ $pkg — Tầng 1 (bionic)"
+                  SUCCESS_T1="$SUCCESS_T1 $pkg"
+                  TIER1_OK=1
                 else
                   echo "⚠️  $pkg — Tier 1 wheel link glibc → XOÁ + fallback Tier 2"
                   [ -n "$whl" ] && rm -f "$whl"
@@ -758,15 +750,12 @@ jobs:
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
-      # VERIFY + PATCH cryptography (p4a-style)
+      # VERIFY + PATCH cryptography
       # ==========================================================
       - name: Verify cryptography wheel links libpython
         run: |
           set -eo pipefail
-          CRYPTO_WHL=$(ls wheels-out/cryptography-*${ANDROID_TAG}.whl 2>/dev/null | head -1 || true)
-          if [ -z "$CRYPTO_WHL" ]; then
-            CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1 || true)
-          fi
+          CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1 || true)
           if [ -z "$CRYPTO_WHL" ]; then
             echo "⚠️ Không có wheel cryptography — skip"
             exit 0
@@ -857,7 +846,7 @@ jobs:
           echo "✅ cryptography wheel OK"
 
       # ==========================================================
-      # POST-PROCESS — [FIX] chỉ copy, không rename (tag đã đúng)
+      # POST-PROCESS — rename triplet tags về ANDROID_TAG
       # ==========================================================
       - name: Post-process wheels
         env:
@@ -867,25 +856,50 @@ jobs:
           rm -rf wheels-final && mkdir -p wheels-final
           shopt -s nullglob
 
-          COPIED=0; WARNED=0
+          COPIED=0; RENAMED=0; WARNED=0
 
           for whl in wheels-out/*.whl; do
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
 
-            # Wheel đã có tag đúng (p4a-style) — chỉ copy
-            if [[ "$base" == *"${ANDROID_TAG}"* ]] || [[ "$base" == *"none-any"* ]]; then
+            # Pure python → giữ nguyên
+            if [[ "$base" == *"none-any"* ]]; then
+              cp "$whl" "wheels-final/$base"
+              COPIED=$((COPIED+1))
+              echo "✅ $base (pure python)"
+              continue
+            fi
+
+            # Đã đúng tag
+            if [[ "$base" == *"${ANDROID_TAG}"* ]]; then
               cp "$whl" "wheels-final/$base"
               COPIED=$((COPIED+1))
               echo "✅ $base"
+              continue
+            fi
+
+            # Rename triplet → ANDROID_TAG
+            newname="$base"
+            newname="${newname//aarch64_linux_android/${ANDROID_TAG}}"
+            newname="${newname//aarch64-linux-android/${ANDROID_TAG}}"
+            newname="${newname//linux_aarch64/${ANDROID_TAG}}"
+            newname="${newname//manylinux_2_28_aarch64/${ANDROID_TAG}}"
+            newname="${newname//manylinux2014_aarch64/${ANDROID_TAG}}"
+            newname="${newname//manylinux_2_17_aarch64/${ANDROID_TAG}}"
+
+            if [ "$newname" != "$base" ]; then
+              cp "$whl" "wheels-final/$newname"
+              RENAMED=$((RENAMED+1))
+              echo "🔄 $base → $newname"
             else
-              echo "⚠️  $base — tag không phải ${ANDROID_TAG} (skip)"
+              echo "⚠️  $base — tag không nhận diện, giữ nguyên"
+              cp "$whl" "wheels-final/$base"
               WARNED=$((WARNED+1))
             fi
           done
 
           echo ""
-          echo "Copied: $COPIED / Warned: $WARNED"
+          echo "Copied: $COPIED / Renamed: $RENAMED / Warned: $WARNED"
           ls -lh wheels-final/ || echo "(rỗng)"
 
       # ==========================================================
