@@ -14,8 +14,11 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 
+// Version marker — thay đổi mỗi lần rebuild APK
+#define JNI_BUILD_VERSION __DATE__ " " __TIME__
+
 // ============================================================
-// Python C API typedefs (không cần Python.h)
+// Python C API typedefs
 // ============================================================
 typedef void* PyObject;
 typedef int   PyGILState_STATE;
@@ -67,35 +70,23 @@ static PyErr_Clear_t           p_PyErr_Clear = nullptr;
 static Py_IsInitialized_t      p_Py_IsInitialized = nullptr;
 
 // ============================================================
-// [FIX v4] Helper: copy file nếu cần (so sánh size + mtime)
+// Helper 1: copy file nếu cần (so sánh size)
 // ============================================================
 static bool copy_file_if_needed(const std::string& src, const std::string& dst) {
     struct stat st_src, st_dst;
-    if (stat(src.c_str(), &st_src) != 0) {
-        return false;  // src không tồn tại
+    if (stat(src.c_str(), &st_src) != 0) return false;
+
+    if (stat(dst.c_str(), &st_dst) == 0 &&
+        st_src.st_size == st_dst.st_size) {
+        return true;  // skip
     }
 
-    // Nếu dst đã tồn tại và cùng size → coi như đã sync
-    if (stat(dst.c_str(), &st_dst) == 0) {
-        if (st_src.st_size == st_dst.st_size) {
-            return true;  // skip — đã có bản giống
-        }
-    }
-
-    // Xóa file cũ (nếu có) trước khi ghi
     unlink(dst.c_str());
 
     FILE* fin = fopen(src.c_str(), "rb");
-    if (!fin) {
-        LOGE("copy: không mở được src %s", src.c_str());
-        return false;
-    }
+    if (!fin) { LOGE("copy: mở src fail %s", src.c_str()); return false; }
     FILE* fout = fopen(dst.c_str(), "wb");
-    if (!fout) {
-        LOGE("copy: không tạo được dst %s", dst.c_str());
-        fclose(fin);
-        return false;
-    }
+    if (!fout) { LOGE("copy: tạo dst fail %s", dst.c_str()); fclose(fin); return false; }
 
     char buf[65536];
     size_t n;
@@ -106,17 +97,13 @@ static bool copy_file_if_needed(const std::string& src, const std::string& dst) 
     fclose(fin);
     fclose(fout);
 
-    if (ok) {
-        chmod(dst.c_str(), 0755);
-    } else {
-        unlink(dst.c_str());
-    }
+    if (ok) chmod(dst.c_str(), 0755);
+    else unlink(dst.c_str());
     return ok;
 }
 
 // ============================================================
-// [FIX v4] Sync native libs từ APK → pythonHome/lib
-// Đảm bảo mỗi lần update APK, user không cần clear data
+// Helper 2: sync libpython + deps từ APK → pythonHome/lib
 // ============================================================
 static void sync_native_libs_to_python_home(
         const char* nativeLibDir, const char* pythonHome) {
@@ -141,16 +128,11 @@ static void sync_native_libs_to_python_home(
         std::string dst = dstDir + "/" + libs[i];
 
         struct stat st_src;
-        if (stat(src.c_str(), &st_src) != 0) {
-            // Không có trong APK — không phải lỗi
-            continue;
-        }
+        if (stat(src.c_str(), &st_src) != 0) continue;
 
-        // Kiểm tra xem có cần copy không
         struct stat st_dst;
         bool need_copy = true;
-        if (stat(dst.c_str(), &st_dst) == 0 &&
-            st_src.st_size == st_dst.st_size) {
+        if (stat(dst.c_str(), &st_dst) == 0 && st_src.st_size == st_dst.st_size) {
             need_copy = false;
         }
 
@@ -166,8 +148,144 @@ static void sync_native_libs_to_python_home(
             failed++;
         }
     }
+    LOGI("Sync libpython: %d synced, %d skipped, %d failed", synced, skipped, failed);
+}
 
-    LOGI("Sync summary: %d synced, %d skipped, %d failed", synced, skipped, failed);
+// ============================================================
+// Helper 3: verify ELF có đủ 2 hash tables không
+// Đọc trực tiếp file, không cần readelf
+// ============================================================
+static bool verify_elf_has_dt_hash(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+
+    unsigned char ehdr[64];
+    size_t r = fread(ehdr, 1, 64, f);
+    if (r < 64) { fclose(f); return false; }
+
+    // Check ELF magic
+    if (ehdr[0] != 0x7F || ehdr[1] != 'E' || ehdr[2] != 'L' || ehdr[3] != 'F') {
+        fclose(f); return false;
+    }
+
+    // ELF64 little-endian
+    if (ehdr[4] != 2 || ehdr[5] != 1) { fclose(f); return false; }
+
+    // e_shoff ở offset 0x28 (8 bytes)
+    uint64_t e_shoff = 0;
+    memcpy(&e_shoff, ehdr + 0x28, 8);
+
+    // e_shentsize ở 0x3A (2 bytes), e_shnum ở 0x3C
+    uint16_t e_shentsize = 0, e_shnum = 0;
+    memcpy(&e_shentsize, ehdr + 0x3A, 2);
+    memcpy(&e_shnum, ehdr + 0x3C, 2);
+
+    if (e_shoff == 0 || e_shnum == 0) { fclose(f); return false; }
+
+    // Đọc section headers để tìm SHT_HASH (4) và SHT_GNU_HASH (0x6ffffff6)
+    bool has_sysv = false, has_gnu = false;
+
+    fseek(f, e_shoff, SEEK_SET);
+    for (int i = 0; i < e_shnum; i++) {
+        unsigned char shdr[64];
+        if (fread(shdr, 1, 64, f) != 64) break;
+
+        uint32_t sh_type = 0;
+        memcpy(&sh_type, shdr + 4, 4);
+
+        if (sh_type == 4)          has_sysv = true;   // SHT_HASH
+        if (sh_type == 0x6ffffff6) has_gnu  = true;   // SHT_GNU_HASH
+    }
+    fclose(f);
+    return has_sysv && has_gnu;
+}
+
+// ============================================================
+// Helper 4: verify critical extensions trong lib-dynload
+// ============================================================
+static void verify_dynload_extensions(const char* pythonHome) {
+    std::string dynloadDir = std::string(pythonHome) +
+        "/lib/python3.13/lib-dynload";
+
+    const char* critical[] = {
+        "_posixsubprocess.cpython-313-aarch64-linux-android.so",
+        "_ssl.cpython-313-aarch64-linux-android.so",
+        "_sqlite3.cpython-313-aarch64-linux-android.so",
+        "_socket.cpython-313-aarch64-linux-android.so",
+        nullptr
+    };
+
+    int bad = 0;
+    for (int i = 0; critical[i]; i++) {
+        std::string path = dynloadDir + "/" + critical[i];
+        struct stat st;
+        if (stat(path.c_str(), &st) != 0) {
+            LOGW("⚠️  Không có: %s", critical[i]);
+            continue;
+        }
+        if (!verify_elf_has_dt_hash(path)) {
+            LOGE("❌ %s — thiếu DT_HASH hoặc DT_GNU_HASH", critical[i]);
+            bad++;
+        }
+    }
+
+    if (bad > 0) {
+        LOGE("");
+        LOGE("╔══════════════════════════════════════════════════════════╗");
+        LOGE("║  %d file trong lib-dynload thiếu hash table!             ║", bad);
+        LOGE("║  → pip/subprocess sẽ fail khi import                     ║");
+        LOGE("║  → User cần: Settings → Apps → Clear data                ║");
+        LOGE("╚══════════════════════════════════════════════════════════╝");
+        LOGE("");
+    } else {
+        LOGI("✅ Tất cả extension trong lib-dynload có đủ 2 hash tables");
+    }
+}
+
+// ============================================================
+// Helper 5: đọc/ghi version marker
+// ============================================================
+static std::string read_marker(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return "";
+    char buf[256] = {0};
+    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return ""; }
+    fclose(f);
+    std::string s(buf);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    return s;
+}
+
+static void write_marker(const std::string& path, const std::string& value) {
+    FILE* f = fopen(path.c_str(), "w");
+    if (!f) return;
+    fputs(value.c_str(), f);
+    fclose(f);
+}
+
+// ============================================================
+// Helper 6: check version marker, log cảnh báo nếu mismatch
+// ============================================================
+static void check_runtime_version(const char* pythonHome) {
+    std::string markerPath = std::string(pythonHome) + "/.runtime_version";
+    std::string current = read_marker(markerPath);
+    std::string expected = JNI_BUILD_VERSION;
+
+    if (current == expected) {
+        LOGI("✅ Runtime version OK (%s)", expected.c_str());
+        return;
+    }
+
+    if (current.empty()) {
+        LOGI("ℹ️  Lần đầu chạy — marker chưa có");
+    } else {
+        LOGW("⚠️  Runtime version mismatch!");
+        LOGW("   Cũ:  %s", current.c_str());
+        LOGW("   Mới: %s", expected.c_str());
+        LOGW("   → Java code phải extract lại python-runtime.tar");
+    }
+
+    write_marker(markerPath, expected);
 }
 
 extern "C" {
@@ -185,22 +303,31 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     const char *pythonHome   = env->GetStringUTFChars(jPythonHome, nullptr);
     const char *filesDir     = env->GetStringUTFChars(jFilesDir, nullptr);
 
+    LOGI("═══════════════════════════════════════════════════════════");
     LOGI("nativeLibDir: %s", nativeLibDir);
     LOGI("pythonHome:   %s", pythonHome);
     LOGI("filesDir:     %s", filesDir);
+    LOGI("JNI version:  %s", JNI_BUILD_VERSION);
+    LOGI("═══════════════════════════════════════════════════════════");
 
     // ========================================================
-    // [FIX v4] Sync libpython + deps từ APK → pythonHome/lib
-    // Chạy TRƯỚC khi setenv / dlopen để đảm bảo:
-    //   1. User update APK → file mới được copy tự động
-    //   2. Không cần clear data app
-    //   3. libpython trong pythonHome/lib luôn khớp với APK
+    // [v5] Check version marker — cảnh báo nếu mismatch
+    // ========================================================
+    check_runtime_version(pythonHome);
+
+    // ========================================================
+    // [v5] Verify extensions trong lib-dynload trước khi init
+    // ========================================================
+    verify_dynload_extensions(pythonHome);
+
+    // ========================================================
+    // Sync libpython + deps từ APK → pythonHome/lib
     // ========================================================
     LOGI("🔄 Sync native libs vào pythonHome/lib...");
     sync_native_libs_to_python_home(nativeLibDir, pythonHome);
 
     // ========================================================
-    // Set env vars TRƯỚC Py_Initialize
+    // Set env vars
     // ========================================================
     setenv("PYTHONHOME", pythonHome, 1);
 
@@ -211,21 +338,16 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     setenv("PYTHONPATH", pythonPath.c_str(), 1);
     LOGI("PYTHONPATH = %s", pythonPath.c_str());
 
-    // ========================================================
-    // LD_LIBRARY_PATH
-    // ========================================================
     std::string pyLibDir = std::string(pythonHome) + "/lib";
     std::string ldPath = std::string(nativeLibDir) + ":" + stdlib + ":" + pyLibDir;
     setenv("LD_LIBRARY_PATH", ldPath.c_str(), 1);
     LOGI("LD_LIBRARY_PATH = %s", ldPath.c_str());
 
-    // SSL certs
     std::string caBundle = sitePkgs + "/certifi/cacert.pem";
     setenv("SSL_CERT_FILE", caBundle.c_str(), 1);
     setenv("REQUESTS_CA_BUNDLE", caBundle.c_str(), 1);
     setenv("CURL_CA_BUNDLE", caBundle.c_str(), 1);
 
-    // Temp dir
     std::string tmpDir = std::string(filesDir) + "/tmp";
     mkdir(tmpDir.c_str(), 0700);
     setenv("TMPDIR", tmpDir.c_str(), 1);
@@ -236,7 +358,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     setenv("PYTHONUNBUFFERED", "1", 1);
 
     // ========================================================
-    // [FIX v4] dlopen từ pythonHome/lib (đã sync) — fallback nativeLibDir
+    // dlopen từ pythonHome/lib (đã sync), fallback nativeLibDir
     // ========================================================
     std::string libPath = std::string(pythonHome) + "/lib/libpython3.13.so";
     g_libpython = dlopen(libPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
@@ -253,7 +375,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
             return JNI_FALSE;
         }
     }
-    LOGI("✅ dlopen libpython3.13 OK từ %s", libPath.c_str());
+    LOGI("✅ dlopen libpython3.13 OK");
 
     // ========================================================
     // Load symbols
@@ -284,14 +406,13 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     LOAD(Py_IsInitialized)
     #undef LOAD
 
-    // [FIX v4] Verify PyLong_Type có trong libpython vừa load
+    // Verify PyLong_Type
     {
         void* pylong_ptr = dlsym(g_libpython, "PyLong_Type");
         if (pylong_ptr) {
             LOGI("✅ PyLong_Type resolved: %p", pylong_ptr);
         } else {
-            LOGE("❌ PyLong_Type KHÔNG tìm thấy trong libpython đã load!");
-            LOGE("   → cryptography _rust.abi3.so sẽ fail");
+            LOGE("❌ PyLong_Type KHÔNG có trong libpython đã load!");
         }
     }
 
@@ -309,7 +430,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
     // Init Python
     // ========================================================
     if (p_Py_IsInitialized && p_Py_IsInitialized()) {
-        LOGW("⚠️ Python đã init trước đó — skip Py_Initialize");
+        LOGW("⚠️ Python đã init trước đó — skip");
         g_initialized = true;
         env->ReleaseStringUTFChars(jNativeLibDir, nativeLibDir);
         env->ReleaseStringUTFChars(jPythonHome, pythonHome);
@@ -323,7 +444,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         LOGI("✅ Python: %s", p_Py_GetVersion());
     }
 
-    // Test import os
+    // Test imports
     int rc = p_PyRun_SimpleString("import os; print('STDLIB_OS_OK')");
     LOGI("Test import os: rc=%d", rc);
     if (rc != 0) {
@@ -335,15 +456,13 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         return JNI_FALSE;
     }
 
-    // Test import ssl
     rc = p_PyRun_SimpleString("import ssl; print('SSL_OK', ssl.OPENSSL_VERSION)");
     LOGI("Test import ssl: rc=%d", rc);
     if (rc != 0) {
-        LOGW("⚠️ _ssl không load được — HTTPS sẽ fail");
+        LOGW("⚠️ _ssl không load được");
         if (p_PyErr_Print) p_PyErr_Print();
     }
 
-    // Test import sqlite3
     rc = p_PyRun_SimpleString("import sqlite3; print('SQLITE_OK')");
     LOGI("Test import sqlite3: rc=%d", rc);
     if (rc != 0) {
@@ -351,7 +470,6 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         if (p_PyErr_Print) p_PyErr_Print();
     }
 
-    // Test import _posixsubprocess
     rc = p_PyRun_SimpleString("import _posixsubprocess; print('POSIX_SUBPROCESS_OK')");
     LOGI("Test import _posixsubprocess: rc=%d", rc);
     if (rc != 0) {
@@ -359,7 +477,6 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         if (p_PyErr_Print) p_PyErr_Print();
     }
 
-    // Test import subprocess
     rc = p_PyRun_SimpleString("import subprocess; print('SUBPROCESS_OK')");
     LOGI("Test import subprocess: rc=%d", rc);
     if (rc != 0) {
@@ -367,7 +484,6 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         if (p_PyErr_Print) p_PyErr_Print();
     }
 
-    // Test import yt_dlp
     rc = p_PyRun_SimpleString("import yt_dlp; print('YTDLP_OK', yt_dlp.version.__version__)");
     LOGI("Test import yt_dlp: rc=%d", rc);
     if (rc != 0) {
@@ -375,13 +491,11 @@ Java_com_nam2006_y2mate_PythonBridge_nativeInit(
         if (p_PyErr_Print) p_PyErr_Print();
     }
 
-    // Thêm filesDir vào sys.path
     std::string code = "import sys\n";
     code += "if r'" + std::string(filesDir) + "' not in sys.path:\n";
     code += "    sys.path.insert(0, r'" + std::string(filesDir) + "')\n";
     p_PyRun_SimpleString(code.c_str());
 
-    // Nhả GIL
     g_mainTState = p_PyEval_SaveThread();
     g_initialized = true;
 
@@ -405,7 +519,6 @@ Java_com_nam2006_y2mate_PythonBridge_nativeCallFunction(
     const char *arg    = env->GetStringUTFChars(jArg, nullptr);
 
     std::string out;
-
     PyGILState_STATE gstate = p_PyGILState_Ensure();
     {
         PyObject *pModule = p_PyImport_ImportModule(module);
@@ -433,7 +546,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeCallFunction(
                             out = r;
                         } else {
                             if (p_PyErr_Clear) p_PyErr_Clear();
-                            out = "{\"success\":false,\"error\":\"Cannot serialize result\"}";
+                            out = "{\"success\":false,\"error\":\"Cannot serialize\"}";
                         }
                         if (p_Py_DecRef) p_Py_DecRef(pStr);
                     }
@@ -470,7 +583,7 @@ Java_com_nam2006_y2mate_PythonBridge_nativeFinalize(
         p_Py_Finalize();
         g_initialized = false;
     }
-    // KHÔNG dlclose — tránh crash khi process cleanup
+    // Không dlclose — tránh crash cleanup
 }
 
 } // extern "C"
