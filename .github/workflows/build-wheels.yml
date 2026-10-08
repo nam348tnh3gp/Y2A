@@ -142,6 +142,22 @@ jobs:
             cmake ninja-build nasm binutils
 
       # ============================================================
+      # [QEMU] ARM64 user emulation for sanity checks
+      # ============================================================
+      - name: Install QEMU user-static (for ARM64 sanity checks)
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            qemu-user-static binfmt-support
+          sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
+          echo "=== QEMU binaries ==="
+          ls -la /usr/bin/qemu-aarch64* 2>/dev/null || echo "(no qemu-aarch64)"
+          echo "=== binfmt check ==="
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || \
+            echo "(binfmt chưa bật — QEMU vẫn dùng qua exe_wrapper)"
+          echo "=== Test QEMU ==="
+          qemu-aarch64-static --version || qemu-aarch64 --version || echo "❌ QEMU không chạy được"
+
+      # ============================================================
       # Cleanup releases cũ
       # ============================================================
       - name: Cleanup old wheel releases
@@ -170,7 +186,7 @@ jobs:
           echo "✅ Cleanup done"
 
       # ============================================================
-      # Tải wheel cũ — lọc bỏ wheel link glibc + native packages cũ
+      # Tải wheel cũ — lọc bỏ native packages cũ
       # ============================================================
       - name: Download previous wheels
         id: prev
@@ -196,13 +212,12 @@ jobs:
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
 
-            # Bỏ wheel tên nhân tag
             if echo "$base" | grep -qE '\.android_[0-9]+_[a-z0-9_]+\.'; then
               echo "🗑️  Tên nhân tag: $base"
               continue
             fi
 
-            # [FIX] Bỏ native packages cũ — phải rebuild p4a-style
+            # Bỏ native packages cũ
             if [[ "$base" == cryptography-* ]] || \
                [[ "$base" == bcrypt-* ]] || \
                [[ "$base" == numpy-* ]] || \
@@ -216,7 +231,7 @@ jobs:
                [[ "$base" == multidict-* ]] || \
                [[ "$base" == yarl-* ]] || \
                [[ "$base" == aiohttp-* ]]; then
-              echo "🗑️  Native package cũ (rebuild p4a): $base"
+              echo "🗑️  Native package cũ: $base"
               continue
             fi
 
@@ -663,7 +678,7 @@ jobs:
 
           SUCCESS_T1=""; SUCCESS_T2=""; SKIP_LIST=""; FAIL_LIST=""
 
-          # [p4a] Native packages chỉ đi Tier 2
+          # Native packages chỉ đi Tier 2
           NATIVE_PACKAGES="cryptography bcrypt nh3 pydantic-core orjson tokenizers numpy scipy lxml Pillow pillow greenlet frozenlist ujson cffi aiohttp yarl multidict"
 
           for pkg in $PKGLIST; do
@@ -846,7 +861,7 @@ jobs:
           echo "✅ cryptography wheel OK"
 
       # ==========================================================
-      # POST-PROCESS — rename triplet tags về ANDROID_TAG
+      # POST-PROCESS — rename triplet tags
       # ==========================================================
       - name: Post-process wheels
         env:
@@ -862,7 +877,6 @@ jobs:
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
 
-            # Pure python → giữ nguyên
             if [[ "$base" == *"none-any"* ]]; then
               cp "$whl" "wheels-final/$base"
               COPIED=$((COPIED+1))
@@ -870,7 +884,6 @@ jobs:
               continue
             fi
 
-            # Đã đúng tag
             if [[ "$base" == *"${ANDROID_TAG}"* ]]; then
               cp "$whl" "wheels-final/$base"
               COPIED=$((COPIED+1))
@@ -878,7 +891,6 @@ jobs:
               continue
             fi
 
-            # Rename triplet → ANDROID_TAG
             newname="$base"
             newname="${newname//aarch64_linux_android/${ANDROID_TAG}}"
             newname="${newname//aarch64-linux-android/${ANDROID_TAG}}"
