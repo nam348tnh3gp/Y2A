@@ -3,7 +3,7 @@
 set -eo pipefail
 
 # ════════════════════════════════════════════════════════════
-# [NEW #1] Tarball fallback: /opt/python-src → /tmp/build-host → wget
+# [NEW #1] Tarball fallback: /tmp/build-host → /opt/python-src → wget
 # ════════════════════════════════════════════════════════════
 TARBALL="/tmp/build-host/Python-${PYTHON_VERSION}.tar.xz"
 
@@ -30,7 +30,7 @@ export CPPFLAGS="-I${DEPS_INSTALL}/include"
 export LDFLAGS="-L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 
 # ════════════════════════════════════════════════════════════
-# BẮT ĐẦU — code cũ giữ nguyên 100%
+# BẮT ĐẦU — code cũ
 # ════════════════════════════════════════════════════════════
 
 cd /tmp
@@ -41,11 +41,14 @@ cd "Python-${PYTHON_VERSION}"
 printf '%s\n' '*disabled*' '_crypt' '_nis' 'spwd' 'ossaudiodev' \
     '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' > Modules/Setup.local
 
-# Force hash-style=both cho MỌI extension
-export LDSHARED="${CC} -shared -Wl,--hash-style=both"
-export BLDSHARED="${CC} -shared -Wl,--hash-style=both"
+# ════════════════════════════════════════════════════════════
+# [FIX] Thêm -L${DEPS_INSTALL}/lib vào LINKER flags
+# để các extension (lzma, zlib, sqlite3, ssl) link được
+# ════════════════════════════════════════════════════════════
+export LDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
+export BLDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export CCSHARED="-fPIC -Wl,--hash-style=both"
-export LDCXXSHARED="${CXX} -shared -Wl,--hash-style=both"
+export LDCXXSHARED="${CXX} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export LINKFORSHARED="-Wl,--hash-style=both -Xlinker -export-dynamic"
 
 LDFLAGS="-L${DEPS_INSTALL}/lib -Wl,--hash-style=both" \
@@ -62,20 +65,24 @@ LZMA_CFLAGS="-I${DEPS_INSTALL}/include" LZMA_LIBS="-L${DEPS_INSTALL}/lib -llzma"
     ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
     ac_cv_buggy_getaddrinfo=no ac_cv_little_endian_double=yes
 
-# Patch Makefile để force flags
-sed -i "s|^LDSHARED=.*|LDSHARED= ${CC} -shared -Wl,--hash-style=both|" Makefile
-sed -i "s|^BLDSHARED=.*|BLDSHARED= ${CC} -shared -Wl,--hash-style=both|" Makefile
+# ════════════════════════════════════════════════════════════
+# [FIX] Patch Makefile — thêm -L${DEPS_INSTALL}/lib vào linker flags
+# ════════════════════════════════════════════════════════════
+sed -i "s|^LDSHARED=.*|LDSHARED= ${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both|" Makefile
+sed -i "s|^BLDSHARED=.*|BLDSHARED= ${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both|" Makefile
 sed -i "s|^CCSHARED=.*|CCSHARED= -fPIC -Wl,--hash-style=both|" Makefile
-sed -i "s|^LDCXXSHARED=.*|LDCXXSHARED= ${CXX} -shared -Wl,--hash-style=both|" Makefile
+sed -i "s|^LDCXXSHARED=.*|LDCXXSHARED= ${CXX} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both|" Makefile
 sed -i "s|^LINKFORSHARED=.*|LINKFORSHARED= -Wl,--hash-style=both -Xlinker -export-dynamic|" Makefile
 
 make -j$(nproc) \
-    LDSHARED="${CC} -shared -Wl,--hash-style=both" \
-    BLDSHARED="${CC} -shared -Wl,--hash-style=both" \
+    LDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both" \
+    BLDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both" \
     CCSHARED="-fPIC -Wl,--hash-style=both"
 make install
 
+# ════════════════════════════════════════════════════════════
 # Verify hash tables
+# ════════════════════════════════════════════════════════════
 echo "🔍 Verify DT_HASH + DT_GNU_HASH trên libpython..."
 LP="${TARGET_ROOT}/lib/libpython3.13.so"
 if [ -f "$LP" ]; then
@@ -94,3 +101,24 @@ if ! ${READELF} --dyn-syms "$LP" 2>/dev/null | grep -q " PyLong_Type$"; then
     exit 1
 fi
 echo "✅ libpython3.13.so có DT_HASH + PyLong_Type"
+
+# ════════════════════════════════════════════════════════════
+# Verify critical extensions có mặt
+# ════════════════════════════════════════════════════════════
+LIBDYLOAD="${TARGET_ROOT}/lib/python3.13/lib-dynload"
+if [ -d "$LIBDYLOAD" ]; then
+    echo ""
+    echo "🔍 Verify critical extensions..."
+    CRITICAL="_lzma _sqlite3 _ssl _ctypes _hashlib _socket _posixsubprocess zlib binascii"
+    for mod in $CRITICAL; do
+        FOUND=$(ls "$LIBDYLOAD"/${mod}.*.so 2>/dev/null | head -1)
+        if [ -n "$FOUND" ]; then
+            echo "  ✅ $(basename "$FOUND")"
+        else
+            echo "  ⚠️  Thiếu: $mod"
+        fi
+    done
+fi
+
+echo ""
+echo "✅ Cross-compile CPython hoàn tất"
