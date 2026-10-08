@@ -494,7 +494,7 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # BUILD WHEELS — verify bionic sau từng tier
+      # BUILD WHEELS
       # ==========================================================
       - name: Build wheels
         env:
@@ -763,7 +763,7 @@ jobs:
           echo "✅ Đã patch: $CRYPTO_WHL"
 
       # ==========================================================
-      # POST-PROCESS — parse & ghi đè tag chính xác
+      # POST-PROCESS — parse & ghi đè tag
       # ==========================================================
       - name: Post-process wheels
         env:
@@ -901,7 +901,7 @@ jobs:
             ${{ steps.tag.outputs.tag }}
 
       # ==========================================================
-      # VERIFY pip index — docs/index.html optional, auto-create redirect
+      # VERIFY pip index — docs/index.html auto-create, không fail
       # ==========================================================
       - name: Verify pip index (docs/simple)
         if: hashFiles('wheels-final/*.whl') != ''
@@ -917,7 +917,6 @@ jobs:
           find docs -maxdepth 3 -type f | sort | head -60
           echo ""
 
-          # Tự tạo docs/index.html nếu thiếu — redirect về /simple/
           if [ ! -f "docs/index.html" ]; then
             echo "ℹ️  docs/index.html không có — tự tạo redirect"
             cat > docs/index.html <<'HTMLEOF'
@@ -941,7 +940,6 @@ HTMLEOF
             echo "✅ docs/index.html"
           fi
 
-          # docs/simple/index.html là BẮT BUỘC
           if [ ! -f "docs/simple/index.html" ]; then
             echo "❌ Thiếu docs/simple/index.html — pip sẽ không dùng được"
             FAIL=$((FAIL+1))
@@ -981,33 +979,8 @@ HTMLEOF
             if grep -q "${TAG}" "docs/simple/${pkg_dir}/index.html"; then
               echo "✅ $base → docs/simple/${pkg_dir}/ (tag $TAG)"
             else
-              echo "⚠️  $base → docs/simple/${pkg_dir}/ (không thấy tag $TAG)"
-            fi
-          done
-
-          echo ""
-          echo "=== Check entry thừa (không có wheel) ==="
-          EXTRA=""
-          for d in docs/simple/*/; do
-            [ -d "$d" ] || continue
-            pkg_dir=$(basename "$d")
-            [ "$pkg_dir" = "index.html" ] && continue
-
-            has_wheel=0
-            for whl in wheels-final/*.whl; do
-              [ -f "$whl" ] || continue
-              base=$(basename "$whl")
-              pkg_raw=$(echo "$base" | cut -d'-' -f1)
-              pkg_norm=$(echo "$pkg_raw" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
-              if [ "$pkg_norm" = "$pkg_dir" ] || [ "$pkg_raw" = "$pkg_dir" ]; then
-                has_wheel=1
-                break
-              fi
-            done
-
-            if [ "$has_wheel" -eq 0 ]; then
-              echo "⚠️  docs/simple/$pkg_dir/ — không có wheel tương ứng (stale?)"
-              EXTRA="$EXTRA $pkg_dir"
+              echo "❌ $base → docs/simple/${pkg_dir}/ KHÔNG chứa tag $TAG"
+              FAIL=$((FAIL+1))
             fi
           done
 
@@ -1018,9 +991,11 @@ HTMLEOF
             exit 1
           fi
           echo "✅ docs/simple/ OK"
-          [ -n "$EXTRA" ] && echo "ℹ️  Entry thừa (không fail):$EXTRA"
           exit 0
 
+      # ==========================================================
+      # COMMIT docs — push lên Pages
+      # ==========================================================
       - name: Commit docs
         if: hashFiles('wheels-final/*.whl') != ''
         env:
