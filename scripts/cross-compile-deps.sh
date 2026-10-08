@@ -9,9 +9,15 @@ DEPS_INSTALL="${DEPS_INSTALL:?}"
 TARGET_HOST="${TARGET_HOST:-aarch64-linux-android}"
 ANDROID_API="${ANDROID_API:-24}"
 
-# Shared configure flags — đảm bảo hash-style=both
+# Shared flags
 COMMON_LDFLAGS="-Wl,--hash-style=both"
 COMMON_CONFIGURE_FLAGS="--host=${TARGET_HOST} --prefix=${DEPS_INSTALL} --enable-static --disable-shared"
+
+# [FIX] Ensure DEPS_INSTALL/bin nằm đầu PATH để tìm xml2-config, xslt-config, ...
+export PATH="${DEPS_INSTALL}/bin:${PATH}"
+export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="${DEPS_INSTALL}/lib/pkgconfig"
+export PKG_CONFIG_SYSROOT_DIR=""
 
 echo "═══ libffi ═══"
 wget -q "https://github.com/libffi/libffi/releases/download/v${LIBFFI_VERSION}/libffi-${LIBFFI_VERSION}.tar.gz"
@@ -72,12 +78,33 @@ cd "libxml2-${LIBXML2_VERSION}"
 make -j$(nproc) install
 cd ..
 
+# [FIX] Verify xml2-config
+if [ ! -x "${DEPS_INSTALL}/bin/xml2-config" ]; then
+    echo "❌ xml2-config không tồn tại sau khi build libxml2"
+    ls -la "${DEPS_INSTALL}/bin/" || true
+    exit 1
+fi
+echo "✅ xml2-config OK: ${DEPS_INSTALL}/bin/xml2-config"
+echo "   version: $(${DEPS_INSTALL}/bin/xml2-config --version 2>&1 || echo '?')"
+
 echo "═══ libxslt ═══"
 wget -q "https://download.gnome.org/sources/libxslt/1.1/libxslt-${LIBXSLT_VERSION}.tar.xz"
 tar -xf "libxslt-${LIBXSLT_VERSION}.tar.xz"
 cd "libxslt-${LIBXSLT_VERSION}"
+
+# [FIX] Export lại để chắc chắn configure của libxslt tìm thấy libxml2
+export PATH="${DEPS_INSTALL}/bin:${PATH}"
+export XML_CONFIG="${DEPS_INSTALL}/bin/xml2-config"
+export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="${DEPS_INSTALL}/lib/pkgconfig"
+export PKG_CONFIG_SYSROOT_DIR=""
+
 ./configure ${COMMON_CONFIGURE_FLAGS} \
     --without-python --without-crypto \
+    --with-libxml-prefix="${DEPS_INSTALL}" \
+    --with-libxml-include-prefix="${DEPS_INSTALL}/include" \
+    --with-libxml-libs-prefix="${DEPS_INSTALL}/lib" \
+    XML_CONFIG="${DEPS_INSTALL}/bin/xml2-config" \
     LDFLAGS="${COMMON_LDFLAGS}"
 make -j$(nproc) install
 cd ..
@@ -120,4 +147,8 @@ make PREFIX="${DEPS_INSTALL}" install
 cd ..
 
 echo "✅ All deps built"
-ls -lh "${DEPS_INSTALL}/lib/"
+echo ""
+echo "=== DEPS_INSTALL summary ==="
+ls -lh "${DEPS_INSTALL}/lib/" | head -30
+echo ""
+ls -la "${DEPS_INSTALL}/bin/" 2>/dev/null | head -10 || true
