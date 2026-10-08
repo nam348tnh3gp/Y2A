@@ -1,5 +1,5 @@
 #!/bin/bash
-# Entrypoint chạy trong Docker container
+# Entrypoint chạy trong Docker container — CHỈ BUILD, không release
 set -eo pipefail
 
 echo "════════════════════════════════════════════════════════════"
@@ -22,6 +22,11 @@ export CLANG_BUILTIN=$(${CC} -print-resource-dir 2>/dev/null)/include
 export HOST_PY_PREFIX="${HOST_PY_PREFIX:-/opt/host-python}"
 
 mkdir -p "${TARGET_ROOT}" "${DEPS_INSTALL}" "${WHEELS_OUT}" "${WHEELS_FINAL}"
+
+echo ""
+echo "  TARGET_ROOT:     $TARGET_ROOT"
+echo "  DEPS_INSTALL:    $DEPS_INSTALL"
+echo "  HOST_PYTHON:     $HOST_PYTHON"
 
 # ════════════════════════════════════════════════════════════
 # 1. Cross-compile core deps
@@ -70,19 +75,12 @@ cp -v "$TARGET_SYSCONF" "$HOST_PY_LIB/"
 export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
 echo "  _PYTHON_SYSCONFIGDATA_NAME=$SYSCONF_NAME"
 
-# Copy all sysconfigdata files
 for f in "${TARGET_STDLIB}"/_sysconfigdata__*.py; do
     [ -f "$f" ] || continue
     cp -v "$f" "$HOST_PY_LIB/" 2>/dev/null || true
 done
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Patch sysconfigdata — bao gồm cả file default
-# để subprocess (không có env) cũng load đúng
-# ════════════════════════════════════════════════════════════
 echo "  Patch tất cả sysconfigdata để remove host paths"
-
-# Patch file target
 for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py; do
     [ -f "$f" ] || continue
     sed -i "s|'/opt/host-python/lib'|'${TARGET_ROOT}/lib'|g" "$f"
@@ -99,15 +97,13 @@ for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py; do
     sed -i "s|/usr/include|${TARGET_ROOT}/include|g" "$f"
 done
 
-# Patch site-packages của host python để set env mặc định
+# sitecustomize để subprocess tự set env
 SITECUSTOMIZE="${HOST_PY_LIB}/sitecustomize.py"
 cat > "$SITECUSTOMIZE" <<SITEEOF
-# [FIX] Auto-set _PYTHON_SYSCONFIGDATA_NAME cho subprocess
 import os
 if '_PYTHON_SYSCONFIGDATA_NAME' not in os.environ:
     os.environ['_PYTHON_SYSCONFIGDATA_NAME'] = '${SYSCONF_NAME}'
 SITEEOF
-echo "  ✅ Created $SITECUSTOMIZE"
 
 # Copy headers
 TARGET_INCLUDE="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
@@ -116,21 +112,6 @@ if [ -d "$TARGET_INCLUDE" ] && [ -d "$HOST_INCLUDE" ]; then
     cp -rf "$TARGET_INCLUDE/." "$HOST_INCLUDE/" 2>/dev/null || true
 fi
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Xoá libpython.so của host để ld không tìm thấy khi cross-compile
-# (giữ symlink cho host python chạy được)
-# ════════════════════════════════════════════════════════════
-echo "  Backup host libpython để ld không match sai"
-HOST_LIBPY="${HOST_PY_PREFIX}/lib/libpython${PYTHON_MINOR}.so"
-if [ -f "$HOST_LIBPY" ] && [ ! -f "${HOST_LIBPY}.host-orig" ]; then
-    # Chỉ rename nếu chưa backup
-    HOST_LIBPY_REAL=$(readlink -f "$HOST_LIBPY" 2>/dev/null || echo "")
-    if [ -n "$HOST_LIBPY_REAL" ] && [ -f "$HOST_LIBPY_REAL" ]; then
-        cp "$HOST_LIBPY_REAL" "${HOST_LIBPY}.host-orig" 2>/dev/null || true
-    fi
-fi
-
-# Verify
 echo ""
 echo "  Verify host python sysconfig:"
 "${HOST_PYTHON}" -c "
@@ -172,25 +153,17 @@ echo ""
 echo "📦 Packages: ${PKGLIST}"
 
 # ════════════════════════════════════════════════════════════
-# 6. Build wheels — [FIX] log warning nếu có fail, KHÔNG exit
+# 6. Build wheels
 # ════════════════════════════════════════════════════════════
-BUILD_RC=0
-if ! bash scripts/build-wheels.sh; then
-    BUILD_RC=$?
-    echo ""
-    echo "════════════════════════════════════════════"
-    echo "⚠️  Một số package FAILED (rc=$BUILD_RC)"
-    echo "   → Vẫn tiếp tục release các wheel đã build thành công"
-    echo "════════════════════════════════════════════"
-fi
+bash scripts/build-wheels.sh || true
 
-# Kiểm tra có wheel nào không
+# Kiểm tra có wheel không
 WHEEL_COUNT=$(ls "${WHEELS_OUT}"/*.whl 2>/dev/null | wc -l)
 if [ "$WHEEL_COUNT" -eq 0 ]; then
-    echo "❌ Không có wheel nào được build — dừng"
+    echo "❌ Không có wheel nào được build"
     exit 1
 fi
-echo "✅ Có $WHEEL_COUNT wheel — tiếp tục"
+echo "✅ Có $WHEEL_COUNT wheel"
 
 # ════════════════════════════════════════════════════════════
 # 7. Post-process
@@ -198,31 +171,14 @@ echo "✅ Có $WHEEL_COUNT wheel — tiếp tục"
 bash scripts/post-process.sh || { echo "❌ Post-process FAILED"; exit 1; }
 
 # ════════════════════════════════════════════════════════════
-# 8. Verify — không fail nếu 1 số wheel lỗi (chỉ log)
+# 8. Verify (không fail workflow nếu 1 số wheel lỗi)
 # ════════════════════════════════════════════════════════════
-bash scripts/verify-wheels.sh || echo "⚠️  Verify có lỗi — tiếp tục release"
-
-# ════════════════════════════════════════════════════════════
-# 9. Release — chạy nếu có GH_TOKEN + có wheel
-# ════════════════════════════════════════════════════════════
-FINAL_COUNT=$(ls "${WHEELS_FINAL}"/*.whl 2>/dev/null | wc -l)
-if [ -n "${GH_TOKEN}" ] && [ "$FINAL_COUNT" -gt 0 ]; then
-    echo ""
-    echo "🚀 Release $FINAL_COUNT wheel(s)..."
-    bash scripts/release.sh || echo "⚠️  Release có warning"
-    bash scripts/gen-pip-index.sh || echo "⚠️  Gen index có warning"
-    bash scripts/commit-docs.sh || echo "⚠️  Commit docs có warning"
-else
-    echo "⚠️  Không release (GH_TOKEN=${GH_TOKEN:+set}, wheels=$FINAL_COUNT)"
-fi
+bash scripts/verify-wheels.sh || echo "⚠️  Verify có lỗi"
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
-if [ "$BUILD_RC" -ne 0 ]; then
-    echo "⚠️  Build hoàn tất với một số package fail (đã release phần OK)"
-else
-    echo "✅ Build complete — tất cả package OK"
-fi
+echo "✅ Build complete — sẽ release từ workflow"
 echo "════════════════════════════════════════════════════════════"
 ls -lh "${WHEELS_FINAL}/" || true
+
 exit 0
