@@ -50,7 +50,7 @@ jobs:
           df -h / | tail -1
 
       # ============================================================
-      # [CACHE] deps-install (cross-compiled deps)
+      # [CACHE] deps-install
       # ============================================================
       - name: Cache deps-install
         id: cache-deps
@@ -62,23 +62,21 @@ jobs:
             deps-aarch64-api24-
 
       # ============================================================
-      # [CACHE] python-android (cross-compiled CPython)
+      # [CACHE] python-android
       # ============================================================
       - name: Cache python-android
         id: cache-python
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/python-android
-          key: python-android-3.13.1-v13-docker-${{ hashFiles('Dockerfile.wheels') }}
+          key: python-android-3.13.1-v14-docker-${{ hashFiles('Dockerfile.wheels') }}
           restore-keys: |
-            python-android-3.13.1-v13-docker-
+            python-android-3.13.1-v14-docker-
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ============================================================
-      # Build Docker image (cached layers)
-      # ============================================================
+      # Build image (cache layers)
       - name: Build wheel-builder image
         uses: docker/build-push-action@v5
         with:
@@ -86,26 +84,25 @@ jobs:
           file: Dockerfile.wheels
           load: true
           tags: p4a-wheels:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=v3
+          cache-to: type=gha,mode=max,scope=v3
 
-      # ============================================================
       # Prepare workspace dirs + fix ownership
-      # ============================================================
       - name: Prepare workspace dirs
         run: |
           mkdir -p deps-install python-android wheels-out wheels-final docs
-          # [FIX] Chown workspace to match container user (uid 1000)
           sudo chown -R 1000:1000 "${{ github.workspace }}"
           ls -la "${{ github.workspace }}"
 
       # ============================================================
-      # Run build in container
+      # Run build in container — [FIX] fail = workflow fail
       # ============================================================
       - name: Run build in container
+        id: build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
           docker run --rm \
             -v "${{ github.workspace }}:/work" \
             -w /work \
@@ -120,16 +117,31 @@ jobs:
             p4a-wheels:latest \
             bash /work/scripts/entrypoint.sh
 
-      # ============================================================
-      # Fix ownership back (để upload-artifact đọc được)
-      # ============================================================
+      # Fix ownership back (chạy luôn cả khi fail để lần sau không bị lỗi quyền)
       - name: Fix ownership back
         if: always()
         run: sudo chown -R $(id -u):$(id -g) "${{ github.workspace }}" || true
 
+      # ============================================================
+      # Upload artifact — CHỈ khi build pass
+      # ============================================================
       - uses: actions/upload-artifact@v4
-        if: hashFiles('wheels-final/*.whl') != ''
+        if: success() && hashFiles('wheels-final/*.whl') != ''
         with:
           name: wheels-${{ github.run_id }}
           path: wheels-final/*.whl
           retention-days: 30
+
+      # ============================================================
+      # Summary — luôn chạy
+      # ============================================================
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 📦 Wheels Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Build status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lh wheels-final/ >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "(không có wheels)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
