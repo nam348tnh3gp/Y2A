@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-p4a-style.sh — p4a-style builder với fix Pillow + numpy
+# build-p4a-style.sh — p4a-style với QEMU + Pillow sysconfig patch + numpy exe_wrapper
 set -eo pipefail
 
 PKG_SPEC="${1:-}"
@@ -17,6 +17,16 @@ LOG="/tmp/p4a-${PKG_NAME}.log"
 PY_MINOR="${PYTHON_MINOR:-3.13}"
 ANDROID_TAG="${ANDROID_TAG:-android_24_arm64_v8a}"
 NDK_PREBUILT="${NDK:-}/toolchains/llvm/prebuilt/linux-x86_64"
+HOST_PY_PREFIX="$(dirname "$(dirname "$HOST_PY")")"
+
+# QEMU detector
+QEMU_AARCH64=""
+for cand in qemu-aarch64-static qemu-aarch64 /usr/bin/qemu-aarch64-static; do
+  if command -v "$cand" >/dev/null 2>&1; then
+    QEMU_AARCH64="$cand"; break
+  fi
+done
+echo "  QEMU aarch64: ${QEMU_AARCH64:-NOT_FOUND}"
 
 mkdir -p "$WHEELS_OUT" "$TMP_BUILD" "$SRC_DIR" "$SANDBOX" "$PYSITE"
 
@@ -24,10 +34,78 @@ echo ""; echo "═════════════════════�
 echo "🔨 [p4a-style] Building: $PKG_SPEC"
 echo "════════════════════════════════════════════"
 echo "  HOST_PY:     $HOST_PY"
+echo "  HOST_PREFIX: $HOST_PY_PREFIX"
 echo "  TARGET_ROOT: $TARGET_ROOT"
 echo "  ANDROID_TAG: $ANDROID_TAG"
 echo "  CC:          $CC"
 echo ""
+
+# ============================================================
+# 0. PATCH HOST SYSCONFDATA cho Pillow
+# ============================================================
+PATCHED_SYSCONF=""
+restore_host_sysconf() {
+  if [ -n "$PATCHED_SYSCONF" ] && [ -f "${PATCHED_SYSCONF}.p4a-bak" ]; then
+    mv "${PATCHED_SYSCONF}.p4a-bak" "$PATCHED_SYSCONF"
+    echo "  🔄 Restored host sysconfigdata"
+  fi
+}
+trap restore_host_sysconf EXIT
+
+case "$PKG_NAME" in
+  Pillow|pillow|PIL)
+    HS=$(find "$HOST_PY_PREFIX/lib" -name "_sysconfigdata__linux_x86_64-linux-gnu.py" 2>/dev/null | head -1)
+    [ -z "$HS" ] && HS=$(find "$HOST_PY_PREFIX/lib" -name "_sysconfigdata__*.py" 2>/dev/null | head -1)
+    if [ -n "$HS" ]; then
+      cp "$HS" "${HS}.p4a-bak"
+      PATCHED_SYSCONF="$HS"
+      TARGET_INC="$TARGET_ROOT/include/python${PY_MINOR}"
+      TARGET_LIB="$TARGET_ROOT/lib"
+      HS="$HS" TARGET_INC="$TARGET_INC" TARGET_LIB="$TARGET_LIB" "$HOST_PY" - <<'PYEOF'
+import os, re
+path = os.environ["HS"]
+tinc = os.environ["TARGET_INC"]
+tlib = os.environ["TARGET_LIB"]
+with open(path, "r", encoding="utf-8") as f:
+    c = f.read()
+
+replacements = {
+    '"/usr/include"': f'"{tinc}"',
+    "'/usr/include'": f"'{tinc}'",
+    '"/usr/local/include"': f'"{tinc}"',
+    "'/usr/local/include'": f"'{tinc}'",
+    '"/usr/lib"': f'"{tlib}"',
+    "'/usr/lib'": f"'{tlib}'",
+    '"/usr/local/lib"': f'"{tlib}"',
+    "'/usr/local/lib'": f"'{tlib}'",
+    '"/usr/lib/x86_64-linux-gnu"': f'"{tlib}"',
+    "'/usr/lib/x86_64-linux-gnu'": f"'{tlib}'",
+    '"/lib"': f'"{tlib}"',
+    "'/lib'": f"'{tlib}'",
+    '"/lib64"': f'"{tlib}"',
+    "'/lib64'": f"'{tlib}'",
+    f'"{os.path.dirname(path)}"': f'"{tlib}"',
+    f"'{os.path.dirname(path)}'": f"'{tlib}'",
+}
+for old, new in replacements.items():
+    c = c.replace(old, new)
+
+c = re.sub(r'-I/usr/local/include\s*', '', c)
+c = re.sub(r'-I/usr/include\s*', '', c)
+c = re.sub(r'-L/usr/local/lib\s*', '', c)
+c = re.sub(r'-L/usr/lib/x86_64-linux-gnu\s*', '', c)
+c = re.sub(r'-L/usr/lib64\s*', '', c)
+c = re.sub(r'-L/usr/lib\s*', '', c)
+c = re.sub(r'-L/lib\s*', '', c)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(c)
+print("✅ Patched host sysconfigdata")
+PYEOF
+      echo "  ✅ Patched: $HS"
+    fi
+    ;;
+esac
 
 # ============================================================
 # 1. TẢI SOURCE
@@ -36,7 +114,7 @@ cd "$SRC_DIR"
 if ! "$HOST_PY" -m pip download "$PKG_SPEC" \
       --no-deps --no-binary=:all: \
       --dest="$SRC_DIR" > /tmp/dl.log 2>&1; then
-  echo "⚠️  pip download failed, thử pip wheel trực tiếp"
+  echo "⚠️  pip download failed"
   tail -20 /tmp/dl.log
   cd "$TMP_BUILD"
   if "$HOST_PY" -m pip wheel "$PKG_SPEC" \
@@ -154,7 +232,6 @@ export AS="$CC"
 export RANLIB="$RANLIB"
 export STRIP="$STRIP"
 
-# Hash-style chỉ trong LDFLAGS, không trong LDSHARED/CCSHARED
 export LDSHARED="$CC -shared"
 export CCSHARED="-fPIC"
 export BLDSHARED="$CC -shared"
@@ -171,7 +248,6 @@ export CMAKE_ANDROID_API="$ANDROID_API"
 export ac_cv_prog_CC="$CC"
 export ac_cv_prog_CXX="$CXX"
 
-# KHÔNG dùng -nostdinc (chặn C++ headers)
 export CFLAGS="-fPIC -O2 -I$DEPS_INSTALL/include -I$TARGET_ROOT/include/python${PY_MINOR} -Wno-implicit-function-declaration"
 export CXXFLAGS="$CFLAGS"
 export CPPFLAGS="$CFLAGS"
@@ -205,7 +281,7 @@ export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
 
 # ============================================================
-# 5.6. sitecustomize.py — patch LIBPL
+# 5.6. sitecustomize.py
 # ============================================================
 SYSCONF_DIR="$GITHUB_WORKSPACE/sysconfigdata-host"
 SYSCONF_FILE=$(ls "$TARGET_ROOT/lib/python${PY_MINOR}"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
@@ -268,7 +344,7 @@ if [ -n "$SYSCONF_NAME" ]; then
 fi
 
 # ============================================================
-# 6. site.cfg numpy/scipy
+# 6. site.cfg
 # ============================================================
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
   cat > "$SRC_PATH/site.cfg" <<EOF
@@ -319,9 +395,8 @@ esac
 # 8. PATCH ĐẶC BIỆT CHO TỪNG LIB
 # ============================================================
 case "$PKG_NAME" in
-  # ---------- PILLOW: filter include_dirs/library_dirs ----------
   Pillow|pillow|PIL)
-    echo "  → Patch Pillow setup.py (aggressive filter)"
+    echo "  → Pillow: sysconfig đã patch, patch thêm setup.py"
     cd "$SRC_PATH"
     cp setup.py setup.py.bak 2>/dev/null || true
 
@@ -329,8 +404,6 @@ case "$PKG_NAME" in
 import re
 with open("setup.py", "r") as f:
     c = f.read()
-
-# 1. Replace string literals
 q1, q2 = chr(34), chr(39)
 skip = "/nonexistent/skip"
 for path in [
@@ -340,15 +413,12 @@ for path in [
 ]:
     c = c.replace(q1+path+q1, q1+skip+q1)
     c = c.replace(q2+path+q2, q2+skip+q2)
-
-# 2. Replace _add_directory(_, "/usr/...") calls
 c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/usr[^\x27\x22]*[\x27\x22]\)", "pass", c)
 
-# 3. Inject filter right before setup() call
 filter_code = '''
-# ============ p4a-injected filter ============
+# ============ p4a filter ============
 import os as _os
-_BAD_PREFIXES = (
+_BAD = (
     "/usr/include", "/usr/local/include",
     "/usr/lib", "/usr/local/lib",
     "/tmp/host-python/include", "/tmp/host-python/lib",
@@ -358,16 +428,14 @@ def _is_bad(p):
     pl = p.lower()
     if "android" in pl or "deps-install" in p or "python-android" in p:
         return False
-    for b in _BAD_PREFIXES:
+    for b in _BAD:
         if p.startswith(b): return True
     return False
-
 try:
     include_dirs[:] = [d for d in include_dirs if not _is_bad(d)]
     library_dirs[:] = [d for d in library_dirs if not _is_bad(d)]
 except (NameError, UnboundLocalError):
     pass
-
 try:
     for _ext in ext_modules:
         if hasattr(_ext, "include_dirs") and _ext.include_dirs:
@@ -376,7 +444,7 @@ try:
             _ext.library_dirs = [d for d in _ext.library_dirs if not _is_bad(d)]
 except (NameError, UnboundLocalError):
     pass
-# ============ end p4a filter ============
+# ============ end ============
 
 '''
 m = re.search(r'^(\s*)setup\(', c, re.MULTILINE)
@@ -391,16 +459,24 @@ if m:
 
 with open("setup.py", "w") as f:
     f.write(c)
-print("Pillow patched (aggressive)")
+print("Pillow patched")
 PYEOF
 
     "$HOST_PY" /tmp/patch_pillow.py
-    grep -c "_BAD_PREFIXES" setup.py || echo "(no filter)"
+    grep -c "_BAD" setup.py || echo "(0)"
     ;;
 
-  # ---------- NUMPY + SCIPY: cross-file với exe_wrapper ----------
+  # ---------- NUMPY/SCIPY: QEMU exe_wrapper ----------
   numpy|scipy)
-    echo "  → $PKG_NAME: meson cross-file + OpenBLAS"
+    echo "  → $PKG_NAME: meson cross-file + QEMU exe_wrapper"
+    EXE_WRAPPER=""
+    if [ -n "$QEMU_AARCH64" ]; then
+      EXE_WRAPPER="$QEMU_AARCH64"
+      echo "  ✅ Dùng exe_wrapper: $EXE_WRAPPER"
+    else
+      EXE_WRAPPER="/bin/true"
+      echo "  ⚠️  QEMU không có — fallback /bin/true"
+    fi
     cat > "$TMP_BUILD/android-cross.ini" <<EOF
 [binaries]
 c = '$CC'
@@ -408,7 +484,7 @@ cpp = '$CXX'
 ar = '$AR'
 strip = '$STRIP'
 ranlib = '$RANLIB'
-exe_wrapper = '/bin/true'
+exe_wrapper = '$EXE_WRAPPER'
 
 [host_machine]
 system = 'android'
@@ -429,18 +505,16 @@ EOF
     )
     ;;
 
-  # ---------- CFFI: stable ABI ----------
   cffi)
-    echo "  → cffi: build với Py_LIMITED_API"
+    echo "  → cffi: Py_LIMITED_API"
     export CFFI_PY_LIMITED_API="0x030D0000"
     SETUP_ARGS+=(
       "--config-settings=--build-option=--py-limited-api=cp313"
     )
     ;;
 
-  # ---------- RUST packages ----------
   cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
-    echo "  → $PKG_NAME: Rust + PyO3 link tường minh"
+    echo "  → $PKG_NAME: Rust + PyO3"
     export PYO3_PYTHON="$HOST_PY"
     export PYO3_CROSS=1
     export PYO3_CROSS_PYTHON_VERSION="$PY_MINOR"
@@ -451,14 +525,12 @@ EOF
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
     ;;
 
-  # ---------- LXML ----------
   lxml)
-    echo "  → lxml: dùng stub librt.a + force CC"
+    echo "  → lxml: stub librt.a + force CC"
     ;;
 
-  # ---------- OTHER NATIVE (setuptools) ----------
   greenlet|frozenlist|ujson|markupsafe|regex|multidict|yarl|aiohttp|bitarray|brotli|mmh3|msgpack|lz4|zstandard|xxhash|pyrsistent|immutables|simplejson|pycryptodome|protobuf|pyyaml|cython)
-    echo "  → $PKG_NAME: force CC/CXX/LDSHARED cho setuptools"
+    echo "  → $PKG_NAME: force CC/CXX/LDSHARED"
     ;;
 esac
 
@@ -570,7 +642,7 @@ case "$PKG_NAME" in
         if readelf -d "$RUST_SO" 2>/dev/null | grep -q "libpython${PY_MINOR}.so"; then
           echo "  ✅ $(basename "$whl") — có NEEDED libpython${PY_MINOR}.so"
         else
-          echo "  ⚠️  $(basename "$whl") — không có NEEDED libpython (workflow sẽ patch)"
+          echo "  ⚠️  $(basename "$whl") — không có NEEDED libpython"
         fi
       fi
       rm -rf "$work"
