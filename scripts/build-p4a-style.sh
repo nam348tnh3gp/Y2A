@@ -5,6 +5,7 @@
 #   HOST_PYTHON, TARGET_ROOT, TARGET_SITE, TARGET_STDLIB
 #   CC, CXX, AR, RANLIB, STRIP, READELF, CFLAGS, CPPFLAGS, LDFLAGS
 #   DEPS_INSTALL, NDK, NDK_SYSROOT, ANDROID_API, GITHUB_WORKSPACE, PYTHON_MINOR
+#   ANDROID_TAG (optional, default android_24_arm64_v8a)
 
 set -eo pipefail
 
@@ -16,17 +17,20 @@ if [ -z "$PKG_SPEC" ]; then
   exit 1
 fi
 
+# Strip version specifier cho case matching
 PKG_NAME="${PKG_SPEC%%[<>=!~]*}"
 
 HOST_PY="${HOST_PYTHON:-/tmp/host-python/bin/python3.13}"
 WHEELS_OUT="${WHEELS_OUT:-$GITHUB_WORKSPACE/wheels-out}"
 TMP_BUILD="/tmp/p4a-build-${PKG_NAME}"
 SRC_DIR="${TMP_BUILD}/src"
+SANDBOX="${TMP_BUILD}/sandbox-bin"
 LOG="/tmp/p4a-${PKG_NAME}.log"
 PY_MINOR="${PYTHON_MINOR:-3.13}"
 ANDROID_TAG="${ANDROID_TAG:-android_24_arm64_v8a}"
+NDK_PREBUILT="${NDK:-}/toolchains/llvm/prebuilt/linux-x86_64"
 
-mkdir -p "$WHEELS_OUT" "$TMP_BUILD" "$SRC_DIR"
+mkdir -p "$WHEELS_OUT" "$TMP_BUILD" "$SRC_DIR" "$SANDBOX"
 
 echo ""
 echo "════════════════════════════════════════════"
@@ -36,6 +40,8 @@ echo "  HOST_PY:     $HOST_PY"
 echo "  TARGET_ROOT: $TARGET_ROOT"
 echo "  WHEELS_OUT:  $WHEELS_OUT"
 echo "  ANDROID_TAG: $ANDROID_TAG"
+echo "  CC:          $CC"
+echo ""
 
 # ============================================================
 # 1. TẢI SOURCE
@@ -67,6 +73,7 @@ if [ -z "$TARBALL" ]; then
   exit 1
 fi
 
+# Extract vào subdir riêng để isolate
 mkdir -p "$SRC_DIR/extracted"
 tar -xf "$TARBALL" -C "$SRC_DIR/extracted"
 SRC_PATH=$(find "$SRC_DIR/extracted" -maxdepth 1 -type d | tail -n +2 | head -1)
@@ -74,7 +81,7 @@ SRC_PATH=$(find "$SRC_DIR/extracted" -maxdepth 1 -type d | tail -n +2 | head -1)
 echo "  Source: $SRC_PATH"
 
 # ============================================================
-# 2. DETECT BACKEND
+# 2. DETECT BUILD BACKEND
 # ============================================================
 BACKEND=$(SRC_PATH="$SRC_PATH" "$HOST_PY" - <<'PYEOF'
 import tomllib, os
@@ -90,7 +97,7 @@ PYEOF
 echo "  Backend: $BACKEND"
 
 # ============================================================
-# 3. WRAPPER SCRIPTS
+# 3. WRAPPER SCRIPTS (numpy-config, pybind11-config)
 # ============================================================
 cat > "$TMP_BUILD/numpy-config" <<NCEOF
 #!/bin/sh
@@ -108,17 +115,90 @@ echo "-I$TARGET_SITE/pybind11/include"
 PBEOF
 chmod +x "$TMP_BUILD/pybind11-config"
 
-export PATH="$TMP_BUILD:$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
+# ============================================================
+# 4. SANDBOX — giả lập môi trường cross-compile
+#     Ép mọi lệnh gọi gcc/cc/ld... trỏ về NDK toolchain
+# ============================================================
+echo "  🔧 Tạo sandbox wrapper..."
+rm -rf "$SANDBOX" && mkdir -p "$SANDBOX"
+
+make_wrapper() {
+  local name="$1"
+  local real="$2"
+  cat > "$SANDBOX/$name" <<EOF
+#!/bin/sh
+exec "$real" "\$@"
+EOF
+  chmod +x "$SANDBOX/$name"
+}
+
+# C compiler
+for n in gcc cc clang x86_64-linux-gnu-gcc aarch64-linux-gnu-gcc; do
+  make_wrapper "$n" "$CC"
+done
+
+# C++ compiler
+for n in g++ c++ clang++ x86_64-linux-gnu-g++ aarch64-linux-gnu-g++; do
+  make_wrapper "$n" "$CXX"
+done
+
+# Binutils
+LD_REAL="$NDK_PREBUILT/bin/ld.lld"
+[ -x "$LD_REAL" ] || LD_REAL="$AR"
+make_wrapper ld "$LD_REAL"
+make_wrapper ar "$AR"
+make_wrapper ranlib "$RANLIB"
+make_wrapper strip "$STRIP"
+make_wrapper nm "$NDK_PREBUILT/bin/llvm-nm"
+make_wrapper objcopy "$NDK_PREBUILT/bin/llvm-objcopy"
+make_wrapper objdump "$NDK_PREBUILT/bin/llvm-objdump"
+make_wrapper readelf "$READELF"
+make_wrapper gcc-ar "$AR"
+make_wrapper gcc-ranlib "$RANLIB"
 
 # ============================================================
-# 4. ENV p4a-STYLE
+# 5. ENV p4a-STYLE
 # ============================================================
+# Ép sandbox lên ĐẦU PATH
+export PATH="$SANDBOX:$TMP_BUILD:$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
+
+echo "  which gcc:  $(which gcc 2>/dev/null || echo NOT_FOUND)"
+echo "  which g++:  $(which g++ 2>/dev/null || echo NOT_FOUND)"
+
 export _PYTHON_HOST_PLATFORM="$ANDROID_TAG"
 export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
 export TARGET_PYTHON_EXE="$TARGET_ROOT/bin/python${PY_MINOR}"
 
 unset FC F77 F90
 
+# Ép env cho distutils/setuptools
+export CC="$CC"
+export CXX="$CXX"
+export CPP="$CC -E"
+export LD="$CC"
+export AR="$AR"
+export AS="$CC"
+export RANLIB="$RANLIB"
+export STRIP="$STRIP"
+export LDSHARED="$CC -shared"
+export CCSHARED="$CC -shared"
+export BLDSHARED="$CC -shared"
+export LDCXXSHARED="$CXX -shared"
+
+# Ép env cho CMake
+export CMAKE_C_COMPILER="$CC"
+export CMAKE_CXX_COMPILER="$CXX"
+export CMAKE_AR="$AR"
+export CMAKE_RANLIB="$RANLIB"
+export CMAKE_SYSTEM_NAME="Android"
+export CMAKE_SYSTEM_PROCESSOR="aarch64"
+export CMAKE_ANDROID_API="$ANDROID_API"
+
+# Ép env cho autoconf
+export ac_cv_prog_CC="$CC"
+export ac_cv_prog_CXX="$CXX"
+
+# NumPy BLAS
 export NPY_DISABLE_SVML=1
 export NPY_USE_BLAS_ILP64=0
 export NPY_BLAS_LIBS="-lopenblas"
@@ -126,7 +206,7 @@ export NPY_CBLAS_LIBS="-lopenblas"
 export NPY_LAPACK_LIBS="-lopenblas"
 
 # ============================================================
-# 5. site.cfg cho numpy/scipy
+# 6. site.cfg cho numpy/scipy (BLAS)
 # ============================================================
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
   cat > "$SRC_PATH/site.cfg" <<EOF
@@ -139,7 +219,7 @@ EOF
 fi
 
 # ============================================================
-# 6. SETUP-ARGS THEO BACKEND
+# 7. SETUP-ARGS THEO BACKEND
 # ============================================================
 SETUP_ARGS=()
 
@@ -167,7 +247,7 @@ case "$BACKEND" in
 esac
 
 # ============================================================
-# 7. PATCH ĐẶC BIỆT CHO TỪNG LIB
+# 8. PATCH ĐẶC BIỆT CHO TỪNG LIB
 # ============================================================
 case "$PKG_NAME" in
   Pillow|pillow|PIL)
@@ -192,24 +272,12 @@ PYEOF
 
     "$HOST_PY" /tmp/patch_pillow.py
     grep -c "nonexistent" setup.py || echo "(0)"
-
-    export CC="$CC"
-    export CXX="$CXX"
-    export LD="$CC"
-    export LDSHARED="$CC -shared"
     ;;
 
-  # [FIX] Setuptools bỏ qua CC env — force lại + set sysconfig
   greenlet|frozenlist|ujson|markupsafe|regex|multidict|yarl|aiohttp|bitarray|brotli|mmh3|msgpack|lz4|zstandard|xxhash|pyrsistent|immutables|simplejson|pycryptodome|protobuf|pyyaml|cython)
     echo "  → $PKG_NAME: force CC/CXX/LDSHARED cho setuptools"
-    export CC="$CC"
-    export CXX="$CXX"
-    export LD="$CC"
-    export LDSHARED="$CC -shared"
-    export CCSHARED="$CC -shared"
     ;;
 
-  # [FIX] numpy 2.x dùng meson — cần cross-file
   numpy)
     echo "  → numpy: meson cross-file + OpenBLAS"
     cat > "$TMP_BUILD/android-cross.ini" <<EOF
@@ -268,21 +336,19 @@ EOF
 
   lxml)
     echo "  → lxml: dùng stub librt.a + force CC"
-    export CC="$CC"
-    export CXX="$CXX"
-    export LDSHARED="$CC -shared"
     ;;
 
   cryptography)
-    echo "  → cryptography: Rust build, sẽ patch RPATH ở workflow"
+    echo "  → cryptography: Rust build, patch RPATH sau"
     ;;
 esac
 
 # ============================================================
-# 8. BUILD WHEEL
+# 9. BUILD WHEEL
 # ============================================================
 cd "$SRC_PATH"
 
+echo ""
 echo "  setup-args: ${SETUP_ARGS[*]}"
 echo ""
 
@@ -307,7 +373,7 @@ else
 fi
 
 # ============================================================
-# 9. KẾT QUẢ + VERIFY
+# 10. KẾT QUẢ
 # ============================================================
 if [ "$RC" -ne 0 ]; then
   echo "--- pip log (tail 60) ---"
@@ -319,25 +385,56 @@ fi
 tail -20 "$LOG"
 echo "✅ [p4a-style] $PKG_NAME DONE"
 
+# ============================================================
+# 11. VERIFY SANDBOX COMPILER (compiler có tạo ELF AArch64?)
+# ============================================================
 echo ""
-echo "🔍 Verify bionic..."
+echo "🔍 Verify sandbox compiler..."
+CT=$(mktemp --suffix=.c)
+cat > "$CT" <<'EOF'
+int main(void) { return 0; }
+EOF
+CO="${CT%.c}.o"
+if gcc -c "$CT" -o "$CO" 2>/dev/null; then
+  if readelf -h "$CO" 2>/dev/null | grep -q "AArch64"; then
+    echo "  ✅ gcc wrapper → AArch64 ELF"
+  else
+    echo "  ❌ gcc wrapper không tạo AArch64 ELF:"
+    readelf -h "$CO" | grep -E "Machine|Class" || true
+  fi
+else
+  echo "  ⚠️  Không test được gcc wrapper"
+fi
+rm -f "$CT" "$CO"
+
+# ============================================================
+# 12. VERIFY WHEEL BIONIC
+# ============================================================
+echo ""
+echo "🔍 Verify bionic cho wheel vừa build..."
 GLIBC_PAT='libc\.so\.6|ld-linux|libm\.so\.6|libpthread\.so\.0'
+WHEEL_FOUND=0
 for whl in "$WHEELS_OUT"/${PKG_NAME//-/_}-*.whl "$WHEELS_OUT"/${PKG_NAME}-*.whl; do
   [ -f "$whl" ] || continue
+  WHEEL_FOUND=1
   work=$(mktemp -d)
   unzip -q -o "$whl" -d "$work"
   bad=0
   while IFS= read -r so; do
     if readelf -d "$so" 2>/dev/null | grep -Eq "$GLIBC_PAT"; then
-      echo "❌ $(basename "$whl") — $(basename "$so") link glibc"
-      readelf -d "$so" | grep -E 'NEEDED' | grep -E "$GLIBC_PAT" | sed 's/^/   /'
+      echo "  ❌ $(basename "$whl") — $(basename "$so") link glibc:"
+      readelf -d "$so" | grep -E 'NEEDED' | grep -E "$GLIBC_PAT" | sed 's/^/     /'
       bad=1
     fi
   done < <(find "$work" -name "*.so")
   rm -rf "$work"
   if [ "$bad" -eq 0 ]; then
-    echo "✅ $(basename "$whl")"
+    echo "  ✅ $(basename "$whl")"
   fi
 done
+
+if [ "$WHEEL_FOUND" -eq 0 ]; then
+  echo "  ⚠️  Không tìm thấy wheel nào cho $PKG_NAME"
+fi
 
 exit 0
