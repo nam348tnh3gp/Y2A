@@ -1,11 +1,5 @@
 #!/bin/bash
 # Cross-compile core deps cho Android wheels.
-# Bao gồm: libffi, OpenSSL, SQLite3, XZ, zlib, libxml2, libxslt,
-#          libjpeg-turbo, libpng, OpenBLAS
-#
-# Chạy trong Docker container (env từ Dockerfile.wheels):
-#   CC, CXX, AR, RANLIB, STRIP, READELF, NDK, NDK_PREBUILT
-#   DEPS_INSTALL, TARGET_HOST, ANDROID_API
 set -eo pipefail
 
 cd /tmp
@@ -18,18 +12,12 @@ ANDROID_API="${ANDROID_API:-24}"
 COMMON_LDFLAGS="-Wl,--hash-style=both"
 COMMON_CONFIGURE_FLAGS="--host=${TARGET_HOST} --prefix=${DEPS_INSTALL} --enable-static --disable-shared"
 
-# KHÔNG thêm DEPS_INSTALL/bin vào PATH global
-# (tránh shadow host binary xz, xmllint, ...)
 export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="${DEPS_INSTALL}/lib/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR=""
 
 echo "════════════════════════════════════════════"
 echo "  Cross-compiling core deps"
-echo "  DEPS_INSTALL: $DEPS_INSTALL"
-echo "  TARGET_HOST:  $TARGET_HOST"
-echo "  API:          $ANDROID_API"
-echo "  CC:           $CC"
 echo "════════════════════════════════════════════"
 
 # ═══════════════════════════════════════════════════════════
@@ -75,8 +63,9 @@ fi
 wget -q "${SQLITE_URL}"
 tar -xf "sqlite-autoconf-${SQLITE_VERSION}.tar.gz"
 cd "sqlite-autoconf-${SQLITE_VERSION}"
-./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
-make -j$(nproc) install
+# [FIX] -fPIC cho SQLite3
+CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
+make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
 # ═══════════════════════════════════════════════════════════
@@ -87,8 +76,9 @@ echo "═══ XZ ═══"
 wget -q "https://github.com/tukaani-project/xz/releases/download/v${XZ_VERSION}/xz-${XZ_VERSION}.tar.gz"
 tar -xf "xz-${XZ_VERSION}.tar.gz"
 cd "xz-${XZ_VERSION}"
-./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
-make -j$(nproc) install
+# [FIX] -fPIC cho XZ
+CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
+make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
 # Xoá ARM binary khỏi DEPS_INSTALL/bin
@@ -102,15 +92,18 @@ for bin in xz xzdec lzma unlzma unxz lzcat lzma-config xz-config; do
 done
 
 # ═══════════════════════════════════════════════════════════
-# zlib
+# zlib — [FIX] -fPIC BẮT BUỘC
 # ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ zlib ═══"
 wget -q "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz"
 tar -xf "zlib-${ZLIB_VERSION}.tar.gz"
 cd "zlib-${ZLIB_VERSION}"
-CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" ./configure --prefix="${DEPS_INSTALL}" --static
-make -j$(nproc) install
+# [FIX] zlib không tự thêm -fPIC — phải pass explicit
+CFLAGS="-fPIC -O2" CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" \
+    ./configure --prefix="${DEPS_INSTALL}" --static
+make -j$(nproc) CFLAGS="-fPIC -O2"
+make install
 cd ..
 
 # ═══════════════════════════════════════════════════════════
@@ -121,10 +114,10 @@ echo "═══ libxml2 ═══"
 wget -q "https://download.gnome.org/sources/libxml2/2.12/libxml2-${LIBXML2_VERSION}.tar.xz"
 tar -xf "libxml2-${LIBXML2_VERSION}.tar.xz"
 cd "libxml2-${LIBXML2_VERSION}"
-./configure ${COMMON_CONFIGURE_FLAGS} \
+CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} \
     --without-python --without-lzma --without-zlib --without-iconv --without-icu \
     LDFLAGS="${COMMON_LDFLAGS}"
-make -j$(nproc) install
+make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
 # Verify libxml2 headers + xml2-config
@@ -137,7 +130,6 @@ if [ ! -x "${DEPS_INSTALL}/bin/xml2-config" ]; then
     exit 1
 fi
 echo "  ✅ libxml2 + xml2-config OK"
-echo "  xml2-config --cflags: $(${DEPS_INSTALL}/bin/xml2-config --cflags)"
 
 # ═══════════════════════════════════════════════════════════
 # libxslt — chỉ build libxslt + libexslt (skip xsltproc)
@@ -148,12 +140,10 @@ wget -q "https://download.gnome.org/sources/libxslt/1.1/libxslt-${LIBXSLT_VERSIO
 tar -xf "libxslt-${LIBXSLT_VERSION}.tar.xz"
 cd "libxslt-${LIBXSLT_VERSION}"
 
-# Ép cứng include path của libxml2 vào CPPFLAGS/CFLAGS
 export CPPFLAGS="-I${DEPS_INSTALL}/include -I${DEPS_INSTALL}/include/libxml2 ${CPPFLAGS:-}"
-export CFLAGS="-I${DEPS_INSTALL}/include -I${DEPS_INSTALL}/include/libxml2 ${CFLAGS:-}"
+export CFLAGS="-fPIC -O2 -I${DEPS_INSTALL}/include -I${DEPS_INSTALL}/include/libxml2 ${CFLAGS:-}"
 export LDFLAGS="${COMMON_LDFLAGS} -L${DEPS_INSTALL}/lib"
 
-# Temp PATH để configure tìm xml2-config
 OLD_PATH="${PATH}"
 export PATH="${DEPS_INSTALL}/bin:${PATH}"
 export XML_CONFIG="${DEPS_INSTALL}/bin/xml2-config"
@@ -171,31 +161,25 @@ export XML_CONFIG="${DEPS_INSTALL}/bin/xml2-config"
 export PATH="${OLD_PATH}"
 unset XML_CONFIG
 
-# [FIX] Chỉ build + install libxslt + libexslt subdirs — bỏ qua xsltproc
-make -j$(nproc) -C libxslt
-make -j$(nproc) -C libexslt
-
+make -j$(nproc) -C libxslt CFLAGS="${CFLAGS}"
+make -j$(nproc) -C libexslt CFLAGS="${CFLAGS}"
 make -C libxslt install
 make -C libexslt install
 
-# Install thêm pkg-config + xslt-config script (skip xsltproc binary)
 [ -f xslt-config ] && install -m 755 xslt-config "${DEPS_INSTALL}/bin/xslt-config"
 [ -f libxslt.pc ] && install -m 644 libxslt.pc "${DEPS_INSTALL}/lib/pkgconfig/"
 [ -f libexslt.pc ] && install -m 644 libexslt.pc "${DEPS_INSTALL}/lib/pkgconfig/"
 
 cd ..
 
-# Xoá ARM binary còn sót
 for bin in xsltproc xslt-config; do
     if [ -f "${DEPS_INSTALL}/bin/${bin}" ]; then
         if file "${DEPS_INSTALL}/bin/${bin}" 2>/dev/null | grep -q "ELF"; then
             rm -f "${DEPS_INSTALL}/bin/${bin}"
-            echo "  🗑️  Removed ARM binary: ${bin}"
         fi
     fi
 done
 
-# Verify
 if [ ! -f "${DEPS_INSTALL}/lib/libxslt.a" ] || [ ! -f "${DEPS_INSTALL}/lib/libexslt.a" ]; then
     echo "❌ libxslt.a hoặc libexslt.a không tồn tại"
     exit 1
@@ -216,6 +200,7 @@ cmake -G Ninja \
     -DANDROID_ABI=arm64-v8a \
     -DANDROID_PLATFORM=android-${ANDROID_API} \
     -DCMAKE_INSTALL_PREFIX="${DEPS_INSTALL}" \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DENABLE_SHARED=OFF -DENABLE_STATIC=ON \
     -DWITH_TURBOJPEG=OFF -DWITH_SIMD=OFF ..
 ninja && ninja install
@@ -230,8 +215,8 @@ wget -q "https://download.sourceforge.net/libpng/libpng-${LIBPNG_VERSION}.tar.gz
     || wget -q "https://github.com/pnggroup/libpng/archive/refs/tags/v${LIBPNG_VERSION}.tar.gz" -O "libpng-${LIBPNG_VERSION}.tar.gz"
 tar -xf "libpng-${LIBPNG_VERSION}.tar.gz"
 cd "libpng-${LIBPNG_VERSION}"
-./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
-make -j$(nproc) install
+CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
+make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
 # ═══════════════════════════════════════════════════════════
@@ -258,18 +243,25 @@ echo ""
 echo "════════════════════════════════════════════"
 echo "✅ Tất cả core deps built"
 echo "════════════════════════════════════════════"
+
+# Verify tất cả libz.a object có PIC không
 echo ""
-echo "=== DEPS_INSTALL/bin ==="
-ls -la "${DEPS_INSTALL}/bin/" 2>/dev/null | head -20 || echo "(empty)"
-echo ""
-echo "=== DEPS_INSTALL/lib (.a files) ==="
-ls -lh "${DEPS_INSTALL}/lib/"*.a 2>/dev/null | head -30 || echo "(no .a)"
-echo ""
-echo "=== DEPS_INSTALL/lib (.so files) ==="
-ls -lh "${DEPS_INSTALL}/lib/"*.so 2>/dev/null | head -10 || echo "(no .so)"
-echo ""
-echo "=== DEPS_INSTALL/include ==="
-ls "${DEPS_INSTALL}/include/" 2>/dev/null || echo "(empty)"
+echo "🔍 Verify zlib.a có -fPIC (không có relocation error khi link)"
+if [ -f "${DEPS_INSTALL}/lib/libz.a" ]; then
+    OBJ=$(mktemp -d)
+    cd "$OBJ"
+    ar x "${DEPS_INSTALL}/lib/libz.a" zutil.o 2>/dev/null || true
+    if [ -f zutil.o ]; then
+        if ${READELF} -r zutil.o 2>/dev/null | grep -q "R_AARCH64_ADR_PREL_PG_HI21"; then
+            echo "  ❌ zutil.o vẫn không có PIC"
+            cd /tmp && rm -rf "$OBJ"
+            exit 1
+        else
+            echo "  ✅ zutil.o có PIC"
+        fi
+    fi
+    cd /tmp && rm -rf "$OBJ"
+fi
 
 # Verify critical libs
 MISSING=""
@@ -278,9 +270,7 @@ for lib in libffi.a libssl.so libcrypto.so libsqlite3.a liblzma.a libz.a \
     [ ! -f "${DEPS_INSTALL}/lib/${lib}" ] && MISSING="$MISSING $lib"
 done
 if [ -n "$MISSING" ]; then
-    echo ""
     echo "❌ MISSING LIBS: $MISSING"
     exit 1
 fi
-echo ""
 echo "✅ Tất cả critical libs có mặt"
