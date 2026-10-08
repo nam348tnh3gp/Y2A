@@ -97,7 +97,7 @@ jobs:
           echo "${{ github.workspace }}/ndk-cache/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
       # ============================================================
-      # [CACHE] Host Python + SOURCE TARBALL (cả 2)
+      # [CACHE] Host Python + SOURCE TARBALL
       # ============================================================
       - name: Cache Host Python + source
         id: cache-host-python
@@ -203,7 +203,7 @@ jobs:
 
             # [FIX] Bỏ cryptography cũ — phải rebuild với PyO3 config
             if [[ "$base" == cryptography-* ]]; then
-              echo "🗑️  cryptography cũ (rebuild với PyO3 config): $base"
+              echo "🗑️  cryptography cũ (rebuild với PyO3): $base"
               continue
             fi
 
@@ -393,7 +393,6 @@ jobs:
 
       # ─────────── CROSS-COMPILE CPYTHON ───────────
 
-      # [FIX] Ensure source tarball available dù cache hit
       - name: Ensure Python source available
         run: |
           set -eo pipefail
@@ -651,40 +650,59 @@ jobs:
 
           SUCCESS_T1=""; SUCCESS_T2=""; SKIP_LIST=""; FAIL_LIST=""
 
+          # [FIX] Rust/PyO3 packages bắt buộc dùng Tier 2 (PyO3 config)
+          FORCE_TIER2="cryptography bcrypt nh3 pydantic-core orjson tokenizers"
+
           for pkg in $PKGLIST; do
             echo ""
             echo "════════════════════════════════════════"
             echo "📦 $pkg"
             echo "════════════════════════════════════════"
 
+            # Check if force Tier 2
+            FORCE_T2=0
+            for fp in $FORCE_TIER2; do
+              if [ "$pkg" = "$fp" ]; then FORCE_T2=1; break; fi
+            done
+
             existing=$(find_wheel "$pkg")
             if [ -n "$existing" ] && verify_bionic "$existing"; then
-              echo "⏭️  Skip (đã có wheel bionic)"
-              SKIP_LIST="$SKIP_LIST $pkg"
-              continue
-            fi
-            if [ -n "$existing" ] && ! verify_bionic "$existing"; then
+              # Rust packages không skip, phải rebuild với PyO3 config
+              if [ "$FORCE_T2" -eq 0 ]; then
+                echo "⏭️  Skip (đã có wheel bionic)"
+                SKIP_LIST="$SKIP_LIST $pkg"
+                continue
+              else
+                echo "🗑️  Rust package — xoá wheel cũ để rebuild với PyO3 config"
+                rm -f "$existing"
+              fi
+            elif [ -n "$existing" ]; then
               echo "🗑️  Xoá wheel cũ link glibc: $(basename "$existing")"
               rm -f "$existing"
             fi
 
-            echo "🔨 Tầng 1: pip wheel"
             TIER1_OK=0
-            if "$HOST_PY" -m pip wheel "$pkg" \
-                  --no-deps --no-build-isolation --no-binary=:all: \
-                  --wheel-dir wheels-out > "/tmp/pip_${pkg}.log" 2>&1; then
-              whl=$(find_wheel "$pkg")
-              if [ -n "$whl" ] && verify_bionic "$whl"; then
-                echo "✅ $pkg — Tầng 1 (bionic)"
-                SUCCESS_T1="$SUCCESS_T1 $pkg"
-                TIER1_OK=1
-              else
-                echo "⚠️  $pkg — Tier 1 wheel link glibc → XOÁ + fallback Tier 2"
-                [ -n "$whl" ] && rm -f "$whl"
-              fi
+
+            if [ "$FORCE_T2" -eq 1 ]; then
+              echo "⚡ $pkg — buộc dùng Tier 2 (PyO3 config)"
             else
-              echo "--- pip log (tail 30) ---"
-              tail -30 "/tmp/pip_${pkg}.log" || true
+              echo "🔨 Tầng 1: pip wheel"
+              if "$HOST_PY" -m pip wheel "$pkg" \
+                    --no-deps --no-build-isolation --no-binary=:all: \
+                    --wheel-dir wheels-out > "/tmp/pip_${pkg}.log" 2>&1; then
+                whl=$(find_wheel "$pkg")
+                if [ -n "$whl" ] && verify_bionic "$whl"; then
+                  echo "✅ $pkg — Tầng 1 (bionic)"
+                  SUCCESS_T1="$SUCCESS_T1 $pkg"
+                  TIER1_OK=1
+                else
+                  echo "⚠️  $pkg — Tier 1 wheel link glibc → XOÁ + fallback Tier 2"
+                  [ -n "$whl" ] && rm -f "$whl"
+                fi
+              else
+                echo "--- pip log (tail 30) ---"
+                tail -30 "/tmp/pip_${pkg}.log" || true
+              fi
             fi
 
             [ "$TIER1_OK" -eq 1 ] && continue
@@ -721,7 +739,7 @@ jobs:
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
-      # VERIFY cryptography wheel links libpython (p4a-style)
+      # VERIFY + PATCH cryptography wheel (p4a-style)
       # ==========================================================
       - name: Verify cryptography wheel links libpython
         run: |
@@ -749,22 +767,41 @@ jobs:
           fi
           echo "SO: $RUST_SO"
 
-          echo "=== Dynamic section ==="
+          echo "=== Trước patch ==="
           readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH" || echo "(không có)"
 
+          PATCHED=0
+
+          # Patch NEEDED libpython nếu thiếu
           if ! readelf -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
-            echo ""
-            echo "❌ FAIL: _rust.abi3.so THIẾU NEEDED libpython${PYTHON_MINOR}.so"
-            echo "   PyO3 build không link tường minh"
+            echo "⚠️  Thiếu NEEDED libpython${PYTHON_MINOR}.so — patching"
+            patchelf --add-needed "libpython${PYTHON_MINOR}.so" "$RUST_SO"
+            PATCHED=1
+          fi
+
+          # Patch RPATH nếu thiếu
+          if ! readelf -d "$RUST_SO" | grep -qE "RPATH|RUNPATH"; then
+            echo "⚠️  Thiếu RPATH — patching"
+            patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
+            PATCHED=1
+          fi
+
+          echo ""
+          echo "=== Sau patch ==="
+          readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH"
+
+          if ! readelf -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
+            echo "❌ FAIL: vẫn thiếu NEEDED libpython${PYTHON_MINOR}.so sau patch"
             exit 1
           fi
 
-          if ! readelf -d "$RUST_SO" | grep -qE "RPATH|RUNPATH"; then
-            echo "⚠️  Thiếu RPATH — patching để thêm"
-            patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
-            CRYPTO_WHL="$CRYPTO_WHL" "$HOST_PYTHON" - <<'PYEOF'
+          if [ "$PATCHED" -eq 1 ]; then
+            echo ""
+            echo "→ Repack wheel với _rust.abi3.so đã patch"
+            CRYPTO_WHL="$CRYPTO_WHL" RUST_SO_REL="$RUST_SO" "$HOST_PYTHON" - <<'PYEOF'
           import base64, hashlib, csv, os, zipfile, tempfile, shutil
           whl = os.environ["CRYPTO_WHL"]
+          rust_rel = os.environ["RUST_SO_REL"].lstrip("./")
           tmp = tempfile.mkdtemp()
           try:
               with zipfile.ZipFile(whl, 'r') as z:
@@ -775,8 +812,8 @@ jobs:
                       with open(rp, 'r', newline='') as f:
                           rows = list(csv.reader(f))
                       for r in rows:
-                          if len(r) >= 3 and r[0].endswith('_rust.abi3.so'):
-                              full = os.path.join(tmp, r[0])
+                          if len(r) >= 3 and r[0] == rust_rel:
+                              full = os.path.join(tmp, rust_rel)
                               with open(full, 'rb') as fh:
                                   data = fh.read()
                               d = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()
@@ -791,13 +828,16 @@ jobs:
                           full = os.path.join(root, f)
                           zf.write(full, os.path.relpath(full, tmp))
               shutil.move(out, whl)
+              print("✅ RECORD + wheel repacked")
           finally:
               shutil.rmtree(tmp, ignore_errors=True)
           PYEOF
+          else
+            echo "✅ Wheel đã đúng — không cần patch"
           fi
 
           echo ""
-          echo "✅ cryptography wheel OK — có NEEDED libpython${PYTHON_MINOR}.so"
+          echo "✅ cryptography wheel OK — có NEEDED libpython${PYTHON_MINOR}.so + RPATH"
 
       # ==========================================================
       # POST-PROCESS
