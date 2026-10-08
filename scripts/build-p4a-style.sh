@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-p4a-style.sh — build 1 package cho Android (p4a-style)
+# build-p4a-style.sh — build 1 package cho Android
 set -eo pipefail
 
 PKG_SPEC="${1:-}"
@@ -34,7 +34,9 @@ case "$PKG_NAME" in
         if [ -n "$HS" ]; then
             cp "$HS" "${HS}.p4a-bak"
             PATCHED_SYSCONF="$HS"
-            HS="$HS" TARGET_INC="${TARGET_ROOT}/include/python${PYTHON_MINOR}" TARGET_LIB="${TARGET_ROOT}/lib" \
+            HS="$HS" \
+            TARGET_INC="${TARGET_ROOT}/include/python${PYTHON_MINOR}" \
+            TARGET_LIB="${TARGET_ROOT}/lib" \
             "${HOST_PYTHON}" - <<'PYEOF'
 import os, re
 path = os.environ["HS"]
@@ -50,11 +52,13 @@ for old, new in [
     ('"/usr/lib/x86_64-linux-gnu"', f'"{tlib}"'), ("'/usr/lib/x86_64-linux-gnu'", f"'{tlib}'"),
     ('"/lib"', f'"{tlib}"'), ("'/lib'", f"'{tlib}'"),
     ('"/lib64"', f'"{tlib}"'), ("'/lib64'", f"'{tlib}'"),
+    ('"/opt/host-python/lib"', f'"{tlib}"'), ("'/opt/host-python/lib'", f"'{tlib}'"),
 ]:
     c = c.replace(old, new)
 for pat in [r'-I/usr/local/include\s*', r'-I/usr/include\s*',
             r'-L/usr/local/lib\s*', r'-L/usr/lib/x86_64-linux-gnu\s*',
-            r'-L/usr/lib64\s*', r'-L/usr/lib\s*', r'-L/lib\s*']:
+            r'-L/usr/lib64\s*', r'-L/usr/lib\s*', r'-L/lib\s*',
+            r'-L/opt/host-python/lib\s*']:
     c = re.sub(pat, '', c)
 with open(path, "w", encoding="utf-8") as f:
     f.write(c)
@@ -69,9 +73,36 @@ esac
 cd "$SRC_DIR"
 if ! "${HOST_PYTHON}" -m pip download "$PKG_SPEC" \
         --no-deps --no-binary=:all: --dest="$SRC_DIR" > /tmp/dl.log 2>&1; then
-    echo "⚠️  pip download failed"
-    tail -20 /tmp/dl.log
-    exit 1
+
+    echo "⚠️  pip download failed — thử fetch sdist từ PyPI trực tiếp"
+    tail -10 /tmp/dl.log
+
+    # [FIX] Lấy sdist URL từ PyPI JSON API
+    PKG_BASE="${PKG_SPEC%%[<>=!~]*}"
+    PYPI_JSON=$(curl -sL "https://pypi.org/pypi/${PKG_BASE}/json" 2>/dev/null || echo "{}")
+    SDIST_URL=$(echo "$PYPI_JSON" | "${HOST_PYTHON}" -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    urls = d.get('urls', [])
+    for u in urls:
+        if u.get('packagetype') == 'sdist':
+            print(u['url']); break
+except Exception:
+    pass
+" 2>/dev/null || echo "")
+
+    if [ -z "$SDIST_URL" ]; then
+        echo "❌ Không tìm thấy sdist URL cho $PKG_BASE"
+        exit 1
+    fi
+
+    echo "  → Download: $SDIST_URL"
+    SDIST_NAME=$(basename "$SDIST_URL")
+    wget -q "$SDIST_URL" -O "${SRC_DIR}/${SDIST_NAME}" || {
+        echo "❌ Download sdist failed"
+        exit 1
+    }
 fi
 
 TARBALL=$(find "$SRC_DIR" -maxdepth 1 \( -name "*.tar.gz" -o -name "*.tar.xz" \
@@ -114,7 +145,7 @@ NCEOF
 chmod +x "${TMP_BUILD}/numpy-config"
 
 # ============================================================
-# 4. Sandbox compiler wrapper
+# 4. Sandbox compiler
 # ============================================================
 SANDBOX="${TMP_BUILD}/sandbox-bin"
 mkdir -p "$SANDBOX"
@@ -148,10 +179,12 @@ export TARGET_PYTHON_EXE="${TARGET_ROOT}/bin/python${PYTHON_MINOR}"
 unset FC F77 F90
 
 export CC CXX CPP="${CC} -E" LD="${CC}" AR AS="${CC}" RANLIB STRIP
-export LDSHARED="${CC} -shared"
+
+# [FIX] Bỏ hash-style khỏi CCSHARED (chỉ cần trong LDFLAGS)
+export LDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export CCSHARED="-fPIC"
-export BLDSHARED="${CC} -shared"
-export LDCXXSHARED="${CXX} -shared"
+export BLDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
+export LDCXXSHARED="${CXX} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 
 export CMAKE_C_COMPILER="${CC}"
 export CMAKE_CXX_COMPILER="${CXX}"
@@ -183,7 +216,7 @@ suppress_build_script_link_lines=false
 EOF
 export PYO3_CONFIG_FILE="$PYO3_CONFIG"
 
-# sitecustomize để patch LIBPL
+# sitecustomize
 cat > "${PYSITE}/sitecustomize.py" <<SITEEOF
 import sysconfig
 _patches = {
@@ -273,7 +306,9 @@ EOF
         export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
         export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include"
         export PYO3_CONFIG_FILE="${PYO3_CONFIG}"
-        export RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR} -C link-arg=-Wl,--hash-style=both"
+        # [FIX] Chỉ set target-specific RUSTFLAGS, không global
+        export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR} -C link-arg=-Wl,--hash-style=both"
+        unset RUSTFLAGS
         ;;
     *)
         echo "  → Setuptools backend"
@@ -282,7 +317,7 @@ EOF
 esac
 
 # ============================================================
-# 8. Patch đặc biệt từng package
+# 8. Patch đặc biệt
 # ============================================================
 case "$PKG_NAME" in
     Pillow|pillow|PIL)
@@ -354,8 +389,13 @@ PYEOF
         export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
         export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include"
         export PYO3_CONFIG_FILE="${PYO3_CONFIG}"
-        export RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR} -C link-arg=-Wl,--hash-style=both"
-        export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
+        # [FIX] Chỉ target-specific, không global
+        export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR} -C link-arg=-Wl,--hash-style=both"
+        unset RUSTFLAGS
+        ;;
+
+    lxml)
+        echo "  → lxml"
         ;;
 esac
 
@@ -383,7 +423,11 @@ fi
 # ============================================================
 case "$PKG_NAME" in
     cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
-        WHL=$(ls -t "${WHEELS_OUT}"/${PKG_NAME//-/_}-*.whl "${WHEELS_OUT}"/${PKG_NAME}-*.whl 2>/dev/null | head -1 || true)
+        pkg_under=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+        pkg_lower=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]')
+        WHL=$(ls -t "${WHEELS_OUT}"/${pkg_under}-*.whl \
+                    "${WHEELS_OUT}"/${pkg_lower}-*.whl \
+                    "${WHEELS_OUT}"/${PKG_NAME}-*.whl 2>/dev/null | head -1 || true)
         if [ -n "$WHL" ]; then
             WHL=$(realpath "$WHL")
             WORK="/tmp/patch-${PKG_NAME}"
