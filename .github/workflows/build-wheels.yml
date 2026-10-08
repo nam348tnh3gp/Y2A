@@ -168,7 +168,7 @@ jobs:
           echo "✅ Cleanup done"
 
       # ============================================================
-      # [FIX] Tải wheel cũ — lọc bỏ wheel link glibc
+      # Tải wheel cũ — lọc bỏ wheel link glibc
       # ============================================================
       - name: Download previous wheels
         id: prev
@@ -194,7 +194,6 @@ jobs:
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
 
-            # Nếu tên wheel bị nhân tag → coi là hỏng
             if echo "$base" | grep -qE '\.android_[0-9]+_[a-z0-9_]+\.'; then
               echo "🗑️  Tên nhân tag: $base"
               continue
@@ -495,7 +494,7 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # BUILD WHEELS — [FIX] verify bionic sau từng tier
+      # BUILD WHEELS — [FIX] set -e + ls exit 2
       # ==========================================================
       - name: Build wheels
         env:
@@ -508,7 +507,8 @@ jobs:
           TARGET_SITE="$TARGET_STDLIB/site-packages"
           mkdir -p wheels-out
 
-          SYSCONF_FILE=$(ls "$TARGET_STDLIB"/_sysconfigdata__*.py 2>/dev/null | head -1)
+          # [FIX] || true — tránh set -e kill nếu glob không match
+          SYSCONF_FILE=$(ls "$TARGET_STDLIB"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
           if [ -z "$SYSCONF_FILE" ]; then
             echo "❌ Không có _sysconfigdata"
             exit 1
@@ -535,7 +535,7 @@ jobs:
           NDK_PREBUILT="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
           CLANG_BUILTIN=$("$CC" -print-resource-dir 2>/dev/null)/include
           if [ ! -f "$CLANG_BUILTIN/stddef.h" ]; then
-            CLANG_BUILTIN=$(find "$NDK_PREBUILT" -type f -name "stddef.h" 2>/dev/null | head -1 | xargs -r dirname)
+            CLANG_BUILTIN=$(find "$NDK_PREBUILT" -type f -name "stddef.h" 2>/dev/null | head -1 | xargs -r dirname || true)
           fi
           echo "CLANG_BUILTIN: ${CLANG_BUILTIN:-NOT_FOUND}"
 
@@ -558,14 +558,14 @@ jobs:
             -Wno-implicit-function-declaration"
           export CPPFLAGS="$CFLAGS"
           export CXXFLAGS="$CFLAGS"
-          export LDFLAGS="-L$DEPS_INSTALL/lib -L$NDK_SYSROOT/usr/lib/aarch64-linux-android/${{ env.ANDROID_API }} -Wl,--hash-style=both"
+          export LDFLAGS="-L$DEPS_INSTALL/lib -L$NDK_SYSROOT/usr/lib/aarch64-linux-android/${ANDROID_API} -Wl,--hash-style=both"
 
           export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
           export PKG_CONFIG_LIBDIR="$DEPS_INSTALL/lib/pkgconfig"
 
           export PYO3_PYTHON="$HOST_PY"
           export PYO3_CROSS=1
-          export PYO3_CROSS_PYTHON_VERSION="${{ env.PYTHON_MINOR }}"
+          export PYO3_CROSS_PYTHON_VERSION="${PYTHON_MINOR}"
           export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
           export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
 
@@ -579,7 +579,7 @@ jobs:
           export HOST_PY TARGET_ROOT TARGET_SITE TARGET_STDLIB
           export WHEELS_OUT="$GITHUB_WORKSPACE/wheels-out"
 
-          # [NEW] Verify wheel có link bionic không
+          # [FIX] verify_bionic — luôn return 0/1 rõ ràng
           verify_bionic() {
             local whl="$1"
             [ -f "$whl" ] || return 0
@@ -598,13 +598,16 @@ jobs:
             return $bad
           }
 
-          # [NEW] Tìm wheel vừa build (mới nhất)
+          # [FIX] find_wheel — nuốt exit code 2 của ls, luôn return 0
           find_wheel() {
             local pkg="$1"
-            local pkg_a pkg_b
+            local pkg_a pkg_b files
             pkg_a=$(echo "$pkg" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
             pkg_b=$(echo "$pkg" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
-            ls -t wheels-out/${pkg_a}-*.whl wheels-out/${pkg_b}-*.whl 2>/dev/null | head -1
+            files=$(ls -t wheels-out/${pkg_a}-*.whl wheels-out/${pkg_b}-*.whl 2>/dev/null || true)
+            [ -z "$files" ] && return 0
+            echo "$files" | head -1
+            return 0
           }
 
           SUCCESS_T1=""; SUCCESS_T2=""; SKIP_LIST=""; FAIL_LIST=""
@@ -615,20 +618,17 @@ jobs:
             echo "📦 $pkg"
             echo "════════════════════════════════════════"
 
-            # [FIX] Skip chỉ khi wheel cũ THỰC SỰ là bionic
             existing=$(find_wheel "$pkg")
             if [ -n "$existing" ] && verify_bionic "$existing"; then
               echo "⏭️  Skip (đã có wheel bionic)"
               SKIP_LIST="$SKIP_LIST $pkg"
               continue
             fi
-            # Xoá wheel cũ nếu link glibc
             if [ -n "$existing" ] && ! verify_bionic "$existing"; then
               echo "🗑️  Xoá wheel cũ link glibc: $(basename "$existing")"
               rm -f "$existing"
             fi
 
-            # ─── TIER 1 ───
             echo "🔨 Tầng 1: pip wheel"
             TIER1_OK=0
             if "$HOST_PY" -m pip wheel "$pkg" \
@@ -650,7 +650,6 @@ jobs:
 
             [ "$TIER1_OK" -eq 1 ] && continue
 
-            # ─── TIER 2 ───
             echo ""
             echo "🔨 Tầng 2: p4a-style"
             if bash "$GITHUB_WORKSPACE/scripts/build-p4a-style.sh" "$pkg" > "/tmp/p4a_${pkg}.log" 2>&1; then
@@ -688,9 +687,10 @@ jobs:
       - name: Patch cryptography wheel
         run: |
           set -eo pipefail
-          CRYPTO_WHL=$(ls wheels-out/cryptography-*linux_aarch64.whl 2>/dev/null | head -1)
+          # [FIX] || true để không bị set -e kill
+          CRYPTO_WHL=$(ls wheels-out/cryptography-*linux_aarch64.whl 2>/dev/null | head -1 || true)
           if [ -z "$CRYPTO_WHL" ]; then
-            CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1)
+            CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1 || true)
           fi
           if [ -z "$CRYPTO_WHL" ]; then
             echo "⚠️ Không có wheel cryptography"
@@ -767,7 +767,7 @@ jobs:
           echo "✅ Đã patch: $CRYPTO_WHL"
 
       # ==========================================================
-      # POST-PROCESS — [FIX] parse & ghi đè tag chính xác
+      # POST-PROCESS — parse & ghi đè tag chính xác
       # ==========================================================
       - name: Post-process wheels
         env:
@@ -783,7 +783,6 @@ jobs:
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
 
-            # Pure-python → giữ nguyên
             if [[ "$base" == *"none-any"* ]]; then
               cp "$whl" "wheels-final/$base"
               COPIED=$((COPIED+1))
@@ -791,15 +790,11 @@ jobs:
               continue
             fi
 
-            # [FIX] Parse wheel filename chính xác:
-            # Format: name-version-pytag-abitag-platformtag.whl
-            # name không chứa '-'
             if [[ "$base" =~ ^([^-]+)-([^-]+)-([^-]+)-([^-]+)-(.+)\.whl$ ]]; then
               PKG_N="${BASH_REMATCH[1]}"
               VER="${BASH_REMATCH[2]}"
               PY_TAG="${BASH_REMATCH[3]}"
               ABI_TAG="${BASH_REMATCH[4]}"
-              # Ghi đè platform tag bằng ANDROID_TAG — không quan tâm tag cũ
               newname="${PKG_N}-${VER}-${PY_TAG}-${ABI_TAG}-${ANDROID_TAG}.whl"
 
               if [ "$newname" == "$base" ]; then
@@ -839,7 +834,6 @@ jobs:
               continue
             fi
 
-            # Check tên không bị nhân tag
             if echo "$base" | grep -qE '\.android_[0-9]+_[a-z0-9_]+\.'; then
               echo "❌ $base — tên bị nhân tag"
               FAIL=$((FAIL+1))
@@ -910,9 +904,6 @@ jobs:
             ${{ github.event.repository.name }} \
             ${{ steps.tag.outputs.tag }}
 
-      # ==========================================================
-      # [NEW] Verify docs/simple/ cấu trúc PEP 503
-      # ==========================================================
       - name: Verify pip index (docs/simple)
         if: hashFiles('wheels-final/*.whl') != ''
         env:
