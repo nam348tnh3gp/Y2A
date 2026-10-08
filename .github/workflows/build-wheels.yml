@@ -97,7 +97,7 @@ jobs:
           echo "${{ github.workspace }}/ndk-cache/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
       # ============================================================
-      # [CACHE] Host Python + SOURCE TARBALL
+      # [CACHE] Host Python + source
       # ============================================================
       - name: Cache Host Python + source
         id: cache-host-python
@@ -170,7 +170,7 @@ jobs:
           echo "✅ Cleanup done"
 
       # ============================================================
-      # Tải wheel cũ — lọc bỏ wheel link glibc + cryptography cũ
+      # Tải wheel cũ — lọc bỏ wheel link glibc + wheel cryptography cũ
       # ============================================================
       - name: Download previous wheels
         id: prev
@@ -201,9 +201,19 @@ jobs:
               continue
             fi
 
-            # [FIX] Bỏ cryptography cũ — phải rebuild với PyO3 config
-            if [[ "$base" == cryptography-* ]]; then
-              echo "🗑️  cryptography cũ (rebuild với PyO3): $base"
+            # [FIX] Bỏ native packages cũ — phải rebuild với p4a-style
+            if [[ "$base" == cryptography-* ]] || \
+               [[ "$base" == bcrypt-* ]] || \
+               [[ "$base" == numpy-* ]] || \
+               [[ "$base" == scipy-* ]] || \
+               [[ "$base" == pillow-* ]] || \
+               [[ "$base" == Pillow-* ]] || \
+               [[ "$base" == lxml-* ]] || \
+               [[ "$base" == greenlet-* ]] || \
+               [[ "$base" == frozenlist-* ]] || \
+               [[ "$base" == ujson-* ]] || \
+               [[ "$base" == cffi-* ]]; then
+              echo "🗑️  Native package cũ (rebuild với p4a): $base"
               continue
             fi
 
@@ -535,7 +545,7 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # BUILD WHEELS
+      # BUILD WHEELS — [FIX] p4a-style: no Tier 1 for native packages
       # ==========================================================
       - name: Build wheels
         env:
@@ -580,9 +590,11 @@ jobs:
           echo "CLANG_BUILTIN: ${CLANG_BUILTIN:-NOT_FOUND}"
 
           export NDK_SYSROOT CLANG_BUILTIN
-          export _PYTHON_HOST_PLATFORM="linux_aarch64"
+          # [FIX] p4a-style: dùng target triplet
+          export _PYTHON_HOST_PLATFORM="aarch64-linux-android"
           export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
           export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
+          export TARGET_PYTHON_EXE="$TARGET_ROOT/bin/python${PYTHON_MINOR}"
           export PYTHONPATH="$SYSCONF_DIR:$TARGET_SITE"
           export PATH="$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
           export CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB"
@@ -597,7 +609,7 @@ jobs:
             -I$TARGET_ROOT/include/python${PYTHON_MINOR} \
             -Wno-implicit-function-declaration"
           export CPPFLAGS="$CFLAGS"
-          export CXXFLAGS="$CFLAGS"
+          export CXXFLAGS="$CFLAGS -I$DEPS_INSTALL/include -L$DEPS_INSTALL/lib"
           export LDFLAGS="-L$DEPS_INSTALL/lib -L$NDK_SYSROOT/usr/lib/aarch64-linux-android/${ANDROID_API} -Wl,--hash-style=both"
 
           export PKG_CONFIG_PATH="$DEPS_INSTALL/lib/pkgconfig"
@@ -650,8 +662,8 @@ jobs:
 
           SUCCESS_T1=""; SUCCESS_T2=""; SKIP_LIST=""; FAIL_LIST=""
 
-          # [FIX] Rust/PyO3 packages bắt buộc dùng Tier 2 (PyO3 config)
-          FORCE_TIER2="cryptography bcrypt nh3 pydantic-core orjson tokenizers"
+          # [FIX] p4a-style: native packages chỉ đi Tier 2 (PyO3 config, sandbox, đúng target)
+          NATIVE_PACKAGES="cryptography bcrypt nh3 pydantic-core orjson tokenizers numpy scipy lxml Pillow pillow greenlet frozenlist ujson cffi aiohttp yarl multidict"
 
           for pkg in $PKGLIST; do
             echo ""
@@ -659,21 +671,21 @@ jobs:
             echo "📦 $pkg"
             echo "════════════════════════════════════════"
 
-            # Check if force Tier 2
-            FORCE_T2=0
-            for fp in $FORCE_TIER2; do
-              if [ "$pkg" = "$fp" ]; then FORCE_T2=1; break; fi
+            # Check native
+            IS_NATIVE=0
+            for np in $NATIVE_PACKAGES; do
+              if [ "$pkg" = "$np" ]; then IS_NATIVE=1; break; fi
             done
 
             existing=$(find_wheel "$pkg")
             if [ -n "$existing" ] && verify_bionic "$existing"; then
-              # Rust packages không skip, phải rebuild với PyO3 config
-              if [ "$FORCE_T2" -eq 0 ]; then
+              # Native phải rebuild, không skip
+              if [ "$IS_NATIVE" -eq 0 ]; then
                 echo "⏭️  Skip (đã có wheel bionic)"
                 SKIP_LIST="$SKIP_LIST $pkg"
                 continue
               else
-                echo "🗑️  Rust package — xoá wheel cũ để rebuild với PyO3 config"
+                echo "🗑️  Native — xoá wheel cũ để rebuild p4a-style"
                 rm -f "$existing"
               fi
             elif [ -n "$existing" ]; then
@@ -683,18 +695,25 @@ jobs:
 
             TIER1_OK=0
 
-            if [ "$FORCE_T2" -eq 1 ]; then
-              echo "⚡ $pkg — buộc dùng Tier 2 (PyO3 config)"
+            if [ "$IS_NATIVE" -eq 1 ]; then
+              echo "⚡ $pkg — native package, chỉ Tier 2 (p4a-style)"
             else
               echo "🔨 Tầng 1: pip wheel"
               if "$HOST_PY" -m pip wheel "$pkg" \
                     --no-deps --no-build-isolation --no-binary=:all: \
+                    --config-settings="--build-option=--plat-name=${ANDROID_TAG}" \
                     --wheel-dir wheels-out > "/tmp/pip_${pkg}.log" 2>&1; then
                 whl=$(find_wheel "$pkg")
                 if [ -n "$whl" ] && verify_bionic "$whl"; then
-                  echo "✅ $pkg — Tầng 1 (bionic)"
-                  SUCCESS_T1="$SUCCESS_T1 $pkg"
-                  TIER1_OK=1
+                  # Verify tag đúng
+                  if [[ "$(basename "$whl")" == *"${ANDROID_TAG}"* ]] || [[ "$(basename "$whl")" == *"none-any"* ]]; then
+                    echo "✅ $pkg — Tầng 1 (bionic + tag OK)"
+                    SUCCESS_T1="$SUCCESS_T1 $pkg"
+                    TIER1_OK=1
+                  else
+                    echo "⚠️  $pkg — Tier 1 tag sai → XOÁ + fallback Tier 2"
+                    rm -f "$whl"
+                  fi
                 else
                   echo "⚠️  $pkg — Tier 1 wheel link glibc → XOÁ + fallback Tier 2"
                   [ -n "$whl" ] && rm -f "$whl"
@@ -739,12 +758,12 @@ jobs:
           ls -lh wheels-out/ || echo "(rỗng)"
 
       # ==========================================================
-      # VERIFY + PATCH cryptography wheel (p4a-style)
+      # VERIFY + PATCH cryptography (p4a-style)
       # ==========================================================
       - name: Verify cryptography wheel links libpython
         run: |
           set -eo pipefail
-          CRYPTO_WHL=$(ls wheels-out/cryptography-*linux_aarch64.whl 2>/dev/null | head -1 || true)
+          CRYPTO_WHL=$(ls wheels-out/cryptography-*${ANDROID_TAG}.whl 2>/dev/null | head -1 || true)
           if [ -z "$CRYPTO_WHL" ]; then
             CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1 || true)
           fi
@@ -772,14 +791,12 @@ jobs:
 
           PATCHED=0
 
-          # Patch NEEDED libpython nếu thiếu
           if ! readelf -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
             echo "⚠️  Thiếu NEEDED libpython${PYTHON_MINOR}.so — patching"
             patchelf --add-needed "libpython${PYTHON_MINOR}.so" "$RUST_SO"
             PATCHED=1
           fi
 
-          # Patch RPATH nếu thiếu
           if ! readelf -d "$RUST_SO" | grep -qE "RPATH|RUNPATH"; then
             echo "⚠️  Thiếu RPATH — patching"
             patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
@@ -791,13 +808,13 @@ jobs:
           readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH"
 
           if ! readelf -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
-            echo "❌ FAIL: vẫn thiếu NEEDED libpython${PYTHON_MINOR}.so sau patch"
+            echo "❌ FAIL: vẫn thiếu NEEDED libpython${PYTHON_MINOR}.so"
             exit 1
           fi
 
           if [ "$PATCHED" -eq 1 ]; then
             echo ""
-            echo "→ Repack wheel với _rust.abi3.so đã patch"
+            echo "→ Repack wheel"
             CRYPTO_WHL="$CRYPTO_WHL" RUST_SO_REL="$RUST_SO" "$HOST_PYTHON" - <<'PYEOF'
           import base64, hashlib, csv, os, zipfile, tempfile, shutil
           whl = os.environ["CRYPTO_WHL"]
@@ -828,19 +845,19 @@ jobs:
                           full = os.path.join(root, f)
                           zf.write(full, os.path.relpath(full, tmp))
               shutil.move(out, whl)
-              print("✅ RECORD + wheel repacked")
+              print("✅ Repacked")
           finally:
               shutil.rmtree(tmp, ignore_errors=True)
           PYEOF
           else
-            echo "✅ Wheel đã đúng — không cần patch"
+            echo "✅ Wheel đã đúng"
           fi
 
           echo ""
-          echo "✅ cryptography wheel OK — có NEEDED libpython${PYTHON_MINOR}.so + RPATH"
+          echo "✅ cryptography wheel OK"
 
       # ==========================================================
-      # POST-PROCESS
+      # POST-PROCESS — [FIX] chỉ copy, không rename (tag đã đúng)
       # ==========================================================
       - name: Post-process wheels
         env:
@@ -850,42 +867,25 @@ jobs:
           rm -rf wheels-final && mkdir -p wheels-final
           shopt -s nullglob
 
-          COPIED=0; RENAMED=0
+          COPIED=0; WARNED=0
 
           for whl in wheels-out/*.whl; do
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
 
-            if [[ "$base" == *"none-any"* ]]; then
+            # Wheel đã có tag đúng (p4a-style) — chỉ copy
+            if [[ "$base" == *"${ANDROID_TAG}"* ]] || [[ "$base" == *"none-any"* ]]; then
               cp "$whl" "wheels-final/$base"
               COPIED=$((COPIED+1))
-              echo "✅ $base (pure python)"
-              continue
-            fi
-
-            if [[ "$base" =~ ^([^-]+)-([^-]+)-([^-]+)-([^-]+)-(.+)\.whl$ ]]; then
-              PKG_N="${BASH_REMATCH[1]}"
-              VER="${BASH_REMATCH[2]}"
-              PY_TAG="${BASH_REMATCH[3]}"
-              ABI_TAG="${BASH_REMATCH[4]}"
-              newname="${PKG_N}-${VER}-${PY_TAG}-${ABI_TAG}-${ANDROID_TAG}.whl"
-
-              if [ "$newname" == "$base" ]; then
-                cp "$whl" "wheels-final/$newname"
-                COPIED=$((COPIED+1))
-                echo "✅ $base"
-              else
-                cp "$whl" "wheels-final/$newname"
-                RENAMED=$((RENAMED+1))
-                echo "🔄 $base → $newname"
-              fi
+              echo "✅ $base"
             else
-              echo "⚠️  $base — không parse được, bỏ qua"
+              echo "⚠️  $base — tag không phải ${ANDROID_TAG} (skip)"
+              WARNED=$((WARNED+1))
             fi
           done
 
           echo ""
-          echo "Copied: $COPIED / Renamed: $RENAMED"
+          echo "Copied: $COPIED / Warned: $WARNED"
           ls -lh wheels-final/ || echo "(rỗng)"
 
       # ==========================================================
