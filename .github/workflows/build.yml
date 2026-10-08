@@ -73,8 +73,8 @@ jobs:
       NDK_VERSION: "r25c"
       ANDROID_API: "24"
       TARGET_HOST: "aarch64-linux-android"
-      # [FIX] Bump version khi sửa build config để invalidate cache
-      CACHE_VERSION: "v2-hashfix"
+      # [FIX v3] Invalidate cache cũ (v1/v2) có thể chứa libpython đã bị strip dynsym
+      CACHE_VERSION: "v3-symbol-fix"
 
     steps:
       # ---------- SECTION 1: ENVIRONMENT SETUP ----------
@@ -106,7 +106,8 @@ jobs:
 
           sudo apt-get install -y --no-install-recommends \
             build-essential autoconf automake libtool \
-            pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf
+            pkg-config wget curl unzip git xz-utils python3 python3-pip patchelf \
+            binutils
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
@@ -210,7 +211,6 @@ jobs:
           wget -q "https://www.python.org/ftp/python/${{ env.PYTHON_VERSION }}/Python-${{ env.PYTHON_VERSION }}.tar.xz"
           tar -xf "Python-${{ env.PYTHON_VERSION }}.tar.xz"
           cd "Python-${{ env.PYTHON_VERSION }}"
-          # [FIX] --disable-optimizations thay vì --enable-optimizations=no
           ./configure --prefix="$GITHUB_WORKSPACE/.cache/host-python" --disable-optimizations
           make -j$(nproc)
           make install
@@ -239,8 +239,8 @@ jobs:
           echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> "$GITHUB_ENV"
           echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> "$GITHUB_ENV"
           echo "READELF=$TOOLCHAIN/bin/llvm-readelf" >> "$GITHUB_ENV"
+          echo "NM=$TOOLCHAIN/bin/llvm-nm" >> "$GITHUB_ENV"
           echo "DEPS_INSTALL=$DEPS_INSTALL" >> "$GITHUB_ENV"
-          # [FIX] PKG_CONFIG_SYSROOT_DIR rỗng (tránh double-prefix)
           echo "PKG_CONFIG_LIBDIR=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_SYSROOT_DIR=" >> "$GITHUB_ENV"
@@ -280,7 +280,6 @@ jobs:
           export ANDROID_NDK_ROOT="$NDK"
           export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
 
-          # [FIX] --hash-style=both trong LDFLAGS, không phải bare arg
           LDFLAGS="-Wl,--hash-style=both" \
           ./Configure android-arm64 \
             -D__ANDROID_API__=${{ env.ANDROID_API }} \
@@ -337,7 +336,7 @@ jobs:
           key: python-android-${{ env.PYTHON_VERSION }}-ssl${{ env.OPENSSL_VERSION }}-ffi${{ env.LIBFFI_VERSION }}-sqlite${{ env.SQLITE_VERSION }}-xz${{ env.XZ_VERSION }}-${{ runner.os }}-${{ env.CACHE_VERSION }}
 
       # ============================================================
-      # SECTION 5: CROSS-COMPILE CPYTHON 3.13 — [FIX DT_HASH]
+      # SECTION 5: CROSS-COMPILE CPYTHON 3.13 — DT_HASH fix
       # ============================================================
       - name: Cross-Compile CPython
         if: steps.cache-python.outputs.cache-hit != 'true'
@@ -351,9 +350,6 @@ jobs:
             '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' \
             > Modules/Setup.local
 
-          # [FIX] Export các biến LDSHARED/CCSHARED/LINKFORSHARED TRƯỚC configure
-          # để CPython nhận đúng linker flags cho MỌI extension (.so),
-          # không chỉ libpython3.13.so
           export LDSHARED="$CC -shared -Wl,--hash-style=both"
           export BLDSHARED="$CC -shared -Wl,--hash-style=both"
           export CCSHARED="-fPIC -Wl,--hash-style=both"
@@ -383,7 +379,6 @@ jobs:
             ac_cv_buggy_getaddrinfo=no \
             ac_cv_little_endian_double=yes
 
-          # [FIX] Patch Makefile — một số phiên bản CPython override env vars
           sed -i "s|^LDSHARED=.*|LDSHARED= $CC -shared -Wl,--hash-style=both|" Makefile
           sed -i "s|^BLDSHARED=.*|BLDSHARED= $CC -shared -Wl,--hash-style=both|" Makefile
           sed -i "s|^CCSHARED=.*|CCSHARED= -fPIC -Wl,--hash-style=both|" Makefile
@@ -393,7 +388,6 @@ jobs:
           echo "=== Makefile sau patch ==="
           grep -E "^LDSHARED=|^BLDSHARED=|^CCSHARED=|^LDCXXSHARED=|^LINKFORSHARED=" Makefile
 
-          # [FIX] Override thêm trên command line để chắc chắn
           make -j$(nproc) \
             LDSHARED="$CC -shared -Wl,--hash-style=both" \
             BLDSHARED="$CC -shared -Wl,--hash-style=both" \
@@ -410,7 +404,7 @@ jobs:
           readelf -d "$GITHUB_WORKSPACE/python-android/lib/libpython3.13.so" | grep -iE "hash" || true
 
       # ============================================================
-      # SECTION 5.5: VERIFY DT_HASH — fail sớm nếu thiếu
+      # SECTION 5.5: VERIFY DT_HASH + SYMBOLS
       # ============================================================
       - name: Verify DT_HASH on CPython extensions
         if: steps.cache-python.outputs.cache-hit != 'true'
@@ -419,7 +413,6 @@ jobs:
           LIBDYLOAD="$GITHUB_WORKSPACE/python-android/lib/python3.13/lib-dynload"
           FAIL=0
 
-          # Check libpython3.13.so
           LP="$GITHUB_WORKSPACE/python-android/lib/libpython3.13.so"
           if [ -f "$LP" ]; then
             has_sysv=$(readelf --dynamic "$LP" 2>/dev/null | grep -E "\(HASH\)" | grep -v "GNU_HASH" | wc -l)
@@ -431,7 +424,6 @@ jobs:
             fi
           fi
 
-          # Check all extensions
           for so in "$LIBDYLOAD"/*.so; do
             [ -f "$so" ] || continue
             base=$(basename "$so")
@@ -449,6 +441,43 @@ jobs:
             exit 1
           fi
           echo "✅ Tất cả extension có DT_HASH + DT_GNU_HASH"
+
+      # [FIX v3] Verify libpython exports critical symbols
+      - name: Verify libpython exports critical symbols
+        if: steps.cache-python.outputs.cache-hit != 'true'
+        run: |
+          set -eo pipefail
+          LP="$GITHUB_WORKSPACE/python-android/lib/libpython3.13.so"
+          if [ ! -f "$LP" ]; then
+            echo "❌ $LP không tồn tại"
+            exit 1
+          fi
+
+          echo "=== Symbol check trên libpython3.13.so ==="
+          REQUIRED_SYMS=(
+            PyLong_Type PyUnicode_Type PyBytes_Type PyDict_Type
+            PyTuple_Type PyList_Type PyExc_RuntimeError PyExc_TypeError
+            PyExc_ValueError _Py_NoneStruct Py_Initialize Py_Finalize
+          )
+
+          FAIL=0
+          for sym in "${REQUIRED_SYMS[@]}"; do
+            if nm -D "$LP" 2>/dev/null | grep -q " $sym$"; then
+              :
+            else
+              echo "❌ MISSING: $sym"
+              FAIL=$((FAIL+1))
+            fi
+          done
+
+          if [ "$FAIL" -gt 0 ]; then
+            echo ""
+            echo "❌ libpython3.13.so thiếu $FAIL symbol — dynsym bị hỏng"
+            echo "   Tổng dynsym: $(nm -D "$LP" 2>/dev/null | wc -l)"
+            exit 1
+          fi
+          echo "✅ Tất cả symbol quan trọng có mặt"
+          echo "   Tổng dynsym: $(nm -D "$LP" 2>/dev/null | wc -l)"
 
       # ---------- SECTION 6: BOOTSTRAP WHEELS ----------
       - name: Bootstrap Pure-Python Wheels
@@ -481,14 +510,49 @@ jobs:
           fi
           echo "✅ yt_dlp bundled"
 
+      # ============================================================
+      # [FIX v3] Strip Binaries — KHÔNG đụng vào libpython3.13.so
+      # ============================================================
       - name: Strip Binaries and Patch Hardcoded Paths
         run: |
-          # [FIX] Dùng --strip-debug thay --strip-unneeded để giữ hash sections
-          # (--strip-unneeded có thể xóa section cần thiết trên Android)
-          find "$GITHUB_WORKSPACE/python-android" -name "*.so*" \
-            -exec "$STRIP" --strip-debug {} \; 2>/dev/null || true
+          set -eo pipefail
+
+          LP="$GITHUB_WORKSPACE/python-android/lib/libpython3.13.so"
+
+          # Backup libpython trước khi strip bất kỳ thứ gì
+          if [ -f "$LP" ]; then
+            cp "$LP" "${LP}.preserve"
+          fi
+
+          # [FIX] Chỉ strip-debug (giữ .dynsym) cho lib-dynload
+          # KHÔNG dùng --strip-unneeded vì có thể phá dynamic symbol table
+          find "$GITHUB_WORKSPACE/python-android/lib/python3.13/lib-dynload" \
+            -name "*.so*" -exec "$STRIP" --strip-debug {} \; 2>/dev/null || true
+
+          # Binary python3.13 cũng chỉ strip-debug
           "$STRIP" --strip-debug "$GITHUB_WORKSPACE/python-android/bin/python3.13" 2>/dev/null || true
 
+          # Restore libpython nguyên bản
+          if [ -f "${LP}.preserve" ]; then
+            mv "${LP}.preserve" "$LP"
+          fi
+
+          # Verify ngay sau strip
+          if [ -f "$LP" ]; then
+            SYM_COUNT=$(nm -D "$LP" 2>/dev/null | wc -l || echo 0)
+            echo "libpython3.13.so dynsym count: $SYM_COUNT"
+            if [ "$SYM_COUNT" -lt 500 ]; then
+              echo "❌ libpython có quá ít symbol — có thể bị strip!"
+              exit 1
+            fi
+            if ! nm -D "$LP" 2>/dev/null | grep -q " PyLong_Type$"; then
+              echo "❌ PyLong_Type MISSING sau strip"
+              exit 1
+            fi
+            echo "✅ libpython3.13.so vẫn có PyLong_Type"
+          fi
+
+          # Patch hardcoded paths
           find "$GITHUB_WORKSPACE/python-android" -type f \
             \( -name "_sysconfigdata*.py" -o -name "*.pc" -o -name "*-config" -o -name "Makefile" \) \
             -exec sed -i "s|$GITHUB_WORKSPACE/python-android|/data/data/com.nam2006.y2mate/files/python|g" {} \;
@@ -601,10 +665,15 @@ jobs:
 
           chmod 755 app/src/main/jniLibs/arm64-v8a/libffmpeg.so
 
+      # ============================================================
+      # [FIX v3] Verify libpython + symbols trong jniLibs
+      # ============================================================
       - name: Verify libpython in jniLibs
         run: |
+          set -eo pipefail
           JNI="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
           ls -lh "$JNI/"
+
           for lib in libpython3.13.so libssl.so libcrypto.so; do
             if [ ! -f "$JNI/$lib" ]; then
               echo "❌ $lib MISSING"
@@ -613,14 +682,40 @@ jobs:
           done
           echo "✅ All required libs present"
 
-          # [FIX] Final check: libpython trong jniLibs phải có DT_HASH
           LP="$JNI/libpython3.13.so"
+
+          # DT_HASH check
           has_sysv=$(readelf --dynamic "$LP" 2>/dev/null | grep -E "\(HASH\)" | grep -v "GNU_HASH" | wc -l)
           if [ "$has_sysv" -eq 0 ]; then
-            echo "❌ $LP thiếu DT_HASH — APK sẽ fail khi load extension"
+            echo "❌ $LP thiếu DT_HASH"
             exit 1
           fi
-          echo "✅ libpython3.13.so có DT_HASH"
+          echo "✅ DT_HASH OK"
+
+          # [FIX v3] Symbol check — cryptography cần
+          REQUIRED_SYMS=(
+            PyLong_Type PyUnicode_Type PyBytes_Type PyDict_Type
+            PyTuple_Type PyList_Type PyExc_RuntimeError PyExc_TypeError
+            PyExc_ValueError _Py_NoneStruct
+          )
+
+          SYM_FAIL=0
+          for sym in "${REQUIRED_SYMS[@]}"; do
+            if ! nm -D "$LP" 2>/dev/null | grep -q " $sym$"; then
+              echo "❌ MISSING: $sym"
+              SYM_FAIL=$((SYM_FAIL+1))
+            fi
+          done
+
+          if [ "$SYM_FAIL" -gt 0 ]; then
+            echo ""
+            echo "❌ $SYM_FAIL symbol thiếu trong libpython3.13.so"
+            echo "   → cryptography _rust.abi3.so sẽ KHÔNG load được"
+            echo "   Tổng dynsym: $(nm -D "$LP" 2>/dev/null | wc -l)"
+            exit 1
+          fi
+          echo "✅ Tất cả symbol quan trọng có mặt"
+          echo "   Tổng dynsym: $(nm -D "$LP" 2>/dev/null | wc -l)"
 
       # ---------- SECTION 10: BUILD APK ----------
       - name: Setup debug keystore
