@@ -1,5 +1,6 @@
 #!/bin/bash
 # Entrypoint chạy trong Docker container
+# [FIX] Exit code phải propagate để workflow biết fail
 set -eo pipefail
 
 echo "════════════════════════════════════════════════════════════"
@@ -8,7 +9,6 @@ echo "════════════════════════�
 
 source "${CARGO_HOME}/env" 2>/dev/null || true
 
-# Workspace paths
 WORKSPACE="$(pwd)"
 export WORKSPACE
 export TARGET_ROOT="${WORKSPACE}/python-android"
@@ -26,19 +26,16 @@ mkdir -p "${TARGET_ROOT}" "${DEPS_INSTALL}" "${WHEELS_OUT}" "${WHEELS_FINAL}"
 
 echo ""
 echo "  TARGET_ROOT:     $TARGET_ROOT"
-echo "  TARGET_STDLIB:   $TARGET_STDLIB"
-echo "  TARGET_SITE:     $TARGET_SITE"
 echo "  DEPS_INSTALL:    $DEPS_INSTALL"
 echo "  HOST_PYTHON:     $HOST_PYTHON"
-echo "  HOST_PY_PREFIX:  $HOST_PY_PREFIX"
 
 # ════════════════════════════════════════════════════════════
-# Cross-compile core deps
+# 1. Cross-compile core deps
 # ════════════════════════════════════════════════════════════
 if [ ! -f "${DEPS_INSTALL}/.done" ]; then
     echo ""
     echo "🔨 Cross-compile core deps..."
-    bash scripts/cross-compile-deps.sh
+    bash scripts/cross-compile-deps.sh || { echo "❌ cross-compile-deps.sh FAILED"; exit 1; }
     touch "${DEPS_INSTALL}/.done"
 else
     echo ""
@@ -46,12 +43,12 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# Cross-compile CPython
+# 2. Cross-compile CPython
 # ════════════════════════════════════════════════════════════
 if [ ! -f "${TARGET_ROOT}/.python-built" ]; then
     echo ""
     echo "🔨 Cross-compile CPython..."
-    bash scripts/cross-compile-python.sh
+    bash scripts/cross-compile-python.sh || { echo "❌ cross-compile-python.sh FAILED"; exit 1; }
     touch "${TARGET_ROOT}/.python-built"
 else
     echo ""
@@ -59,18 +56,14 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# [FIX] Setup target sysconfigdata cho host python
-# CPython cross-compile có _sysconfigdata__android_aarch64-linux-android.py
-# nhưng host python (x86_64) không có. Copy để setuptools đọc được.
+# 3. Setup sysconfigdata cho host Python
 # ════════════════════════════════════════════════════════════
 echo ""
 echo "🔧 Setup target sysconfig cho host python"
 
 TARGET_SYSCONF=$(ls "${TARGET_STDLIB}"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
 if [ -z "$TARGET_SYSCONF" ]; then
-    echo "❌ Không tìm thấy _sysconfigdata trong ${TARGET_STDLIB}"
-    echo "=== Content ==="
-    ls -la "${TARGET_STDLIB}" | head -20 || true
+    echo "❌ Không tìm thấy _sysconfigdata"
     exit 1
 fi
 
@@ -84,39 +77,59 @@ cp -v "$TARGET_SYSCONF" "$HOST_PY_LIB/"
 export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
 echo "  _PYTHON_SYSCONFIGDATA_NAME=$SYSCONF_NAME"
 
-# [FIX] Copy thêm _sysconfigdata backup (một số package cần)
-if [ -f "${TARGET_STDLIB}/_sysconfigdata__linux_aarch64.py" ]; then
-    cp -v "${TARGET_STDLIB}/_sysconfigdata__linux_aarch64.py" "$HOST_PY_LIB/" || true
+# Copy all sysconfigdata files
+for f in "${TARGET_STDLIB}"/_sysconfigdata__*.py; do
+    [ -f "$f" ] || continue
+    cp -v "$f" "$HOST_PY_LIB/" 2>/dev/null || true
+done
+
+# [FIX] Patch sysconfigdata để remove host paths
+HOST_SYSCONF="${HOST_PY_LIB}/${SYSCONF_NAME}.py"
+if [ -f "$HOST_SYSCONF" ]; then
+    echo "  Patch sysconfigdata để remove host paths"
+    sed -i "s|'/opt/host-python/lib'|'${TARGET_ROOT}/lib'|g" "$HOST_SYSCONF"
+    sed -i "s|'/usr/lib/x86_64-linux-gnu'|'${TARGET_ROOT}/lib'|g" "$HOST_SYSCONF"
+    sed -i "s|'/usr/local/lib'|'${TARGET_ROOT}/lib'|g" "$HOST_SYSCONF"
+    sed -i "s|'/usr/lib'|'${TARGET_ROOT}/lib'|g" "$HOST_SYSCONF"
+    sed -i "s|'/lib64'|'${TARGET_ROOT}/lib'|g" "$HOST_SYSCONF"
+    sed -i "s|'/lib'|'${TARGET_ROOT}/lib'|g" "$HOST_SYSCONF"
+    sed -i "s|'-L/opt/host-python/lib'|''|g" "$HOST_SYSCONF"
+    sed -i "s|'-L/usr/lib/x86_64-linux-gnu'|''|g" "$HOST_SYSCONF"
+    sed -i "s|'-L/usr/local/lib'|''|g" "$HOST_SYSCONF"
+    sed -i "s|'-L/usr/lib'|''|g" "$HOST_SYSCONF"
 fi
 
-# [FIX] Copy include headers từ target sang host
+# Patch toàn bộ sysconfigdata files khác
+for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py; do
+    [ -f "$f" ] || continue
+    [ "$f" = "$HOST_SYSCONF" ] && continue
+    sed -i "s|'/opt/host-python/lib'|'${TARGET_ROOT}/lib'|g" "$f" 2>/dev/null || true
+    sed -i "s|'/usr/lib/x86_64-linux-gnu'|'${TARGET_ROOT}/lib'|g" "$f" 2>/dev/null || true
+    sed -i "s|'/usr/local/lib'|'${TARGET_ROOT}/lib'|g" "$f" 2>/dev/null || true
+    sed -i "s|'/usr/lib'|'${TARGET_ROOT}/lib'|g" "$f" 2>/dev/null || true
+done
+
+# Copy headers
 TARGET_INCLUDE="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
 HOST_INCLUDE="${HOST_PY_PREFIX}/include/python${PYTHON_MINOR}"
 if [ -d "$TARGET_INCLUDE" ] && [ -d "$HOST_INCLUDE" ]; then
     echo "  Copy headers: $TARGET_INCLUDE → $HOST_INCLUDE"
-    cp -rf "$TARGET_INCLUDE/." "$HOST_INCLUDE/"
+    cp -rf "$TARGET_INCLUDE/." "$HOST_INCLUDE/" 2>/dev/null || true
 fi
 
-# [FIX] Copy pyconfig.h cụ thể (nếu chưa có)
-if [ -f "${TARGET_INCLUDE}/pyconfig.h" ] && [ ! -f "${HOST_INCLUDE}/pyconfig.h" ]; then
-    cp -v "${TARGET_INCLUDE}/pyconfig.h" "${HOST_INCLUDE}/" || true
-fi
-
-# Verify sysconfig từ host python
+# Verify
 echo ""
-echo "  Verify: host python import sysconfig"
+echo "  Verify host python sysconfig:"
 "${HOST_PYTHON}" -c "
 import sysconfig
 print('  LIBDIR:', sysconfig.get_config_var('LIBDIR'))
 print('  INCLUDEPY:', sysconfig.get_config_var('INCLUDEPY'))
 print('  CC:', sysconfig.get_config_var('CC'))
-print('  Py_GIL_DISABLED:', sysconfig.get_config_var('Py_GIL_DISABLED'))
-" || { echo "  ❌ Test failed"; exit 1; }
-
+" || { echo "  ❌ Verify failed"; exit 1; }
 echo "  ✅ Sysconfig data OK"
 
 # ════════════════════════════════════════════════════════════
-# Bootstrap pip vào target site-packages
+# 4. Bootstrap pip
 # ════════════════════════════════════════════════════════════
 if [ ! -d "${TARGET_SITE}/pip" ]; then
     echo ""
@@ -124,11 +137,11 @@ if [ ! -d "${TARGET_SITE}/pip" ]; then
     ${HOST_PYTHON} -m pip install \
         --target="${TARGET_SITE}" \
         --no-deps --no-cache-dir --only-binary=:all: \
-        pip setuptools wheel
+        pip setuptools wheel || { echo "❌ Bootstrap pip FAILED"; exit 1; }
 fi
 
 # ════════════════════════════════════════════════════════════
-# Read package list
+# 5. Read package list
 # ════════════════════════════════════════════════════════════
 if [ -n "${INPUT_PACKAGES}" ]; then
     LIST="${INPUT_PACKAGES}"
@@ -147,27 +160,38 @@ echo ""
 echo "📦 Packages: ${PKGLIST}"
 
 # ════════════════════════════════════════════════════════════
-# Build wheels
+# 6. Build wheels — [FIX] exit non-zero nếu fail
 # ════════════════════════════════════════════════════════════
-bash scripts/build-wheels.sh
+if ! bash scripts/build-wheels.sh; then
+    echo ""
+    echo "════════════════════════════════════════════"
+    echo "❌ BUILD WHEELS FAILED"
+    echo "════════════════════════════════════════════"
+    exit 1
+fi
 
 # ════════════════════════════════════════════════════════════
-# Post-process
+# 7. Post-process
 # ════════════════════════════════════════════════════════════
-bash scripts/post-process.sh
+bash scripts/post-process.sh || { echo "❌ Post-process FAILED"; exit 1; }
 
 # ════════════════════════════════════════════════════════════
-# Verify
+# 8. Verify — fail nếu có wheel lỗi
 # ════════════════════════════════════════════════════════════
-bash scripts/verify-wheels.sh
+if ! bash scripts/verify-wheels.sh; then
+    echo "❌ Verify wheels FAILED"
+    exit 1
+fi
 
 # ════════════════════════════════════════════════════════════
-# Release (chỉ khi có GH_TOKEN)
+# 9. Release — chỉ chạy khi có GH_TOKEN VÀ tất cả OK
 # ════════════════════════════════════════════════════════════
 if [ -n "${GH_TOKEN}" ]; then
-    bash scripts/release.sh
-    bash scripts/gen-pip-index.sh
-    bash scripts/commit-docs.sh
+    echo ""
+    echo "🚀 Release..."
+    bash scripts/release.sh || { echo "❌ Release FAILED"; exit 1; }
+    bash scripts/gen-pip-index.sh || { echo "❌ Gen index FAILED"; exit 1; }
+    bash scripts/commit-docs.sh || { echo "❌ Commit docs FAILED"; exit 1; }
 else
     echo "⚠️  Không có GH_TOKEN — bỏ qua release"
 fi
