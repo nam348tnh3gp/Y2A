@@ -1,20 +1,14 @@
 #!/bin/bash
-# Build wheels trong container — p4a-style
+# Build wheels trong container
 set -eo pipefail
 
 HOST_PY="${HOST_PYTHON}"
-TARGET_ROOT="${TARGET_ROOT}"
-TARGET_STDLIB="${TARGET_STDLIB}"
-TARGET_SITE="${TARGET_SITE}"
 WHEELS_OUT="${WHEELS_OUT}"
 
 mkdir -p "${WHEELS_OUT}"
 
 SYSCONF_FILE=$(ls "${TARGET_STDLIB}"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
-if [ -z "$SYSCONF_FILE" ]; then
-    echo "❌ Không có _sysconfigdata"
-    exit 1
-fi
+[ -z "$SYSCONF_FILE" ] && { echo "❌ Không có _sysconfigdata"; exit 1; }
 SYSCONF_NAME=$(basename "$SYSCONF_FILE" .py)
 SYSCONF_DIR="${WORKSPACE}/sysconfigdata-host"
 rm -rf "$SYSCONF_DIR" && mkdir -p "$SYSCONF_DIR"
@@ -44,7 +38,8 @@ export CFLAGS="-fPIC -O2 \
     -Wno-implicit-function-declaration"
 export CPPFLAGS="$CFLAGS"
 export CXXFLAGS="$CFLAGS"
-export LDFLAGS="-L${DEPS_INSTALL}/lib -L${NDK_SYSROOT}/usr/lib/aarch64-linux-android/${ANDROID_API} -Wl,--hash-style=both"
+# [FIX] Bỏ -Wl,--hash-style=both khỏi LDFLAGS env
+export LDFLAGS="-L${DEPS_INSTALL}/lib -L${NDK_SYSROOT}/usr/lib/aarch64-linux-android/${ANDROID_API}"
 
 export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="${DEPS_INSTALL}/lib/pkgconfig"
@@ -72,7 +67,6 @@ for pkg in $PKGLIST; do
     echo "📦 $pkg"
     echo "════════════════════════════════════════"
 
-    # [FIX] Lowercase + underscore variants cho wheel lookup
     pkg_lower=$(echo "$pkg" | tr '[:upper:]' '[:lower:]')
     pkg_under=$(echo "$pkg_lower" | tr '-' '_')
 
@@ -85,7 +79,6 @@ for pkg in $PKGLIST; do
     fi
 
     if bash scripts/build-p4a-style.sh "$pkg" > "/tmp/build_${pkg}.log" 2>&1; then
-        # [FIX] Lowercase variants
         whl=$(ls -t "${WHEELS_OUT}"/${pkg_under}-*.whl \
                      "${WHEELS_OUT}"/${pkg_lower}-*.whl \
                      "${WHEELS_OUT}"/${pkg}-*.whl 2>/dev/null | head -1 || true)
@@ -94,13 +87,11 @@ for pkg in $PKGLIST; do
             SUCCESS="$SUCCESS $pkg"
         else
             echo "❌ $pkg — build OK nhưng không tìm thấy wheel"
-            echo "--- log (tail 30) ---"
             tail -30 "/tmp/build_${pkg}.log" || true
             FAIL="$FAIL $pkg"
         fi
     else
         echo "❌ $pkg — FAILED"
-        echo "--- log (tail 30) ---"
         tail -30 "/tmp/build_${pkg}.log" || true
         FAIL="$FAIL $pkg"
     fi
@@ -114,10 +105,10 @@ echo "✅ Success: $SUCCESS"
 echo "❌ Failed:  $FAIL"
 ls -lh "${WHEELS_OUT}/" || true
 
-# [FIX] Exit non-zero nếu có package fail
+# [FIX] Không exit 1 — để entrypoint tiếp tục release phần OK
 if [ -n "$FAIL" ]; then
     echo ""
-    echo "❌ Có package fail — workflow sẽ dừng, không release"
-    exit 1
+    echo "⚠️  Có package fail:$FAIL"
+    echo "   (sẽ release phần OK)"
 fi
 exit 0
