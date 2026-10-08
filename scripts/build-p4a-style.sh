@@ -1,23 +1,10 @@
 #!/bin/bash
-# build-p4a-style.sh — Generic p4a-style builder
-#
-# Áp dụng chuẩn p4a:
-#   - _PYTHON_HOST_PLATFORM = aarch64-linux-android (không phải linux_aarch64)
-#   - --plat-name=android_24_arm64_v8a (wheel tag đúng ngay từ đầu)
-#   - TARGET_PYTHON_EXE (build system biết python target)
-#   - BLAS qua CXXFLAGS (numpy 2.x meson)
-#   - Sandbox compiler wrapper
-
+# build-p4a-style.sh — p4a-style với fix cho ujson/greenlet/Pillow/numpy
 set -eo pipefail
 
 PKG_SPEC="${1:-}"
 shift || true
-
-if [ -z "$PKG_SPEC" ]; then
-  echo "❌ Missing package name"
-  exit 1
-fi
-
+if [ -z "$PKG_SPEC" ]; then echo "❌ Missing package name"; exit 1; fi
 PKG_NAME="${PKG_SPEC%%[<>=!~]*}"
 
 HOST_PY="${HOST_PYTHON:-/tmp/host-python/bin/python3.13}"
@@ -25,20 +12,19 @@ WHEELS_OUT="${WHEELS_OUT:-$GITHUB_WORKSPACE/wheels-out}"
 TMP_BUILD="/tmp/p4a-build-${PKG_NAME}"
 SRC_DIR="${TMP_BUILD}/src"
 SANDBOX="${TMP_BUILD}/sandbox-bin"
+PYSITE="${TMP_BUILD}/pysite"
 LOG="/tmp/p4a-${PKG_NAME}.log"
 PY_MINOR="${PYTHON_MINOR:-3.13}"
 ANDROID_TAG="${ANDROID_TAG:-android_24_arm64_v8a}"
 NDK_PREBUILT="${NDK:-}/toolchains/llvm/prebuilt/linux-x86_64"
 
-mkdir -p "$WHEELS_OUT" "$TMP_BUILD" "$SRC_DIR" "$SANDBOX"
+mkdir -p "$WHEELS_OUT" "$TMP_BUILD" "$SRC_DIR" "$SANDBOX" "$PYSITE"
 
-echo ""
-echo "════════════════════════════════════════════"
+echo ""; echo "════════════════════════════════════════════"
 echo "🔨 [p4a-style] Building: $PKG_SPEC"
 echo "════════════════════════════════════════════"
 echo "  HOST_PY:     $HOST_PY"
 echo "  TARGET_ROOT: $TARGET_ROOT"
-echo "  WHEELS_OUT:  $WHEELS_OUT"
 echo "  ANDROID_TAG: $ANDROID_TAG"
 echo "  CC:          $CC"
 echo ""
@@ -55,24 +41,16 @@ if ! "$HOST_PY" -m pip download "$PKG_SPEC" \
   cd "$TMP_BUILD"
   if "$HOST_PY" -m pip wheel "$PKG_SPEC" \
         --no-deps --no-build-isolation \
-        --config-settings="--build-option=--plat-name=${ANDROID_TAG}" \
         --wheel-dir "$WHEELS_OUT" > "$LOG" 2>&1; then
-    tail -20 "$LOG"
-    exit 0
+    tail -20 "$LOG"; exit 0
   else
-    echo "--- pip log (tail 60) ---"
-    tail -60 "$LOG"
-    exit 1
+    tail -60 "$LOG"; exit 1
   fi
 fi
 
 TARBALL=$(find "$SRC_DIR" -maxdepth 1 \( -name "*.tar.gz" -o -name "*.tar.xz" \
   -o -name "*.tar.bz2" -o -name "*.zip" \) | head -1)
-
-if [ -z "$TARBALL" ]; then
-  echo "⚠️  Không tải được source cho $PKG_SPEC"
-  exit 1
-fi
+[ -z "$TARBALL" ] && { echo "⚠️  Không tải được source"; exit 1; }
 
 mkdir -p "$SRC_DIR/extracted"
 tar -xf "$TARBALL" -C "$SRC_DIR/extracted"
@@ -81,7 +59,7 @@ SRC_PATH=$(find "$SRC_DIR/extracted" -maxdepth 1 -type d | tail -n +2 | head -1)
 echo "  Source: $SRC_PATH"
 
 # ============================================================
-# 2. DETECT BUILD BACKEND
+# 2. DETECT BACKEND
 # ============================================================
 BACKEND=$(SRC_PATH="$SRC_PATH" "$HOST_PY" - <<'PYEOF'
 import tomllib, os
@@ -116,14 +94,13 @@ PBEOF
 chmod +x "$TMP_BUILD/pybind11-config"
 
 # ============================================================
-# 4. SANDBOX
+# 4. SANDBOX — giả lập cross-compile env
 # ============================================================
 echo "  🔧 Tạo sandbox wrapper..."
 rm -rf "$SANDBOX" && mkdir -p "$SANDBOX"
 
 make_wrapper() {
-  local name="$1"
-  local real="$2"
+  local name="$1" real="$2"
   cat > "$SANDBOX/$name" <<EOF
 #!/bin/sh
 exec "$real" "\$@"
@@ -152,19 +129,19 @@ make_wrapper gcc-ar "$AR"
 make_wrapper gcc-ranlib "$RANLIB"
 
 # ============================================================
-# 5. ENV p4a-STYLE — [FIX] theo chuẩn p4a
+# 5. ENV p4a-STYLE — FIX
 # ============================================================
 export PATH="$SANDBOX:$TMP_BUILD:$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
 
 echo "  which gcc:  $(which gcc 2>/dev/null || echo NOT_FOUND)"
 echo "  which g++:  $(which g++ 2>/dev/null || echo NOT_FOUND)"
 
-# [FIX] p4a dùng target triplet, KHÔNG dùng linux_aarch64
-export _PYTHON_HOST_PLATFORM="aarch64-linux-android"
+# p4a-style: dùng tag Android trực tiếp
+export _PYTHON_HOST_PLATFORM="$ANDROID_TAG"
 export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
 export TARGET_PYTHON_EXE="$TARGET_ROOT/bin/python${PY_MINOR}"
 
-# [FIX] p4a-style: pass target triplet cho autoconf
+# Autoconf
 export ac_cv_host="aarch64-linux-android"
 export host_alias="aarch64-linux-android"
 
@@ -178,11 +155,15 @@ export AR="$AR"
 export AS="$CC"
 export RANLIB="$RANLIB"
 export STRIP="$STRIP"
-export LDSHARED="$CC -shared -Wl,--hash-style=both"
-export CCSHARED="$CC -shared -Wl,--hash-style=both"
-export BLDSHARED="$CC -shared -Wl,--hash-style=both"
-export LDCXXSHARED="$CXX -shared -Wl,--hash-style=both"
 
+# [FIX] Hash-style CHỈ trong LDFLAGS, KHÔNG trong LDSHARED/CCSHARED
+# Trước đây LDSHARED có -Wl,--hash-style=both → clang báo warning khi compile
+export LDSHARED="$CC -shared"
+export CCSHARED="-fPIC"
+export BLDSHARED="$CC -shared"
+export LDCXXSHARED="$CXX -shared"
+
+# CMake
 export CMAKE_C_COMPILER="$CC"
 export CMAKE_CXX_COMPILER="$CXX"
 export CMAKE_AR="$AR"
@@ -194,11 +175,13 @@ export CMAKE_ANDROID_API="$ANDROID_API"
 export ac_cv_prog_CC="$CC"
 export ac_cv_prog_CXX="$CXX"
 
-# [FIX] BLAS qua CXXFLAGS thay vì site.cfg (numpy 2.x meson)
-export CXXFLAGS="${CXXFLAGS:-} -I$DEPS_INSTALL/include -L$DEPS_INSTALL/lib"
-export CFLAGS="${CFLAGS:-} -I$DEPS_INSTALL/include -L$DEPS_INSTALL/lib"
+# [FIX] KHÔNG dùng -nostdinc — nó chặn C++ headers (<cstdlib>, <string>, ...)
+# NDK clang tự động thêm sysroot của nó → không cần -nostdinc
+export CFLAGS="-fPIC -O2 -I$DEPS_INSTALL/include -I$TARGET_ROOT/include/python${PY_MINOR} -Wno-implicit-function-declaration"
+export CXXFLAGS="$CFLAGS"
+export CPPFLAGS="$CFLAGS"
+export LDFLAGS="-L$DEPS_INSTALL/lib -L$NDK_PREBUILT/sysroot/usr/lib/aarch64-linux-android/${ANDROID_API} -Wl,--hash-style=both"
 
-# NumPy BLAS env
 export NPY_DISABLE_SVML=1
 export NPY_USE_BLAS_ILP64=0
 export NPY_BLAS_LIBS="-lopenblas"
@@ -206,7 +189,7 @@ export NPY_CBLAS_LIBS="-lopenblas"
 export NPY_LAPACK_LIBS="-lopenblas"
 
 # ============================================================
-# 5.5. PyO3 config — ép Rust link tường minh libpython
+# 5.5. PyO3 config
 # ============================================================
 PYO3_CONFIG="$TMP_BUILD/pyo3-config.txt"
 cat > "$PYO3_CONFIG" <<EOF
@@ -221,16 +204,81 @@ pointer_width=64
 build_flags=
 suppress_build_script_link_lines=false
 EOF
-
 export PYO3_CONFIG_FILE="$PYO3_CONFIG"
-echo "  PYO3_CONFIG_FILE: $PYO3_CONFIG"
 
 export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -C link-arg=-Wl,--hash-style=both"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
-echo "  RUSTFLAGS:        $RUSTFLAGS"
 
 # ============================================================
-# 6. site.cfg cho numpy/scipy (fallback, vẫn giữ để an toàn)
+# 5.6. [FIX] sitecustomize.py — ép sysconfig LIBPL về target
+#      Fix Pillow link host libpython3.13.a
+# ============================================================
+SYSCONF_DIR="$GITHUB_WORKSPACE/sysconfigdata-host"
+SYSCONF_FILE=$(ls "$TARGET_ROOT/lib/python${PY_MINOR}"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
+SYSCONF_NAME=""
+if [ -n "$SYSCONF_FILE" ]; then
+  SYSCONF_NAME=$(basename "$SYSCONF_FILE" .py)
+  mkdir -p "$SYSCONF_DIR"
+  cp "$SYSCONF_FILE" "$SYSCONF_DIR/" 2>/dev/null || true
+  echo "  Sysconfig: $SYSCONF_NAME"
+fi
+
+cat > "$PYSITE/sitecustomize.py" <<SITEEOF
+import sysconfig
+_target_lib = "$TARGET_ROOT/lib"
+_target_inc = "$TARGET_ROOT/include/python${PY_MINOR}"
+_patches = {
+    'LIBPL': _target_lib,
+    'LIBDIR': _target_lib,
+    'LIBDEST': _target_lib,
+    'INCLUDEPY': _target_inc,
+    'CONFINCLUDEPY': _target_inc,
+    'LIBRARY': 'python${PY_MINOR}',
+    'LDLIBRARY': 'libpython${PY_MINOR}.so',
+    'BLDLIBRARY': '-lpython${PY_MINOR}',
+    'LIBPYTHON': 'python${PY_MINOR}',
+    'LIBRARY_DEPS': '',
+}
+_orig_gcv = sysconfig.get_config_var
+def _gcv(name):
+    if name in _patches:
+        return _patches[name]
+    return _orig_gcv(name)
+sysconfig.get_config_var = _gcv
+
+_orig_gcvs = sysconfig.get_config_vars
+def _gcvs(*args):
+    v = _orig_gcvs(*args)
+    if len(args) == 1 and isinstance(args[0], str):
+        return _patches.get(args[0], v)
+    if len(args) == 1 and isinstance(args[0], (list, tuple)):
+        base = v or {}
+        return {k: _patches.get(k, base.get(k)) for k in args[0]}
+    if len(args) == 0 and isinstance(v, dict):
+        out = dict(v)
+        out.update(_patches)
+        return out
+    return v
+sysconfig.get_config_vars = _gcvs
+
+# Patch _CONFIG_VARS dict trực tiếp (sysconfig uses it internally)
+try:
+    _orig_gcv_cache = sysconfig._CONFIG_VARS
+    if _orig_gcv_cache:
+        _orig_gcv_cache.update(_patches)
+except Exception:
+    pass
+SITEEOF
+
+# PYTHONPATH: pysite (sitecustomize) + sysconfig override dir + target site
+export PYTHONPATH="$PYSITE:$SYSCONF_DIR:$TARGET_SITE:$PYTHONPATH"
+if [ -n "$SYSCONF_NAME" ]; then
+  export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
+fi
+echo "  PYTHONPATH (build): $PYTHONPATH"
+
+# ============================================================
+# 6. site.cfg numpy/scipy
 # ============================================================
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
   cat > "$SRC_PATH/site.cfg" <<EOF
@@ -243,14 +291,16 @@ EOF
 fi
 
 # ============================================================
-# 7. SETUP-ARGS THEO BACKEND
+# 7. SETUP-ARGS THEO BACKEND — FIX
 # ============================================================
 SETUP_ARGS=()
-PLAT_NAME_ARG="--config-settings=--build-option=--plat-name=${ANDROID_TAG}"
 
+# [FIX] --build-option chỉ có cho setuptools, KHÔNG cho meson/maturin
+PLAT_NAME_ARG=""
 case "$BACKEND" in
   *meson*)
-    echo "  → Meson backend"
+    echo "  → Meson backend (không dùng --build-option)"
+    PLAT_NAME_ARG=""
     SETUP_ARGS=(
       "-Csetup-args=-Dblas=openblas"
       "-Csetup-args=-Dlapack=openblas"
@@ -260,6 +310,7 @@ case "$BACKEND" in
     ;;
   *maturin*)
     echo "  → Maturin (Rust)"
+    PLAT_NAME_ARG=""
     export PYO3_PYTHON="$HOST_PY"
     export PYO3_CROSS=1
     export PYO3_CROSS_PYTHON_VERSION="$PY_MINOR"
@@ -268,11 +319,10 @@ case "$BACKEND" in
     export PYO3_CONFIG_FILE="$PYO3_CONFIG"
     export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -C link-arg=-Wl,--hash-style=both"
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
-    # Maturin dùng --plat-name khác
-    PLAT_NAME_ARG="--compatibility=android"
     ;;
-  *)
-    echo "  → $BACKEND backend"
+  *setuptools*|*)
+    echo "  → Setuptools backend (dùng --build-option cho plat-name)"
+    PLAT_NAME_ARG="--config-settings=--build-option=--plat-name=${ANDROID_TAG}"
     ;;
 esac
 
@@ -301,7 +351,6 @@ print("Pillow patched")
 PYEOF
 
     "$HOST_PY" /tmp/patch_pillow.py
-    grep -c "nonexistent" setup.py || echo "(0)"
     ;;
 
   greenlet|frozenlist|ujson|markupsafe|regex|multidict|yarl|aiohttp|bitarray|brotli|mmh3|msgpack|lz4|zstandard|xxhash|pyrsistent|immutables|simplejson|pycryptodome|protobuf|pyyaml|cython)
@@ -368,8 +417,16 @@ EOF
     echo "  → lxml: dùng stub librt.a + force CC"
     ;;
 
+  cffi)
+    echo "  → cffi: build với Py_LIMITED_API"
+    export CFFI_PY_LIMITED_API="0x030D0000"
+    SETUP_ARGS+=(
+      "--config-settings=--build-option=--py-limited-api=cp313"
+    )
+    ;;
+
   cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
-    echo "  → $PKG_NAME: Rust + PyO3 link tường minh libpython"
+    echo "  → $PKG_NAME: Rust + PyO3 link tường minh"
     export PYO3_PYTHON="$HOST_PY"
     export PYO3_CROSS=1
     export PYO3_CROSS_PYTHON_VERSION="$PY_MINOR"
@@ -382,35 +439,24 @@ EOF
 esac
 
 # ============================================================
-# 9. BUILD WHEEL — [FIX] thêm --plat-name
+# 9. BUILD WHEEL
 # ============================================================
 cd "$SRC_PATH"
 
 echo ""
 echo "  setup-args: ${SETUP_ARGS[*]}"
-echo "  plat-name:  $ANDROID_TAG"
+echo "  plat-name:  ${PLAT_NAME_ARG:-'(none — meson/maturin)'}"
 echo ""
 
 RC=0
-if [ "${#SETUP_ARGS[@]}" -gt 0 ]; then
-  if "$HOST_PY" -m pip wheel . \
-        --no-deps --no-build-isolation \
-        "${PLAT_NAME_ARG}" \
-        "${SETUP_ARGS[@]}" \
-        --wheel-dir "$WHEELS_OUT" > "$LOG" 2>&1; then
-    RC=0
-  else
-    RC=$?
-  fi
+BUILD_CMD=("$HOST_PY" -m pip wheel . --no-deps --no-build-isolation --wheel-dir "$WHEELS_OUT")
+[ -n "$PLAT_NAME_ARG" ] && BUILD_CMD+=("$PLAT_NAME_ARG")
+[ "${#SETUP_ARGS[@]}" -gt 0 ] && BUILD_CMD+=("${SETUP_ARGS[@]}")
+
+if "${BUILD_CMD[@]}" > "$LOG" 2>&1; then
+  RC=0
 else
-  if "$HOST_PY" -m pip wheel . \
-        --no-deps --no-build-isolation \
-        "${PLAT_NAME_ARG}" \
-        --wheel-dir "$WHEELS_OUT" > "$LOG" 2>&1; then
-    RC=0
-  else
-    RC=$?
-  fi
+  RC=$?
 fi
 
 # ============================================================
@@ -440,74 +486,67 @@ if gcc -c "$CT" -o "$CO" 2>/dev/null; then
   if readelf -h "$CO" 2>/dev/null | grep -q "AArch64"; then
     echo "  ✅ gcc wrapper → AArch64 ELF"
   else
-    echo "  ❌ gcc wrapper không tạo AArch64 ELF:"
-    readelf -h "$CO" | grep -E "Machine|Class" || true
+    echo "  ❌ gcc wrapper không tạo AArch64 ELF"
   fi
-else
-  echo "  ⚠️  Không test được gcc wrapper"
 fi
 rm -f "$CT" "$CO"
 
 # ============================================================
-# 12. VERIFY WHEEL BIONIC + TAG
+# 12. VERIFY WHEEL
 # ============================================================
 echo ""
-echo "🔍 Verify wheel vừa build..."
+echo "🔍 Verify wheel..."
 GLIBC_PAT='libc\.so\.6|ld-linux|libm\.so\.6|libpthread\.so\.0'
 WHEEL_FOUND=0
 for whl in "$WHEELS_OUT"/${PKG_NAME//-/_}-*.whl "$WHEELS_OUT"/${PKG_NAME}-*.whl; do
   [ -f "$whl" ] || continue
   WHEEL_FOUND=1
   base=$(basename "$whl")
+  echo "  📦 $base"
 
-  # [FIX] Verify tag đúng
   if [[ "$base" == *"${ANDROID_TAG}"* ]]; then
-    echo "  ✅ tag OK: $base"
+    echo "     ✅ tag OK"
+  elif [[ "$base" == *"aarch64_linux_android"* ]]; then
+    echo "     ⚠️  tag aarch64_linux_android — workflow sẽ rename"
   elif [[ "$base" == *"none-any"* ]]; then
-    echo "  ⏭️  pure python: $base"
+    echo "     ⚠️  tag py3-none-any (native package cần .so!)"
   else
-    echo "  ⚠️  tag không phải ${ANDROID_TAG}: $base"
+    echo "     ⚠️  tag không chuẩn: $base"
   fi
 
-  # Verify bionic
   work=$(mktemp -d)
   unzip -q -o "$whl" -d "$work"
+  SO_COUNT=$(find "$work" -name "*.so" | wc -l)
+  echo "     .so count: $SO_COUNT"
   bad=0
   while IFS= read -r so; do
     if readelf -d "$so" 2>/dev/null | grep -Eq "$GLIBC_PAT"; then
-      echo "  ❌ $(basename "$whl") — $(basename "$so") link glibc:"
-      readelf -d "$so" | grep -E 'NEEDED' | grep -E "$GLIBC_PAT" | sed 's/^/     /'
+      echo "     ❌ $(basename "$so") link glibc"
       bad=1
     fi
   done < <(find "$work" -name "*.so")
   rm -rf "$work"
-  if [ "$bad" -eq 0 ]; then
-    echo "  ✅ bionic OK: $(basename "$whl")"
-  fi
+  [ "$bad" -eq 0 ] && echo "     ✅ bionic OK"
 done
 
-if [ "$WHEEL_FOUND" -eq 0 ]; then
-  echo "  ⚠️  Không tìm thấy wheel nào cho $PKG_NAME"
-fi
+[ "$WHEEL_FOUND" -eq 0 ] && echo "  ⚠️  Không tìm thấy wheel"
 
 # ============================================================
-# 13. VERIFY Rust extension có NEEDED libpython
+# 13. VERIFY Rust extension
 # ============================================================
 case "$PKG_NAME" in
   cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
     echo ""
-    echo "🔍 Verify Rust extension link tường minh libpython..."
+    echo "🔍 Verify Rust extension..."
     for whl in "$WHEELS_OUT"/${PKG_NAME//-/_}-*.whl "$WHEELS_OUT"/${PKG_NAME}-*.whl; do
       [ -f "$whl" ] || continue
-      work=$(mktemp -d)
-      unzip -q -o "$whl" -d "$work"
+      work=$(mktemp -d); unzip -q -o "$whl" -d "$work"
       RUST_SO=$(find "$work" -name "_rust*.so" -o -name "*.abi3.so" | head -1)
       if [ -n "$RUST_SO" ]; then
         if readelf -d "$RUST_SO" 2>/dev/null | grep -q "libpython${PY_MINOR}.so"; then
           echo "  ✅ $(basename "$whl") — có NEEDED libpython${PY_MINOR}.so"
-          readelf -d "$RUST_SO" | grep -E "NEEDED.*libpython" | sed 's/^/     /'
         else
-          echo "  ⚠️  $(basename "$whl") — không có NEEDED libpython (workflow sẽ patch)"
+          echo "  ⚠️  $(basename "$whl") — không có NEEDED libpython"
         fi
       fi
       rm -rf "$work"
