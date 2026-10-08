@@ -74,18 +74,16 @@ cd "$SRC_DIR"
 if ! "${HOST_PYTHON}" -m pip download "$PKG_SPEC" \
         --no-deps --no-binary=:all: --dest="$SRC_DIR" > /tmp/dl.log 2>&1; then
 
-    echo "⚠️  pip download failed — thử fetch sdist từ PyPI trực tiếp"
+    echo "⚠️  pip download failed — fetch sdist từ PyPI JSON"
     tail -10 /tmp/dl.log
 
-    # [FIX] Lấy sdist URL từ PyPI JSON API
     PKG_BASE="${PKG_SPEC%%[<>=!~]*}"
     PYPI_JSON=$(curl -sL "https://pypi.org/pypi/${PKG_BASE}/json" 2>/dev/null || echo "{}")
     SDIST_URL=$(echo "$PYPI_JSON" | "${HOST_PYTHON}" -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
-    urls = d.get('urls', [])
-    for u in urls:
+    for u in d.get('urls', []):
         if u.get('packagetype') == 'sdist':
             print(u['url']); break
 except Exception:
@@ -100,8 +98,7 @@ except Exception:
     echo "  → Download: $SDIST_URL"
     SDIST_NAME=$(basename "$SDIST_URL")
     wget -q "$SDIST_URL" -O "${SRC_DIR}/${SDIST_NAME}" || {
-        echo "❌ Download sdist failed"
-        exit 1
+        echo "❌ Download sdist failed"; exit 1
     }
 fi
 
@@ -167,7 +164,21 @@ make_wrapper ranlib "${RANLIB}"
 make_wrapper strip "${STRIP}"
 make_wrapper readelf "${READELF}"
 
-export PATH="${SANDBOX}:${TMP_BUILD}:${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:${PATH}"
+# ============================================================
+# [FIX] Rust packages cần host cc cho build script → không dùng sandbox
+# ============================================================
+USE_SANDBOX=1
+case "$PKG_NAME" in
+    cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
+        USE_SANDBOX=0
+        ;;
+esac
+
+if [ "$USE_SANDBOX" -eq 1 ]; then
+    export PATH="${SANDBOX}:${TMP_BUILD}:${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:${PATH}"
+else
+    export PATH="${TMP_BUILD}:${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:${PATH}"
+fi
 
 # ============================================================
 # 5. Env
@@ -180,11 +191,13 @@ unset FC F77 F90
 
 export CC CXX CPP="${CC} -E" LD="${CC}" AR AS="${CC}" RANLIB STRIP
 
-# [FIX] Bỏ hash-style khỏi CCSHARED (chỉ cần trong LDFLAGS)
 export LDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export CCSHARED="-fPIC"
 export BLDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export LDCXXSHARED="${CXX} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
+
+# [FIX] Bỏ -Wl,--hash-style=both khỏi LDFLAGS env — chỉ giữ trong LDSHARED
+export LDFLAGS="-L${DEPS_INSTALL}/lib -L${NDK_SYSROOT}/usr/lib/aarch64-linux-android/${ANDROID_API}"
 
 export CMAKE_C_COMPILER="${CC}"
 export CMAKE_CXX_COMPILER="${CXX}"
@@ -261,6 +274,7 @@ case "$BACKEND" in
         echo "  → Meson backend"
         case "$PKG_NAME" in
             numpy|scipy)
+                # [FIX] Thêm python3 binary cho link test
                 cat > "${TMP_BUILD}/android-cross.ini" <<EOF
 [binaries]
 c = '${CC}'
@@ -268,6 +282,7 @@ cpp = '${CXX}'
 ar = '${AR}'
 strip = '${STRIP}'
 ranlib = '${RANLIB}'
+python3 = '${HOST_PYTHON}'
 exe_wrapper = '/bin/true'
 
 [host_machine]
@@ -280,8 +295,18 @@ endian = 'little'
 longdouble_format = 'IEEE_QUAD_LE'
 needs_exe_wrapper = true
 EOF
+                # [FIX] Native file cho meson
+                cat > "${TMP_BUILD}/meson-native.ini" <<EOF
+[binaries]
+c = '/usr/bin/gcc'
+cpp = '/usr/bin/g++'
+ar = '/usr/bin/ar'
+strip = '/usr/bin/strip'
+python3 = '${HOST_PYTHON}'
+EOF
                 SETUP_ARGS=(
                     "-Csetup-args=--cross-file=${TMP_BUILD}/android-cross.ini"
+                    "-Csetup-args=--native-file=${TMP_BUILD}/meson-native.ini"
                     "-Csetup-args=-Dblas=openblas"
                     "-Csetup-args=-Dlapack=openblas"
                     "-Csetup-args=-Dallow-noblas=false"
@@ -306,7 +331,6 @@ EOF
         export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
         export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include"
         export PYO3_CONFIG_FILE="${PYO3_CONFIG}"
-        # [FIX] Chỉ set target-specific RUSTFLAGS, không global
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR} -C link-arg=-Wl,--hash-style=both"
         unset RUSTFLAGS
         ;;
@@ -330,13 +354,15 @@ with open("setup.py", "r") as f:
     c = f.read()
 q1, q2 = chr(34), chr(39)
 skip = "/nonexistent/skip"
-for path in ["/usr/include", "/usr/local/include", "/usr/lib", "/usr/local/lib"]:
+for path in ["/usr/include", "/usr/local/include", "/usr/lib", "/usr/local/lib",
+             "/opt/host-python/lib", "/opt/host-python/include"]:
     c = c.replace(q1+path+q1, q1+skip+q1)
     c = c.replace(q2+path+q2, q2+skip+q2)
-c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/usr[^\x27\x22]*[\x27\x22]\)", "pass", c)
+c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/(usr|opt/host)[^\x27\x22]*[\x27\x22]\)", "pass", c)
 filter_code = '''
 import os as _os
-_BAD = ("/usr/include", "/usr/local/include", "/usr/lib", "/usr/local/lib")
+_BAD = ("/usr/include", "/usr/local/include", "/usr/lib", "/usr/local/lib",
+        "/opt/host-python/lib", "/opt/host-python/include")
 def _is_bad(p):
     p = str(p)
     pl = p.lower()
@@ -389,13 +415,9 @@ PYEOF
         export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
         export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include"
         export PYO3_CONFIG_FILE="${PYO3_CONFIG}"
-        # [FIX] Chỉ target-specific, không global
+        # [FIX] Chỉ target-specific RUSTFLAGS, không global
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR} -C link-arg=-Wl,--hash-style=both"
         unset RUSTFLAGS
-        ;;
-
-    lxml)
-        echo "  → lxml"
         ;;
 esac
 
