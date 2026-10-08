@@ -494,7 +494,7 @@ jobs:
           echo "PATH=$HOME/.cargo/bin:$PATH" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # BUILD WHEELS — [FIX] set -e + ls exit 2
+      # BUILD WHEELS — verify bionic sau từng tier
       # ==========================================================
       - name: Build wheels
         env:
@@ -507,7 +507,6 @@ jobs:
           TARGET_SITE="$TARGET_STDLIB/site-packages"
           mkdir -p wheels-out
 
-          # [FIX] || true — tránh set -e kill nếu glob không match
           SYSCONF_FILE=$(ls "$TARGET_STDLIB"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
           if [ -z "$SYSCONF_FILE" ]; then
             echo "❌ Không có _sysconfigdata"
@@ -579,7 +578,6 @@ jobs:
           export HOST_PY TARGET_ROOT TARGET_SITE TARGET_STDLIB
           export WHEELS_OUT="$GITHUB_WORKSPACE/wheels-out"
 
-          # [FIX] verify_bionic — luôn return 0/1 rõ ràng
           verify_bionic() {
             local whl="$1"
             [ -f "$whl" ] || return 0
@@ -598,7 +596,6 @@ jobs:
             return $bad
           }
 
-          # [FIX] find_wheel — nuốt exit code 2 của ls, luôn return 0
           find_wheel() {
             local pkg="$1"
             local pkg_a pkg_b files
@@ -687,7 +684,6 @@ jobs:
       - name: Patch cryptography wheel
         run: |
           set -eo pipefail
-          # [FIX] || true để không bị set -e kill
           CRYPTO_WHL=$(ls wheels-out/cryptography-*linux_aarch64.whl 2>/dev/null | head -1 || true)
           if [ -z "$CRYPTO_WHL" ]; then
             CRYPTO_WHL=$(ls wheels-out/cryptography-*.whl 2>/dev/null | head -1 || true)
@@ -904,6 +900,9 @@ jobs:
             ${{ github.event.repository.name }} \
             ${{ steps.tag.outputs.tag }}
 
+      # ==========================================================
+      # VERIFY pip index — docs/index.html optional, auto-create redirect
+      # ==========================================================
       - name: Verify pip index (docs/simple)
         if: hashFiles('wheels-final/*.whl') != ''
         env:
@@ -915,29 +914,48 @@ jobs:
           FAIL=0
 
           echo "=== Cấu trúc docs/ ==="
-          find docs -maxdepth 3 -type f | sort | head -50
+          find docs -maxdepth 3 -type f | sort | head -60
           echo ""
 
+          # Tự tạo docs/index.html nếu thiếu — redirect về /simple/
           if [ ! -f "docs/index.html" ]; then
-            echo "❌ Thiếu docs/index.html"
-            FAIL=$((FAIL+1))
+            echo "ℹ️  docs/index.html không có — tự tạo redirect"
+            cat > docs/index.html <<'HTMLEOF'
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0; url=./simple/">
+  <title>Python Package Index</title>
+</head>
+<body>
+  <h1>Python Package Index</h1>
+  <p>Đang chuyển hướng tới <a href="./simple/">simple index</a>…</p>
+  <p>Cài đặt:</p>
+  <pre>pip install --index-url &lt;URL&gt;/simple/ &lt;package&gt;</pre>
+</body>
+</html>
+HTMLEOF
+            echo "✅ Đã tạo docs/index.html"
           else
             echo "✅ docs/index.html"
           fi
 
+          # docs/simple/index.html là BẮT BUỘC
           if [ ! -f "docs/simple/index.html" ]; then
-            echo "❌ Thiếu docs/simple/index.html"
+            echo "❌ Thiếu docs/simple/index.html — pip sẽ không dùng được"
             FAIL=$((FAIL+1))
           else
             echo "✅ docs/simple/index.html"
             if ! grep -q '<a ' docs/simple/index.html; then
-              echo "⚠️  docs/simple/index.html không có link package nào"
+              echo "❌ docs/simple/index.html không có link package nào"
               FAIL=$((FAIL+1))
             fi
           fi
 
           echo ""
           echo "=== Verify từng wheel có entry ==="
+          MISSING=""
           for whl in wheels-final/*.whl; do
             [ -f "$whl" ] || continue
             base=$(basename "$whl")
@@ -955,6 +973,7 @@ jobs:
 
             if [ "$found" -eq 0 ]; then
               echo "❌ $base — không có docs/simple/${pkg_norm}/index.html"
+              MISSING="$MISSING $pkg_norm"
               FAIL=$((FAIL+1))
               continue
             fi
@@ -967,11 +986,40 @@ jobs:
           done
 
           echo ""
+          echo "=== Check entry thừa (không có wheel) ==="
+          EXTRA=""
+          for d in docs/simple/*/; do
+            [ -d "$d" ] || continue
+            pkg_dir=$(basename "$d")
+            [ "$pkg_dir" = "index.html" ] && continue
+
+            has_wheel=0
+            for whl in wheels-final/*.whl; do
+              [ -f "$whl" ] || continue
+              base=$(basename "$whl")
+              pkg_raw=$(echo "$base" | cut -d'-' -f1)
+              pkg_norm=$(echo "$pkg_raw" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
+              if [ "$pkg_norm" = "$pkg_dir" ] || [ "$pkg_raw" = "$pkg_dir" ]; then
+                has_wheel=1
+                break
+              fi
+            done
+
+            if [ "$has_wheel" -eq 0 ]; then
+              echo "⚠️  docs/simple/$pkg_dir/ — không có wheel tương ứng (stale?)"
+              EXTRA="$EXTRA $pkg_dir"
+            fi
+          done
+
+          echo ""
           if [ "$FAIL" -gt 0 ]; then
-            echo "❌ $FAIL lỗi trong docs/simple/ — dừng workflow"
+            echo "❌ $FAIL lỗi trong docs/simple/"
+            [ -n "$MISSING" ] && echo "   Package thiếu entry:$MISSING"
             exit 1
           fi
           echo "✅ docs/simple/ OK"
+          [ -n "$EXTRA" ] && echo "ℹ️  Entry thừa (không fail):$EXTRA"
+          exit 0
 
       - name: Commit docs
         if: hashFiles('wheels-final/*.whl') != ''
