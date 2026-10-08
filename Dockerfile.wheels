@@ -1,4 +1,5 @@
 # Dockerfile.wheels — Cross-compile Android wheels cho Python 3.13
+# Cache bust: 2026-10-09 - persist python source tarball
 FROM ubuntu:22.04
 
 # ---- Locale ----
@@ -44,13 +45,20 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/*
 
 # ============================================================
-# STEP 1: Build HOST Python TRƯỚC khi set NDK env
+# STEP 1: Tải Python source vào /opt/python-src (GIỮ LẠI)
+# ============================================================
+ENV PYTHON_SRC=/opt/python-src
+RUN mkdir -p ${PYTHON_SRC} && cd ${PYTHON_SRC} && \
+    wget -q "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz" && \
+    ls -lh ${PYTHON_SRC}/
+
+# ============================================================
+# STEP 2: Build HOST Python (dùng source đã tải)
 # ============================================================
 ENV HOST_PYTHON=/opt/host-python/bin/python${PYTHON_MINOR}
 ENV HOST_PY_PREFIX=/opt/host-python
 
-RUN mkdir -p /tmp/build-host && cd /tmp/build-host && \
-    wget -q "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz" && \
+RUN cd ${PYTHON_SRC} && \
     tar -xf "Python-${PYTHON_VERSION}.tar.xz" && \
     cd "Python-${PYTHON_VERSION}" && \
     env -u CC -u CXX -u AR -u RANLIB -u STRIP -u READELF -u LDSHARED -u CFLAGS -u LDFLAGS -u CPPFLAGS \
@@ -66,10 +74,11 @@ RUN mkdir -p /tmp/build-host && cd /tmp/build-host && \
     ldconfig && \
     ${HOST_PYTHON} --version && \
     ${HOST_PYTHON} -c "import zlib, ssl, sqlite3, ctypes; print('OK: zlib+ssl+sqlite3+ctypes')" && \
-    rm -rf /tmp/build-host
+    rm -rf "${PYTHON_SRC}/Python-${PYTHON_VERSION}"
+    # Giữ lại tarball ở ${PYTHON_SRC}/
 
 # ============================================================
-# STEP 2: Host Python build deps
+# STEP 3: Host Python build deps
 # ============================================================
 RUN ${HOST_PYTHON} -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     ${HOST_PYTHON} -m pip install --no-cache-dir \
@@ -80,7 +89,7 @@ RUN ${HOST_PYTHON} -m pip install --no-cache-dir --upgrade pip setuptools wheel 
     rm -rf ~/.cache/pip
 
 # ============================================================
-# STEP 3: NDK r25c
+# STEP 4: NDK r25c
 # ============================================================
 ENV NDK=/opt/ndk/android-ndk-${NDK_VERSION}
 RUN mkdir -p /opt/ndk && cd /opt/ndk && \
@@ -89,7 +98,7 @@ RUN mkdir -p /opt/ndk && cd /opt/ndk && \
     rm -f android-ndk-${NDK_VERSION}-linux.zip
 
 # ============================================================
-# STEP 4: SAU KHI có host Python → set NDK env vars
+# STEP 5: Set NDK env vars (SAU khi host python build xong)
 # ============================================================
 ENV NDK_TOOLCHAIN=${NDK}/toolchains/llvm/prebuilt/linux-x86_64
 ENV CC=${NDK_TOOLCHAIN}/bin/${TARGET_HOST}${ANDROID_API}-clang
@@ -101,7 +110,7 @@ ENV READELF=${NDK_TOOLCHAIN}/bin/llvm-readelf
 ENV PATH="${NDK_TOOLCHAIN}/bin:${PATH}"
 
 # ============================================================
-# STEP 5: Rust
+# STEP 6: Rust
 # ============================================================
 ENV CARGO_HOME=/opt/cargo \
     RUSTUP_HOME=/opt/rustup \
@@ -115,7 +124,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     rustc --version && cargo --version
 
 # ============================================================
-# STEP 6: User không chạy as root
+# STEP 7: User không chạy as root
 # ============================================================
 RUN useradd -m -s /bin/bash builder && \
     mkdir -p /work && chown -R builder:builder /work && \
