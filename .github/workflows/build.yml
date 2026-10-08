@@ -73,8 +73,8 @@ jobs:
       NDK_VERSION: "r25c"
       ANDROID_API: "24"
       TARGET_HOST: "aarch64-linux-android"
-      # Bump CACHE_VERSION khi đổi build config để invalidate cache
-      CACHE_VERSION: "v1"
+      # [FIX] Bump version khi sửa build config để invalidate cache
+      CACHE_VERSION: "v2-hashfix"
 
     steps:
       # ---------- SECTION 1: ENVIRONMENT SETUP ----------
@@ -92,7 +92,6 @@ jobs:
 
       - name: Install Host Tools
         run: |
-          # Fix apt mirror + timeout
           sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
             /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null || true
           sudo sed -i 's|https://azure.archive.ubuntu.com|https://archive.ubuntu.com|g' \
@@ -211,7 +210,8 @@ jobs:
           wget -q "https://www.python.org/ftp/python/${{ env.PYTHON_VERSION }}/Python-${{ env.PYTHON_VERSION }}.tar.xz"
           tar -xf "Python-${{ env.PYTHON_VERSION }}.tar.xz"
           cd "Python-${{ env.PYTHON_VERSION }}"
-          ./configure --prefix="$GITHUB_WORKSPACE/.cache/host-python" --enable-optimizations=no
+          # [FIX] --disable-optimizations thay vì --enable-optimizations=no
+          ./configure --prefix="$GITHUB_WORKSPACE/.cache/host-python" --disable-optimizations
           make -j$(nproc)
           make install
           echo "✅ Host Python built"
@@ -240,9 +240,10 @@ jobs:
           echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> "$GITHUB_ENV"
           echo "READELF=$TOOLCHAIN/bin/llvm-readelf" >> "$GITHUB_ENV"
           echo "DEPS_INSTALL=$DEPS_INSTALL" >> "$GITHUB_ENV"
+          # [FIX] PKG_CONFIG_SYSROOT_DIR rỗng (tránh double-prefix)
           echo "PKG_CONFIG_LIBDIR=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_SYSROOT_DIR=$DEPS_INSTALL" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$DEPS_INSTALL/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_SYSROOT_DIR=" >> "$GITHUB_ENV"
           echo "CFLAGS=-fPIC -O2 -I$DEPS_INSTALL/include -Wno-implicit-function-declaration" >> "$GITHUB_ENV"
           echo "CPPFLAGS=-I$DEPS_INSTALL/include" >> "$GITHUB_ENV"
           echo "LDFLAGS=-L$DEPS_INSTALL/lib -Wl,--hash-style=both" >> "$GITHUB_ENV"
@@ -263,7 +264,9 @@ jobs:
           wget -q "https://github.com/libffi/libffi/releases/download/v${{ env.LIBFFI_VERSION }}/libffi-${{ env.LIBFFI_VERSION }}.tar.gz"
           tar -xf "libffi-${{ env.LIBFFI_VERSION }}.tar.gz"
           cd "libffi-${{ env.LIBFFI_VERSION }}"
-          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
+            --enable-static --disable-shared \
+            LDFLAGS="-Wl,--hash-style=both"
           make -j$(nproc) install
 
       - name: Cross-Compile OpenSSL
@@ -277,13 +280,14 @@ jobs:
           export ANDROID_NDK_ROOT="$NDK"
           export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
 
+          # [FIX] --hash-style=both trong LDFLAGS, không phải bare arg
+          LDFLAGS="-Wl,--hash-style=both" \
           ./Configure android-arm64 \
             -D__ANDROID_API__=${{ env.ANDROID_API }} \
             --prefix="$DEPS_INSTALL" \
             --openssldir="$DEPS_INSTALL/ssl" \
             shared no-engine no-tests no-async \
-            CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
-            -Wl,--hash-style=both
+            CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP"
 
           make -j$(nproc)
           make install_sw
@@ -299,7 +303,9 @@ jobs:
           wget -q "$SQLITE_URL"
           tar -xf "sqlite-autoconf-${{ env.SQLITE_VERSION }}.tar.gz"
           cd "sqlite-autoconf-${{ env.SQLITE_VERSION }}"
-          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
+            --enable-static --disable-shared \
+            LDFLAGS="-Wl,--hash-style=both"
           make -j$(nproc) install
 
       - name: Cross-Compile XZ
@@ -309,7 +315,9 @@ jobs:
           wget -q "https://github.com/tukaani-project/xz/releases/download/v${{ env.XZ_VERSION }}/xz-${{ env.XZ_VERSION }}.tar.gz"
           tar -xf "xz-${{ env.XZ_VERSION }}.tar.gz"
           cd "xz-${{ env.XZ_VERSION }}"
-          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" --enable-static --disable-shared
+          ./configure --host="${{ env.TARGET_HOST }}" --prefix="$DEPS_INSTALL" \
+            --enable-static --disable-shared \
+            LDFLAGS="-Wl,--hash-style=both"
           make -j$(nproc) install
 
       - name: Verify deps-install
@@ -328,7 +336,9 @@ jobs:
           path: python-android
           key: python-android-${{ env.PYTHON_VERSION }}-ssl${{ env.OPENSSL_VERSION }}-ffi${{ env.LIBFFI_VERSION }}-sqlite${{ env.SQLITE_VERSION }}-xz${{ env.XZ_VERSION }}-${{ runner.os }}-${{ env.CACHE_VERSION }}
 
-      # ---------- SECTION 5: CROSS-COMPILE CPYTHON 3.13 ----------
+      # ============================================================
+      # SECTION 5: CROSS-COMPILE CPYTHON 3.13 — [FIX DT_HASH]
+      # ============================================================
       - name: Cross-Compile CPython
         if: steps.cache-python.outputs.cache-hit != 'true'
         run: |
@@ -340,6 +350,15 @@ jobs:
             '*disabled*' '_crypt' '_nis' 'spwd' 'ossaudiodev' \
             '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' \
             > Modules/Setup.local
+
+          # [FIX] Export các biến LDSHARED/CCSHARED/LINKFORSHARED TRƯỚC configure
+          # để CPython nhận đúng linker flags cho MỌI extension (.so),
+          # không chỉ libpython3.13.so
+          export LDSHARED="$CC -shared -Wl,--hash-style=both"
+          export BLDSHARED="$CC -shared -Wl,--hash-style=both"
+          export CCSHARED="-fPIC -Wl,--hash-style=both"
+          export LDCXXSHARED="$CXX -shared -Wl,--hash-style=both"
+          export LINKFORSHARED="-Wl,--hash-style=both -Xlinker -export-dynamic"
 
           LDFLAGS="-L$DEPS_INSTALL/lib -Wl,--hash-style=both" \
           OPENSSL_CFLAGS="-I$DEPS_INSTALL/include" \
@@ -364,14 +383,72 @@ jobs:
             ac_cv_buggy_getaddrinfo=no \
             ac_cv_little_endian_double=yes
 
-          make -j$(nproc)
+          # [FIX] Patch Makefile — một số phiên bản CPython override env vars
+          sed -i "s|^LDSHARED=.*|LDSHARED= $CC -shared -Wl,--hash-style=both|" Makefile
+          sed -i "s|^BLDSHARED=.*|BLDSHARED= $CC -shared -Wl,--hash-style=both|" Makefile
+          sed -i "s|^CCSHARED=.*|CCSHARED= -fPIC -Wl,--hash-style=both|" Makefile
+          sed -i "s|^LDCXXSHARED=.*|LDCXXSHARED= $CXX -shared -Wl,--hash-style=both|" Makefile
+          sed -i "s|^LINKFORSHARED=.*|LINKFORSHARED= -Wl,--hash-style=both -Xlinker -export-dynamic|" Makefile
+
+          echo "=== Makefile sau patch ==="
+          grep -E "^LDSHARED=|^BLDSHARED=|^CCSHARED=|^LDCXXSHARED=|^LINKFORSHARED=" Makefile
+
+          # [FIX] Override thêm trên command line để chắc chắn
+          make -j$(nproc) \
+            LDSHARED="$CC -shared -Wl,--hash-style=both" \
+            BLDSHARED="$CC -shared -Wl,--hash-style=both" \
+            CCSHARED="-fPIC -Wl,--hash-style=both" \
+            LDCXXSHARED="$CXX -shared -Wl,--hash-style=both" \
+            LINKFORSHARED="-Wl,--hash-style=both -Xlinker -export-dynamic"
           make install
 
           echo "Critical modules:"
-          ls "$GITHUB_WORKSPACE/python-android/lib/python3.13/lib-dynload/" | grep -E "_ssl|_sqlite|_ctypes|_lzma|zlib" || true
+          ls "$GITHUB_WORKSPACE/python-android/lib/python3.13/lib-dynload/" | grep -E "_ssl|_sqlite|_ctypes|_lzma|zlib|_posixsubprocess" || true
 
-          echo "Verify hash style:"
-          readelf -d "$GITHUB_WORKSPACE/python-android/lib/libpython3.13.so" | grep -E "HASH" || true
+          echo ""
+          echo "Verify hash style trên libpython3.13.so:"
+          readelf -d "$GITHUB_WORKSPACE/python-android/lib/libpython3.13.so" | grep -iE "hash" || true
+
+      # ============================================================
+      # SECTION 5.5: VERIFY DT_HASH — fail sớm nếu thiếu
+      # ============================================================
+      - name: Verify DT_HASH on CPython extensions
+        if: steps.cache-python.outputs.cache-hit != 'true'
+        run: |
+          set -eo pipefail
+          LIBDYLOAD="$GITHUB_WORKSPACE/python-android/lib/python3.13/lib-dynload"
+          FAIL=0
+
+          # Check libpython3.13.so
+          LP="$GITHUB_WORKSPACE/python-android/lib/libpython3.13.so"
+          if [ -f "$LP" ]; then
+            has_sysv=$(readelf --dynamic "$LP" 2>/dev/null | grep -E "\(HASH\)" | grep -v "GNU_HASH" | wc -l)
+            has_gnu=$(readelf --dynamic "$LP" 2>/dev/null | grep -c "GNU_HASH" || true)
+            echo "libpython3.13.so: SysV=$has_sysv GNU=$has_gnu"
+            if [ "$has_sysv" -eq 0 ]; then
+              echo "❌ libpython3.13.so thiếu DT_HASH"
+              FAIL=$((FAIL+1))
+            fi
+          fi
+
+          # Check all extensions
+          for so in "$LIBDYLOAD"/*.so; do
+            [ -f "$so" ] || continue
+            base=$(basename "$so")
+            has_sysv=$(readelf --dynamic "$so" 2>/dev/null | grep -E "\(HASH\)" | grep -v "GNU_HASH" | wc -l)
+            has_gnu=$(readelf --dynamic "$so" 2>/dev/null | grep -c "GNU_HASH" || true)
+            if [ "$has_sysv" -eq 0 ] || [ "$has_gnu" -eq 0 ]; then
+              echo "❌ $base — SysV=$has_sysv GNU=$has_gnu"
+              FAIL=$((FAIL+1))
+            fi
+          done
+
+          if [ "$FAIL" -gt 0 ]; then
+            echo ""
+            echo "❌ $FAIL file thiếu hash table — Android linker sẽ từ chối"
+            exit 1
+          fi
+          echo "✅ Tất cả extension có DT_HASH + DT_GNU_HASH"
 
       # ---------- SECTION 6: BOOTSTRAP WHEELS ----------
       - name: Bootstrap Pure-Python Wheels
@@ -406,9 +483,11 @@ jobs:
 
       - name: Strip Binaries and Patch Hardcoded Paths
         run: |
+          # [FIX] Dùng --strip-debug thay --strip-unneeded để giữ hash sections
+          # (--strip-unneeded có thể xóa section cần thiết trên Android)
           find "$GITHUB_WORKSPACE/python-android" -name "*.so*" \
-            -exec "$STRIP" --strip-unneeded {} \; 2>/dev/null || true
-          "$STRIP" --strip-unneeded "$GITHUB_WORKSPACE/python-android/bin/python3.13" 2>/dev/null || true
+            -exec "$STRIP" --strip-debug {} \; 2>/dev/null || true
+          "$STRIP" --strip-debug "$GITHUB_WORKSPACE/python-android/bin/python3.13" 2>/dev/null || true
 
           find "$GITHUB_WORKSPACE/python-android" -type f \
             \( -name "_sysconfigdata*.py" -o -name "*.pc" -o -name "*-config" -o -name "Makefile" \) \
@@ -533,6 +612,15 @@ jobs:
             fi
           done
           echo "✅ All required libs present"
+
+          # [FIX] Final check: libpython trong jniLibs phải có DT_HASH
+          LP="$JNI/libpython3.13.so"
+          has_sysv=$(readelf --dynamic "$LP" 2>/dev/null | grep -E "\(HASH\)" | grep -v "GNU_HASH" | wc -l)
+          if [ "$has_sysv" -eq 0 ]; then
+            echo "❌ $LP thiếu DT_HASH — APK sẽ fail khi load extension"
+            exit 1
+          fi
+          echo "✅ libpython3.13.so có DT_HASH"
 
       # ---------- SECTION 10: BUILD APK ----------
       - name: Setup debug keystore
