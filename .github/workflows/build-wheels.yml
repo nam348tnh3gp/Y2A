@@ -97,13 +97,15 @@ jobs:
           echo "${{ github.workspace }}/ndk-cache/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
       # ============================================================
-      # [CACHE] Host Python
+      # [CACHE] Host Python + SOURCE TARBALL (cả 2)
       # ============================================================
-      - name: Cache Host Python
+      - name: Cache Host Python + source
         id: cache-host-python
         uses: actions/cache@v4
         with:
-          path: /tmp/host-python
+          path: |
+            /tmp/host-python
+            /tmp/build-host
           key: host-python-${{ env.PYTHON_VERSION }}-${{ runner.os }}-v1
           restore-keys: |
             host-python-${{ env.PYTHON_VERSION }}-
@@ -168,7 +170,7 @@ jobs:
           echo "✅ Cleanup done"
 
       # ============================================================
-      # Tải wheel cũ — lọc bỏ wheel link glibc + wheel cryptography cũ
+      # Tải wheel cũ — lọc bỏ wheel link glibc + cryptography cũ
       # ============================================================
       - name: Download previous wheels
         id: prev
@@ -391,11 +393,28 @@ jobs:
 
       # ─────────── CROSS-COMPILE CPYTHON ───────────
 
+      # [FIX] Ensure source tarball available dù cache hit
+      - name: Ensure Python source available
+        run: |
+          set -eo pipefail
+          SRC="/tmp/build-host/Python-${{ env.PYTHON_VERSION }}.tar.xz"
+          if [ ! -f "$SRC" ]; then
+            echo "⚠️  Không có $SRC — tải lại"
+            mkdir -p /tmp/build-host
+            cd /tmp/build-host
+            wget -q "https://www.python.org/ftp/python/${{ env.PYTHON_VERSION }}/Python-${{ env.PYTHON_VERSION }}.tar.xz"
+            echo "✅ Đã tải lại"
+          else
+            echo "✅ Source có sẵn: $SRC"
+          fi
+          ls -lh "$SRC"
+
       - name: Cross-Compile CPython
         run: |
           cd /tmp
           tar -xf "/tmp/build-host/Python-${{ env.PYTHON_VERSION }}.tar.xz"
           cd "Python-${{ env.PYTHON_VERSION }}"
+
           printf '%s\n' '*disabled*' '_crypt' '_nis' 'spwd' 'ossaudiodev' \
             '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' > Modules/Setup.local
 
@@ -733,7 +752,6 @@ jobs:
           echo "=== Dynamic section ==="
           readelf -d "$RUST_SO" | grep -E "NEEDED|RUNPATH|RPATH" || echo "(không có)"
 
-          # Verify cứng — fail nếu thiếu NEEDED libpython
           if ! readelf -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
             echo ""
             echo "❌ FAIL: _rust.abi3.so THIẾU NEEDED libpython${PYTHON_MINOR}.so"
@@ -744,7 +762,6 @@ jobs:
           if ! readelf -d "$RUST_SO" | grep -qE "RPATH|RUNPATH"; then
             echo "⚠️  Thiếu RPATH — patching để thêm"
             patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
-            # Repack
             CRYPTO_WHL="$CRYPTO_WHL" "$HOST_PYTHON" - <<'PYEOF'
           import base64, hashlib, csv, os, zipfile, tempfile, shutil
           whl = os.environ["CRYPTO_WHL"]
