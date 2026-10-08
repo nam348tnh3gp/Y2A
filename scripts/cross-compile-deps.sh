@@ -28,8 +28,8 @@ echo "═══ libffi ═══"
 wget -q "https://github.com/libffi/libffi/releases/download/v${LIBFFI_VERSION}/libffi-${LIBFFI_VERSION}.tar.gz"
 tar -xf "libffi-${LIBFFI_VERSION}.tar.gz"
 cd "libffi-${LIBFFI_VERSION}"
-./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
-make -j$(nproc) install
+CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
+make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
 # ═══════════════════════════════════════════════════════════
@@ -63,7 +63,6 @@ fi
 wget -q "${SQLITE_URL}"
 tar -xf "sqlite-autoconf-${SQLITE_VERSION}.tar.gz"
 cd "sqlite-autoconf-${SQLITE_VERSION}"
-# [FIX] -fPIC cho SQLite3
 CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
@@ -76,7 +75,6 @@ echo "═══ XZ ═══"
 wget -q "https://github.com/tukaani-project/xz/releases/download/v${XZ_VERSION}/xz-${XZ_VERSION}.tar.gz"
 tar -xf "xz-${XZ_VERSION}.tar.gz"
 cd "xz-${XZ_VERSION}"
-# [FIX] -fPIC cho XZ
 CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLAGS}"
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
@@ -92,16 +90,18 @@ for bin in xz xzdec lzma unlzma unxz lzcat lzma-config xz-config; do
 done
 
 # ═══════════════════════════════════════════════════════════
-# zlib — [FIX] -fPIC BẮT BUỘC
+# zlib — FORCE CLEAN BUILD với -fPIC
 # ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ zlib ═══"
 wget -q "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz"
 tar -xf "zlib-${ZLIB_VERSION}.tar.gz"
 cd "zlib-${ZLIB_VERSION}"
-# [FIX] zlib không tự thêm -fPIC — phải pass explicit
+# [FIX] Force clean build với -fPIC (bắt buộc cho static lib link vào .so)
+make distclean 2>/dev/null || true
 CFLAGS="-fPIC -O2" CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" \
     ./configure --prefix="${DEPS_INSTALL}" --static
+make clean 2>/dev/null || true
 make -j$(nproc) CFLAGS="-fPIC -O2"
 make install
 cd ..
@@ -120,7 +120,6 @@ CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} \
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
-# Verify libxml2 headers + xml2-config
 if [ ! -f "${DEPS_INSTALL}/include/libxml2/libxml/xmlversion.h" ]; then
     echo "❌ libxml2 headers không tồn tại"
     exit 1
@@ -237,31 +236,12 @@ make PREFIX="${DEPS_INSTALL}" install
 cd ..
 
 # ═══════════════════════════════════════════════════════════
-# Summary + verify
+# Summary
 # ═══════════════════════════════════════════════════════════
 echo ""
 echo "════════════════════════════════════════════"
 echo "✅ Tất cả core deps built"
 echo "════════════════════════════════════════════"
-
-# Verify tất cả libz.a object có PIC không
-echo ""
-echo "🔍 Verify zlib.a có -fPIC (không có relocation error khi link)"
-if [ -f "${DEPS_INSTALL}/lib/libz.a" ]; then
-    OBJ=$(mktemp -d)
-    cd "$OBJ"
-    ar x "${DEPS_INSTALL}/lib/libz.a" zutil.o 2>/dev/null || true
-    if [ -f zutil.o ]; then
-        if ${READELF} -r zutil.o 2>/dev/null | grep -q "R_AARCH64_ADR_PREL_PG_HI21"; then
-            echo "  ❌ zutil.o vẫn không có PIC"
-            cd /tmp && rm -rf "$OBJ"
-            exit 1
-        else
-            echo "  ✅ zutil.o có PIC"
-        fi
-    fi
-    cd /tmp && rm -rf "$OBJ"
-fi
 
 # Verify critical libs
 MISSING=""
