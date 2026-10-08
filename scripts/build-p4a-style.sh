@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-p4a-style.sh — p4a-style với fix cho ujson/greenlet/Pillow/numpy
+# build-p4a-style.sh — p4a-style builder với fix Pillow + numpy
 set -eo pipefail
 
 PKG_SPEC="${1:-}"
@@ -94,7 +94,7 @@ PBEOF
 chmod +x "$TMP_BUILD/pybind11-config"
 
 # ============================================================
-# 4. SANDBOX — giả lập cross-compile env
+# 4. SANDBOX
 # ============================================================
 echo "  🔧 Tạo sandbox wrapper..."
 rm -rf "$SANDBOX" && mkdir -p "$SANDBOX"
@@ -129,19 +129,17 @@ make_wrapper gcc-ar "$AR"
 make_wrapper gcc-ranlib "$RANLIB"
 
 # ============================================================
-# 5. ENV p4a-STYLE — FIX
+# 5. ENV p4a-STYLE
 # ============================================================
 export PATH="$SANDBOX:$TMP_BUILD:$TARGET_SITE/bin:/tmp/host-python/bin:$HOME/.cargo/bin:$PATH"
 
 echo "  which gcc:  $(which gcc 2>/dev/null || echo NOT_FOUND)"
 echo "  which g++:  $(which g++ 2>/dev/null || echo NOT_FOUND)"
 
-# p4a-style: dùng tag Android trực tiếp
 export _PYTHON_HOST_PLATFORM="$ANDROID_TAG"
 export _PYTHON_PROJECT_BASE="$TARGET_ROOT"
 export TARGET_PYTHON_EXE="$TARGET_ROOT/bin/python${PY_MINOR}"
 
-# Autoconf
 export ac_cv_host="aarch64-linux-android"
 export host_alias="aarch64-linux-android"
 
@@ -156,14 +154,12 @@ export AS="$CC"
 export RANLIB="$RANLIB"
 export STRIP="$STRIP"
 
-# [FIX] Hash-style CHỈ trong LDFLAGS, KHÔNG trong LDSHARED/CCSHARED
-# Trước đây LDSHARED có -Wl,--hash-style=both → clang báo warning khi compile
+# Hash-style chỉ trong LDFLAGS, không trong LDSHARED/CCSHARED
 export LDSHARED="$CC -shared"
 export CCSHARED="-fPIC"
 export BLDSHARED="$CC -shared"
 export LDCXXSHARED="$CXX -shared"
 
-# CMake
 export CMAKE_C_COMPILER="$CC"
 export CMAKE_CXX_COMPILER="$CXX"
 export CMAKE_AR="$AR"
@@ -175,8 +171,7 @@ export CMAKE_ANDROID_API="$ANDROID_API"
 export ac_cv_prog_CC="$CC"
 export ac_cv_prog_CXX="$CXX"
 
-# [FIX] KHÔNG dùng -nostdinc — nó chặn C++ headers (<cstdlib>, <string>, ...)
-# NDK clang tự động thêm sysroot của nó → không cần -nostdinc
+# KHÔNG dùng -nostdinc (chặn C++ headers)
 export CFLAGS="-fPIC -O2 -I$DEPS_INSTALL/include -I$TARGET_ROOT/include/python${PY_MINOR} -Wno-implicit-function-declaration"
 export CXXFLAGS="$CFLAGS"
 export CPPFLAGS="$CFLAGS"
@@ -210,8 +205,7 @@ export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
 
 # ============================================================
-# 5.6. [FIX] sitecustomize.py — ép sysconfig LIBPL về target
-#      Fix Pillow link host libpython3.13.a
+# 5.6. sitecustomize.py — patch LIBPL
 # ============================================================
 SYSCONF_DIR="$GITHUB_WORKSPACE/sysconfigdata-host"
 SYSCONF_FILE=$(ls "$TARGET_ROOT/lib/python${PY_MINOR}"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
@@ -261,21 +255,17 @@ def _gcvs(*args):
     return v
 sysconfig.get_config_vars = _gcvs
 
-# Patch _CONFIG_VARS dict trực tiếp (sysconfig uses it internally)
 try:
-    _orig_gcv_cache = sysconfig._CONFIG_VARS
-    if _orig_gcv_cache:
-        _orig_gcv_cache.update(_patches)
+    if sysconfig._CONFIG_VARS:
+        sysconfig._CONFIG_VARS.update(_patches)
 except Exception:
     pass
 SITEEOF
 
-# PYTHONPATH: pysite (sitecustomize) + sysconfig override dir + target site
 export PYTHONPATH="$PYSITE:$SYSCONF_DIR:$TARGET_SITE:$PYTHONPATH"
 if [ -n "$SYSCONF_NAME" ]; then
   export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
 fi
-echo "  PYTHONPATH (build): $PYTHONPATH"
 
 # ============================================================
 # 6. site.cfg numpy/scipy
@@ -291,15 +281,14 @@ EOF
 fi
 
 # ============================================================
-# 7. SETUP-ARGS THEO BACKEND — FIX
+# 7. SETUP-ARGS THEO BACKEND
 # ============================================================
 SETUP_ARGS=()
-
-# [FIX] --build-option chỉ có cho setuptools, KHÔNG cho meson/maturin
 PLAT_NAME_ARG=""
+
 case "$BACKEND" in
   *meson*)
-    echo "  → Meson backend (không dùng --build-option)"
+    echo "  → Meson backend"
     PLAT_NAME_ARG=""
     SETUP_ARGS=(
       "-Csetup-args=-Dblas=openblas"
@@ -321,7 +310,7 @@ case "$BACKEND" in
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
     ;;
   *setuptools*|*)
-    echo "  → Setuptools backend (dùng --build-option cho plat-name)"
+    echo "  → Setuptools backend"
     PLAT_NAME_ARG="--config-settings=--build-option=--plat-name=${ANDROID_TAG}"
     ;;
 esac
@@ -330,8 +319,9 @@ esac
 # 8. PATCH ĐẶC BIỆT CHO TỪNG LIB
 # ============================================================
 case "$PKG_NAME" in
+  # ---------- PILLOW: filter include_dirs/library_dirs ----------
   Pillow|pillow|PIL)
-    echo "  → Patch Pillow setup.py"
+    echo "  → Patch Pillow setup.py (aggressive filter)"
     cd "$SRC_PATH"
     cp setup.py setup.py.bak 2>/dev/null || true
 
@@ -339,26 +329,78 @@ case "$PKG_NAME" in
 import re
 with open("setup.py", "r") as f:
     c = f.read()
+
+# 1. Replace string literals
 q1, q2 = chr(34), chr(39)
 skip = "/nonexistent/skip"
-for path in ["/usr/include", "/usr/local/include", "/usr/lib", "/usr/local/lib"]:
+for path in [
+    "/usr/include", "/usr/local/include",
+    "/usr/lib", "/usr/local/lib",
+    "/tmp/host-python/include", "/tmp/host-python/lib",
+]:
     c = c.replace(q1+path+q1, q1+skip+q1)
     c = c.replace(q2+path+q2, q2+skip+q2)
+
+# 2. Replace _add_directory(_, "/usr/...") calls
 c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/usr[^\x27\x22]*[\x27\x22]\)", "pass", c)
+
+# 3. Inject filter right before setup() call
+filter_code = '''
+# ============ p4a-injected filter ============
+import os as _os
+_BAD_PREFIXES = (
+    "/usr/include", "/usr/local/include",
+    "/usr/lib", "/usr/local/lib",
+    "/tmp/host-python/include", "/tmp/host-python/lib",
+)
+def _is_bad(p):
+    p = str(p)
+    pl = p.lower()
+    if "android" in pl or "deps-install" in p or "python-android" in p:
+        return False
+    for b in _BAD_PREFIXES:
+        if p.startswith(b): return True
+    return False
+
+try:
+    include_dirs[:] = [d for d in include_dirs if not _is_bad(d)]
+    library_dirs[:] = [d for d in library_dirs if not _is_bad(d)]
+except (NameError, UnboundLocalError):
+    pass
+
+try:
+    for _ext in ext_modules:
+        if hasattr(_ext, "include_dirs") and _ext.include_dirs:
+            _ext.include_dirs = [d for d in _ext.include_dirs if not _is_bad(d)]
+        if hasattr(_ext, "library_dirs") and _ext.library_dirs:
+            _ext.library_dirs = [d for d in _ext.library_dirs if not _is_bad(d)]
+except (NameError, UnboundLocalError):
+    pass
+# ============ end p4a filter ============
+
+'''
+m = re.search(r'^(\s*)setup\(', c, re.MULTILINE)
+if m:
+    idx = m.start()
+    indent = m.group(1)
+    indented = "\n".join(
+        (indent + line) if line.strip() else line
+        for line in filter_code.split("\n")
+    )
+    c = c[:idx] + indented + c[idx:]
+
 with open("setup.py", "w") as f:
     f.write(c)
-print("Pillow patched")
+print("Pillow patched (aggressive)")
 PYEOF
 
     "$HOST_PY" /tmp/patch_pillow.py
+    grep -c "_BAD_PREFIXES" setup.py || echo "(no filter)"
     ;;
 
-  greenlet|frozenlist|ujson|markupsafe|regex|multidict|yarl|aiohttp|bitarray|brotli|mmh3|msgpack|lz4|zstandard|xxhash|pyrsistent|immutables|simplejson|pycryptodome|protobuf|pyyaml|cython)
-    echo "  → $PKG_NAME: force CC/CXX/LDSHARED cho setuptools"
-    ;;
-
-  numpy)
-    echo "  → numpy: meson cross-file + OpenBLAS"
+  # ---------- NUMPY + SCIPY: cross-file với exe_wrapper ----------
+  numpy|scipy)
+    echo "  → $PKG_NAME: meson cross-file + OpenBLAS"
     cat > "$TMP_BUILD/android-cross.ini" <<EOF
 [binaries]
 c = '$CC'
@@ -366,6 +408,7 @@ cpp = '$CXX'
 ar = '$AR'
 strip = '$STRIP'
 ranlib = '$RANLIB'
+exe_wrapper = '/bin/true'
 
 [host_machine]
 system = 'android'
@@ -386,37 +429,7 @@ EOF
     )
     ;;
 
-  scipy)
-    echo "  → scipy: meson cross-file + OpenBLAS"
-    cat > "$TMP_BUILD/android-cross.ini" <<EOF
-[binaries]
-c = '$CC'
-cpp = '$CXX'
-ar = '$AR'
-strip = '$STRIP'
-ranlib = '$RANLIB'
-
-[host_machine]
-system = 'android'
-cpu_family = 'aarch64'
-cpu = 'aarch64'
-endian = 'little'
-
-[properties]
-needs_exe_wrapper = true
-EOF
-    SETUP_ARGS=(
-      "-Csetup-args=--cross-file=$TMP_BUILD/android-cross.ini"
-      "-Csetup-args=-Dblas=openblas"
-      "-Csetup-args=-Dlapack=openblas"
-      "-Csetup-args=-Dbuildtype=release"
-    )
-    ;;
-
-  lxml)
-    echo "  → lxml: dùng stub librt.a + force CC"
-    ;;
-
+  # ---------- CFFI: stable ABI ----------
   cffi)
     echo "  → cffi: build với Py_LIMITED_API"
     export CFFI_PY_LIMITED_API="0x030D0000"
@@ -425,6 +438,7 @@ EOF
     )
     ;;
 
+  # ---------- RUST packages ----------
   cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
     echo "  → $PKG_NAME: Rust + PyO3 link tường minh"
     export PYO3_PYTHON="$HOST_PY"
@@ -436,6 +450,16 @@ EOF
     export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -C link-arg=-Wl,--hash-style=both"
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
     ;;
+
+  # ---------- LXML ----------
+  lxml)
+    echo "  → lxml: dùng stub librt.a + force CC"
+    ;;
+
+  # ---------- OTHER NATIVE (setuptools) ----------
+  greenlet|frozenlist|ujson|markupsafe|regex|multidict|yarl|aiohttp|bitarray|brotli|mmh3|msgpack|lz4|zstandard|xxhash|pyrsistent|immutables|simplejson|pycryptodome|protobuf|pyyaml|cython)
+    echo "  → $PKG_NAME: force CC/CXX/LDSHARED cho setuptools"
+    ;;
 esac
 
 # ============================================================
@@ -445,7 +469,7 @@ cd "$SRC_PATH"
 
 echo ""
 echo "  setup-args: ${SETUP_ARGS[*]}"
-echo "  plat-name:  ${PLAT_NAME_ARG:-'(none — meson/maturin)'}"
+echo "  plat-name:  ${PLAT_NAME_ARG:-'(none)'}"
 echo ""
 
 RC=0
@@ -509,9 +533,9 @@ for whl in "$WHEELS_OUT"/${PKG_NAME//-/_}-*.whl "$WHEELS_OUT"/${PKG_NAME}-*.whl;
   elif [[ "$base" == *"aarch64_linux_android"* ]]; then
     echo "     ⚠️  tag aarch64_linux_android — workflow sẽ rename"
   elif [[ "$base" == *"none-any"* ]]; then
-    echo "     ⚠️  tag py3-none-any (native package cần .so!)"
+    echo "     ⚠️  tag py3-none-any"
   else
-    echo "     ⚠️  tag không chuẩn: $base"
+    echo "     ⚠️  tag không chuẩn"
   fi
 
   work=$(mktemp -d)
@@ -546,7 +570,7 @@ case "$PKG_NAME" in
         if readelf -d "$RUST_SO" 2>/dev/null | grep -q "libpython${PY_MINOR}.so"; then
           echo "  ✅ $(basename "$whl") — có NEEDED libpython${PY_MINOR}.so"
         else
-          echo "  ⚠️  $(basename "$whl") — không có NEEDED libpython"
+          echo "  ⚠️  $(basename "$whl") — không có NEEDED libpython (workflow sẽ patch)"
         fi
       fi
       rm -rf "$work"
