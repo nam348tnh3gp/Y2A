@@ -1,12 +1,5 @@
 #!/bin/bash
 # build-p4a-style.sh — Generic p4a-style builder cho MỌI lib
-#
-# Env BẮT BUỘC:
-#   HOST_PYTHON, TARGET_ROOT, TARGET_SITE, TARGET_STDLIB
-#   CC, CXX, AR, RANLIB, STRIP, READELF, CFLAGS, CPPFLAGS, LDFLAGS
-#   DEPS_INSTALL, NDK, NDK_SYSROOT, ANDROID_API, GITHUB_WORKSPACE, PYTHON_MINOR
-#   ANDROID_TAG (optional, default android_24_arm64_v8a)
-
 set -eo pipefail
 
 PKG_SPEC="${1:-}"
@@ -95,7 +88,7 @@ PYEOF
 echo "  Backend: $BACKEND"
 
 # ============================================================
-# 3. WRAPPER SCRIPTS (numpy-config, pybind11-config)
+# 3. WRAPPER SCRIPTS
 # ============================================================
 cat > "$TMP_BUILD/numpy-config" <<NCEOF
 #!/bin/sh
@@ -114,7 +107,7 @@ PBEOF
 chmod +x "$TMP_BUILD/pybind11-config"
 
 # ============================================================
-# 4. SANDBOX — giả lập môi trường cross-compile
+# 4. SANDBOX
 # ============================================================
 echo "  🔧 Tạo sandbox wrapper..."
 rm -rf "$SANDBOX" && mkdir -p "$SANDBOX"
@@ -194,9 +187,7 @@ export NPY_CBLAS_LIBS="-lopenblas"
 export NPY_LAPACK_LIBS="-lopenblas"
 
 # ============================================================
-# 5.5. [p4a-style] PyO3 config — ép Rust link tường minh libpython
-#      Đây là "cách ly" của p4a: extension phải NEEDED libpython
-#      ngay từ build, không phụ thuộc loader lookup runtime.
+# 5.5. PyO3 config — ép Rust link tường minh libpython
 # ============================================================
 PYO3_CONFIG="$TMP_BUILD/pyo3-config.txt"
 cat > "$PYO3_CONFIG" <<EOF
@@ -215,13 +206,12 @@ EOF
 export PYO3_CONFIG_FILE="$PYO3_CONFIG"
 echo "  PYO3_CONFIG_FILE: $PYO3_CONFIG"
 
-# Ép Rust linker args — link tường minh tới libpython
 export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -C link-arg=-Wl,--hash-style=both"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
 echo "  RUSTFLAGS:        $RUSTFLAGS"
 
 # ============================================================
-# 6. site.cfg cho numpy/scipy (BLAS)
+# 6. site.cfg cho numpy/scipy
 # ============================================================
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
   cat > "$SRC_PATH/site.cfg" <<EOF
@@ -255,7 +245,7 @@ case "$BACKEND" in
     export PYO3_CROSS_PYTHON_VERSION="$PY_MINOR"
     export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
     export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
-    export PYO3_CONFIG_FILE="$TMP_BUILD/pyo3-config.txt"
+    export PYO3_CONFIG_FILE="$PYO3_CONFIG"
     export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -C link-arg=-Wl,--hash-style=both"
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
     ;;
@@ -363,7 +353,19 @@ EOF
     export PYO3_CROSS_PYTHON_VERSION="$PY_MINOR"
     export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
     export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
-    export PYO3_CONFIG_FILE="$TMP_BUILD/pyo3-config.txt"
+    export PYO3_CONFIG_FILE="$PYO3_CONFIG"
+    export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -C link-arg=-Wl,--hash-style=both"
+    export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
+    ;;
+
+  bcrypt|nh3|pydantic-core|orjson|tokenizers)
+    echo "  → $PKG_NAME: Rust + PyO3 link tường minh"
+    export PYO3_PYTHON="$HOST_PY"
+    export PYO3_CROSS=1
+    export PYO3_CROSS_PYTHON_VERSION="$PY_MINOR"
+    export PYO3_CROSS_LIB_DIR="$TARGET_ROOT/lib"
+    export PYO3_CROSS_INCLUDE_DIR="$TARGET_ROOT/include"
+    export PYO3_CONFIG_FILE="$PYO3_CONFIG"
     export RUSTFLAGS="-C link-arg=-L$TARGET_ROOT/lib -C link-arg=-lpython$PY_MINOR -C link-arg=-Wl,--hash-style=both"
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$RUSTFLAGS"
     ;;
@@ -464,26 +466,28 @@ if [ "$WHEEL_FOUND" -eq 0 ]; then
 fi
 
 # ============================================================
-# 13. VERIFY Rust extension có NEEDED libpython (p4a-style)
+# 13. VERIFY Rust extension có NEEDED libpython
 # ============================================================
-if [ "$PKG_NAME" = "cryptography" ] || echo "$PKG_NAME" | grep -qE '^(bcrypt|nh3|pydantic-core|orjson|tokenizers|pyo3)'; then
-  echo ""
-  echo "🔍 Verify Rust extension link tường minh libpython..."
-  for whl in "$WHEELS_OUT"/${PKG_NAME//-/_}-*.whl "$WHEELS_OUT"/${PKG_NAME}-*.whl; do
-    [ -f "$whl" ] || continue
-    work=$(mktemp -d)
-    unzip -q -o "$whl" -d "$work"
-    RUST_SO=$(find "$work" -name "_rust*.so" -o -name "*.abi3.so" | head -1)
-    if [ -n "$RUST_SO" ]; then
-      if readelf -d "$RUST_SO" 2>/dev/null | grep -q "libpython${PY_MINOR}.so"; then
-        echo "  ✅ $(basename "$whl") — có NEEDED libpython${PY_MINOR}.so"
-        readelf -d "$RUST_SO" | grep -E "NEEDED.*libpython" | sed 's/^/     /'
-      else
-        echo "  ⚠️  $(basename "$whl") — không có NEEDED libpython (sẽ patch ở workflow)"
+case "$PKG_NAME" in
+  cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
+    echo ""
+    echo "🔍 Verify Rust extension link tường minh libpython..."
+    for whl in "$WHEELS_OUT"/${PKG_NAME//-/_}-*.whl "$WHEELS_OUT"/${PKG_NAME}-*.whl; do
+      [ -f "$whl" ] || continue
+      work=$(mktemp -d)
+      unzip -q -o "$whl" -d "$work"
+      RUST_SO=$(find "$work" -name "_rust*.so" -o -name "*.abi3.so" | head -1)
+      if [ -n "$RUST_SO" ]; then
+        if readelf -d "$RUST_SO" 2>/dev/null | grep -q "libpython${PY_MINOR}.so"; then
+          echo "  ✅ $(basename "$whl") — có NEEDED libpython${PY_MINOR}.so"
+          readelf -d "$RUST_SO" | grep -E "NEEDED.*libpython" | sed 's/^/     /'
+        else
+          echo "  ⚠️  $(basename "$whl") — không có NEEDED libpython (workflow sẽ patch)"
+        fi
       fi
-    fi
-    rm -rf "$work"
-  done
-fi
+      rm -rf "$work"
+    done
+    ;;
+esac
 
 exit 0
