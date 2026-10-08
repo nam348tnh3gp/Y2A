@@ -920,21 +920,21 @@ jobs:
           if [ ! -f "docs/index.html" ]; then
             echo "ℹ️  docs/index.html không có — tự tạo redirect"
             cat > docs/index.html <<'HTMLEOF'
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta http-equiv="refresh" content="0; url=./simple/">
-  <title>Python Package Index</title>
-</head>
-<body>
-  <h1>Python Package Index</h1>
-  <p>Đang chuyển hướng tới <a href="./simple/">simple index</a>…</p>
-  <p>Cài đặt:</p>
-  <pre>pip install --index-url &lt;URL&gt;/simple/ &lt;package&gt;</pre>
-</body>
-</html>
-HTMLEOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <meta http-equiv="refresh" content="0; url=./simple/">
+            <title>Python Package Index</title>
+          </head>
+          <body>
+            <h1>Python Package Index</h1>
+            <p>Đang chuyển hướng tới <a href="./simple/">simple index</a>...</p>
+            <p>Cài đặt:</p>
+            <pre>pip install --index-url &lt;URL&gt;/simple/ &lt;package&gt;</pre>
+          </body>
+          </html>
+          HTMLEOF
             echo "✅ Đã tạo docs/index.html"
           else
             echo "✅ docs/index.html"
