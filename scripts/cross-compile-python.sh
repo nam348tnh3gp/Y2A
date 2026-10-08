@@ -3,7 +3,7 @@
 set -eo pipefail
 
 # ════════════════════════════════════════════════════════════
-# [NEW #1] Tarball fallback
+# Tarball fallback
 # ════════════════════════════════════════════════════════════
 TARBALL="/tmp/build-host/Python-${PYTHON_VERSION}.tar.xz"
 
@@ -23,31 +23,25 @@ fi
 echo "✅ Source: $TARBALL ($(stat -c%s "$TARBALL") bytes)"
 
 # ════════════════════════════════════════════════════════════
-# [NEW #2] Export env vars
+# Export env vars
 # ════════════════════════════════════════════════════════════
 export CFLAGS="-fPIC -O2 -I${DEPS_INSTALL}/include -Wno-implicit-function-declaration"
 export CPPFLAGS="-I${DEPS_INSTALL}/include"
 export LDFLAGS="-L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 
 # ════════════════════════════════════════════════════════════
-# BẮT ĐẦU
+# Extract + setup
 # ════════════════════════════════════════════════════════════
-
 cd /tmp
 rm -rf "/tmp/Python-${PYTHON_VERSION}"
 tar -xf "$TARBALL"
 cd "Python-${PYTHON_VERSION}"
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Disable modules không có trên Android
-# - _uuid: needs libuuid (không có trong bionic)
-# - pure-Python `uuid` vẫn hoạt động qua fallback
-# ════════════════════════════════════════════════════════════
+# Disable modules không có trên Android
 printf '%s\n' '*disabled*' '_crypt' '_nis' 'spwd' 'ossaudiodev' \
     '_curses' '_curses_panel' 'readline' '_multiprocessing' 'nis' \
     '_uuid' > Modules/Setup.local
 
-# Linker flags — có -L${DEPS_INSTALL}/lib
 export LDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export BLDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export CCSHARED="-fPIC -Wl,--hash-style=both"
@@ -68,7 +62,6 @@ LZMA_CFLAGS="-I${DEPS_INSTALL}/include" LZMA_LIBS="-L${DEPS_INSTALL}/lib -llzma"
     ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
     ac_cv_buggy_getaddrinfo=no ac_cv_little_endian_double=yes
 
-# Patch Makefile — link flags có -L
 sed -i "s|^LDSHARED=.*|LDSHARED= ${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both|" Makefile
 sed -i "s|^BLDSHARED=.*|BLDSHARED= ${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both|" Makefile
 sed -i "s|^CCSHARED=.*|CCSHARED= -fPIC -Wl,--hash-style=both|" Makefile
@@ -81,7 +74,9 @@ make -j$(nproc) \
     CCSHARED="-fPIC -Wl,--hash-style=both"
 make install
 
+# ════════════════════════════════════════════════════════════
 # Verify hash tables
+# ════════════════════════════════════════════════════════════
 echo ""
 echo "🔍 Verify DT_HASH + DT_GNU_HASH trên libpython..."
 LP="${TARGET_ROOT}/lib/libpython3.13.so"
@@ -93,15 +88,37 @@ if [ -f "$LP" ]; then
         echo "❌ libpython thiếu DT_HASH"
         exit 1
     fi
-fi
-
-if ! ${READELF} --dyn-syms "$LP" 2>/dev/null | grep -q " PyLong_Type$"; then
-    echo "❌ libpython thiếu PyLong_Type"
+else
+    echo "❌ Không tìm thấy $LP"
     exit 1
 fi
-echo "✅ libpython3.13.so có DT_HASH + PyLong_Type"
 
+# ════════════════════════════════════════════════════════════
+# [FIX] Verify PyLong_Type — dùng llvm-nm thay vì readelf
+# ════════════════════════════════════════════════════════════
+echo ""
+echo "🔍 Verify PyLong_Type trong .dynsym..."
+LLVM_NM="${NDK_TOOLCHAIN}/bin/llvm-nm"
+[ ! -x "$LLVM_NM" ] && LLVM_NM="llvm-nm"
+
+NM_OUT=$("$LLVM_NM" -D "$LP" 2>/dev/null || true)
+
+if echo "$NM_OUT" | grep -q "PyLong_Type"; then
+    echo "  ✅ PyLong_Type present (llvm-nm)"
+elif ${READELF} --dyn-syms "$LP" 2>/dev/null | grep -q "PyLong_Type"; then
+    echo "  ✅ PyLong_Type present (llvm-readelf)"
+else
+    echo "  ❌ PyLong_Type MISSING"
+    echo "  === Debug: dynsym total ==="
+    echo "$NM_OUT" | wc -l
+    echo "  === Debug: first 20 symbols ==="
+    echo "$NM_OUT" | head -20
+    exit 1
+fi
+
+# ════════════════════════════════════════════════════════════
 # Verify critical extensions
+# ════════════════════════════════════════════════════════════
 LIBDYLOAD="${TARGET_ROOT}/lib/python3.13/lib-dynload"
 if [ -d "$LIBDYLOAD" ]; then
     echo ""
