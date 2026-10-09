@@ -22,7 +22,7 @@ export CLANG_BUILTIN=$(${CC} -print-resource-dir 2>/dev/null)/include
 export HOST_PY_PREFIX="${HOST_PY_PREFIX:-/opt/host-python}"
 export HOST_PY_LIB="${HOST_PY_PREFIX}/lib/python${PYTHON_MINOR}"
 
-# [FIX] Capture NDK CC cho Rust cc-rs trước khi unset
+# Capture NDK tools
 export NDK_CC="${CC}"
 export NDK_CXX="${CXX}"
 export NDK_AR="${AR}"
@@ -43,12 +43,9 @@ if [ ! -f "${TARGET_ROOT}/.python-built" ]; then
     touch "${TARGET_ROOT}/.python-built"
 fi
 
-# ════════════════════════════════════════════════════════════
 # 3. Setup sysconfig
-# ════════════════════════════════════════════════════════════
 echo ""
 echo "🔧 Setup sysconfig"
-
 TARGET_SYSCONF=$(ls "${TARGET_STDLIB}"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
 [ -z "$TARGET_SYSCONF" ] && { echo "❌ No _sysconfigdata"; exit 1; }
 SYSCONF_NAME=$(basename "$TARGET_SYSCONF" .py)
@@ -56,23 +53,21 @@ cp -v "$TARGET_SYSCONF" "$HOST_PY_LIB/"
 export _PYTHON_SYSCONFIGDATA_NAME="$SYSCONF_NAME"
 
 for f in "${TARGET_STDLIB}"/_sysconfigdata__*.py; do
-    [ -f "$f" ] || continue
-    cp -v "$f" "$HOST_PY_LIB/" 2>/dev/null || true
+    [ -f "$f" ] && cp -v "$f" "$HOST_PY_LIB/" 2>/dev/null || true
 done
 
 for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py; do
     [ -f "$f" ] || continue
     sed -i "s|'CCSHARED': .*|'CCSHARED': '-fPIC',|g" "$f" 2>/dev/null || true
-    sed -i "s|'LDSHARED': .*|'LDSHARED': '${CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
-    sed -i "s|'BLDSHARED': .*|'BLDSHARED': '${CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
-    sed -i "s|'LDCXXSHARED': .*|'LDCXXSHARED': '${CXX} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
+    sed -i "s|'LDSHARED': .*|'LDSHARED': '${NDK_CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
+    sed -i "s|'BLDSHARED': .*|'BLDSHARED': '${NDK_CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
+    sed -i "s|'LDCXXSHARED': .*|'LDCXXSHARED': '${NDK_CXX} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
     sed -i "s|/opt/host-python/lib|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
     sed -i "s|/opt/host-python/include|${TARGET_ROOT}/include|g" "$f" 2>/dev/null || true
     sed -i "s|/usr/lib/x86_64-linux-gnu|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
     sed -i "s|/usr/lib64|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
 done
 
-# Copy headers
 TARGET_INCLUDE="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
 HOST_INCLUDE="${HOST_PY_PREFIX}/include/python${PYTHON_MINOR}"
 [ -d "$TARGET_INCLUDE" ] && [ -d "$HOST_INCLUDE" ] && \
@@ -115,28 +110,44 @@ SITEEOF
 echo "  ✅ sitecustomize OK"
 
 # ════════════════════════════════════════════════════════════
-# [FIX] Tạo symlink /usr/local/bin/python3, cython, pip
-#       để meson find_program('python3') tìm thấy
+# [FIX] Symlink python3 + cython vào /usr/local/bin
 # ════════════════════════════════════════════════════════════
-echo "🔧 Setup python3 native binaries"
+echo "🔧 Setup native tools"
 sudo mkdir -p /usr/local/bin
 sudo ln -sf "${HOST_PYTHON}" /usr/local/bin/python3
 sudo ln -sf "${HOST_PYTHON}" /usr/local/bin/python
 [ -f "${HOST_PY_PREFIX}/bin/cython" ] && sudo ln -sf "${HOST_PY_PREFIX}/bin/cython" /usr/local/bin/cython
 [ -f "${HOST_PY_PREFIX}/bin/cython3" ] && sudo ln -sf "${HOST_PY_PREFIX}/bin/cython3" /usr/local/bin/cython3
-[ -f "${HOST_PY_PREFIX}/bin/pip3" ] && sudo ln -sf "${HOST_PY_PREFIX}/bin/pip3" /usr/local/bin/pip3
-[ -f "${HOST_PY_PREFIX}/bin/pip" ] && sudo ln -sf "${HOST_PY_PREFIX}/bin/pip" /usr/local/bin/pip
-echo "  ✅ /usr/local/bin/python3 → ${HOST_PYTHON}"
+echo "  ✅ /usr/local/bin/python3 OK"
+
+# ════════════════════════════════════════════════════════════
+# [FIX] Wrapper aarch64-linux-android-{gcc,g++,ar,ranlib,strip}
+# cho cc-rs fallback (critytography cffi crate)
+# ════════════════════════════════════════════════════════════
+echo "🔧 Setup target compiler wrappers cho cc-rs"
+for tool in gcc g++ ar ranlib strip; do
+    case $tool in
+        gcc) real="${NDK_CC}" ;;
+        g++) real="${NDK_CXX}" ;;
+        ar) real="${NDK_AR}" ;;
+        ranlib) real="${RANLIB}" ;;
+        strip) real="${STRIP}" ;;
+    esac
+    sudo tee "/usr/local/bin/aarch64-linux-android-${tool}" > /dev/null <<EOF
+#!/bin/sh
+exec "${real}" "\$@"
+EOF
+    sudo chmod +x "/usr/local/bin/aarch64-linux-android-${tool}"
+done
+echo "  ✅ Compiler wrappers OK"
 
 # ════════════════════════════════════════════════════════════
 # [FIX] Ẩn host libpython3.13.so
 # ════════════════════════════════════════════════════════════
 HOST_LIBPY="${HOST_PY_PREFIX}/lib/libpython${PYTHON_MINOR}.so"
 if [ -L "$HOST_LIBPY" ] || [ -f "$HOST_LIBPY" ]; then
-    if [ ! -f "${HOST_LIBPY}.hidden" ]; then
-        mv "$HOST_LIBPY" "${HOST_LIBPY}.hidden"
-        echo "  ✅ Hidden: $HOST_LIBPY"
-    fi
+    [ ! -f "${HOST_LIBPY}.hidden" ] && mv "$HOST_LIBPY" "${HOST_LIBPY}.hidden"
+    echo "  ✅ Hidden: $HOST_LIBPY"
 fi
 
 # ════════════════════════════════════════════════════════════
@@ -160,28 +171,28 @@ cp "${DEPS_INSTALL}/lib/pkgconfig/python3.pc" "${HOST_PY_PREFIX}/lib/pkgconfig/"
 echo "  ✅ python3.pc OK"
 
 # ════════════════════════════════════════════════════════════
-# [FIX] Đồng bộ cffi version giữa host python và target site
+# [FIX] XOÁ cffi khỏi TARGET_SITE (tránh shadow host cffi)
+# KHÔNG cài cffi vào target site — host python dùng cffi của chính nó
 # ════════════════════════════════════════════════════════════
-CFFI_VER=$(${HOST_PYTHON} -c "import cffi; print(cffi.__version__)" 2>/dev/null || echo "")
-if [ -n "$CFFI_VER" ]; then
-    echo "  Đồng bộ cffi==${CFFI_VER} vào TARGET_SITE"
-    mkdir -p "${TARGET_SITE}"
-    ${HOST_PYTHON} -m pip install \
-        --target="${TARGET_SITE}" \
-        --no-deps --no-cache-dir --upgrade --force-reinstall \
-        "cffi==${CFFI_VER}" 2>&1 | tail -3
-    echo "  ✅ cffi synced"
-fi
+echo "🔧 Cleanup cffi khỏi TARGET_SITE"
+rm -rf "${TARGET_SITE}"/cffi \
+       "${TARGET_SITE}"/cffi-*.dist-info \
+       "${TARGET_SITE}"/_cffi_backend* \
+       "${TARGET_SITE}"/pycparser \
+       "${TARGET_SITE}"/pycparser-*.dist-info 2>/dev/null || true
 
-# Verify
-echo "  Verify:"
+# Verify host python cffi
 "${HOST_PYTHON}" -c "
-import sysconfig
-print('    CCSHARED:', sysconfig.get_config_var('CCSHARED'))
-print('    LIBDIR:', sysconfig.get_config_var('LIBDIR'))
-print('    get_path(include):', sysconfig.get_path('include'))
-print('    cffi:', __import__('cffi').__version__)
-"
+import cffi, _cffi_backend
+v1 = cffi.__version__
+v2 = _cffi_backend.__version__
+print(f'  host cffi: {v1}')
+print(f'  host _cffi_backend: {v2}')
+if v1 != v2:
+    raise SystemExit(f'MISMATCH: {v1} != {v2}')
+print('  ✅ cffi match')
+" || { echo "❌ cffi mismatch — force reinstall"; \
+    "${HOST_PYTHON}" -m pip install --no-cache-dir --force-reinstall cffi; }
 
 # 4. Bootstrap pip
 if [ ! -d "${TARGET_SITE}/pip" ]; then
