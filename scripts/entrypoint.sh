@@ -109,63 +109,108 @@ echo "  ✅ cpython/pymem.h ở ${HOST_INCLUDE_PARENT}/cpython/pymem.h"
 # ════════════════════════════════════════════════════════════
 cat > "${HOST_PY_LIB}/sitecustomize.py" <<SITEEOF
 import os, sysconfig
+
 if '_PYTHON_SYSCONFIGDATA_NAME' not in os.environ:
     os.environ['_PYTHON_SYSCONFIGDATA_NAME'] = '${SYSCONF_NAME}'
+
 _TR = "${TARGET_ROOT}"
 _PY = "python${PYTHON_MINOR}"
-_p = {'LIBPL': _TR+'/lib', 'LIBDIR': _TR+'/lib', 'LIBDEST': _TR+'/lib/'+_PY,
-      'INCLUDEPY': _TR+'/include/'+_PY, 'CONFINCLUDEPY': _TR+'/include/'+_PY,
-      'LIBRARY': 'python${PYTHON_MINOR}', 'LDLIBRARY': 'libpython${PYTHON_MINOR}.so',
-      'BLDLIBRARY': '-lpython${PYTHON_MINOR}', 'CCSHARED': '-fPIC',
-      'LDSHARED': '${NDK_CC} -shared -L'+_TR+'/lib -Wl,--hash-style=both',
-      'BLDSHARED': '${NDK_CC} -shared -L'+_TR+'/lib -Wl,--hash-style=both',
-      'LDCXXSHARED': '${NDK_CXX} -shared -L'+_TR+'/lib -Wl,--hash-style=both'}
-_orig = sysconfig.get_config_var
-def _gcv(n): return _p.get(n, _orig(n))
+
+# ── get_config_var patches ───────────────────────────────────
+_p = {
+    'LIBPL': _TR + '/lib',
+    'LIBDIR': _TR + '/lib',
+    'LIBDEST': _TR + '/lib/' + _PY,
+    'INCLUDEPY': _TR + '/include/' + _PY,
+    'CONFINCLUDEPY': _TR + '/include/' + _PY,
+    'LIBRARY': 'python${PYTHON_MINOR}',
+    'LDLIBRARY': 'libpython${PYTHON_MINOR}.so',
+    'BLDLIBRARY': '-lpython${PYTHON_MINOR}',
+    'CCSHARED': '-fPIC',
+    'LDSHARED':    '${NDK_CC}  -shared -L' + _TR + '/lib -Wl,--hash-style=both',
+    'BLDSHARED':   '${NDK_CC}  -shared -L' + _TR + '/lib -Wl,--hash-style=both',
+    'LDCXXSHARED': '${NDK_CXX} -shared -L' + _TR + '/lib -Wl,--hash-style=both',
+}
+_orig_gcv = sysconfig.get_config_var
+def _gcv(n):
+    if n in _p:
+        return _p[n]
+    return _orig_gcv(n)
 sysconfig.get_config_var = _gcv
 
-_s = {'stdlib': _TR+'/lib/'+_PY, 'platstdlib': _TR+'/lib/'+_PY,
-      'purelib': _TR+'/lib/'+_PY+'/site-packages',
-      'platlib': _TR+'/lib/'+_PY+'/site-packages',
-      'include': _TR+'/include/'+_PY, 'platinclude': _TR+'/include/'+_PY,
-      'scripts': _TR+'/bin', 'data': _TR}
+# ── get_path / get_paths patches ─────────────────────────────
+_s = {
+    'stdlib':      _TR + '/lib/' + _PY,
+    'platstdlib':  _TR + '/lib/' + _PY,
+    'purelib':     _TR + '/lib/' + _PY + '/site-packages',
+    'platlib':     _TR + '/lib/' + _PY + '/site-packages',
+    'include':     _TR + '/include/' + _PY,
+    'platinclude': _TR + '/include/' + _PY,
+    'scripts':     _TR + '/bin',
+    'data':        _TR,
+}
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Tôn trọng 'vars' khi caller truyền base/platbase khác TARGET_ROOT
-# (pip install --target dùng temp dir → phải delegate về sysconfig gốc,
-#  nếu không sẽ xoá nhầm chính source của pip)
-# ════════════════════════════════════════════════════════════
+# [FIX] Chỉ coi là "target call" khi base/platbase trùng TARGET_ROOT
+# (hoặc vars rỗng — caller mặc định hỏi scheme host/target).
+# Ngược lại → delegate về sysconfig gốc để pip --target dùng temp dir
+# (nếu không delegate, pip tưởng lib_dir == target_dir → xoá chính source).
 def _is_target_call(vars):
     if not vars:
         return True
     base = vars.get('base') or vars.get('platbase')
     if base is None:
         return True
-    return base.rstrip('/') == _TR.rstrip('/')
+    try:
+        return (os.path.realpath(str(base)).rstrip('/')
+                == os.path.realpath(_TR).rstrip('/'))
+    except Exception:
+        return False
 
-_ogp = sysconfig.get_path
+_orig_gp = sysconfig.get_path
 def _gp(n, scheme='posix_prefix', vars=None, expand=True):
     if not _is_target_call(vars):
-        return _ogp(n, scheme, vars, expand)
-    return _s.get(n, _ogp(n, scheme, vars, expand))
+        return _orig_gp(n, scheme, vars, expand)
+    return _s.get(n, _orig_gp(n, scheme, vars, expand))
 sysconfig.get_path = _gp
 
-_ogps = sysconfig.get_paths
+_orig_gps = sysconfig.get_paths
 def _gps(scheme='posix_prefix', vars=None, expand=True):
     if not _is_target_call(vars):
-        return _ogps(scheme, vars, expand)
+        return _orig_gps(scheme, vars, expand)
     return dict(_s)
 sysconfig.get_paths = _gps
 
+# [FIX] KHÔNG ghi đè sysconfig._INSTALL_SCHEMES cho 'posix_user'.
+# Nếu ghi đè, _orig_gps() gọi bên trên cũng trả về TARGET_SITE cho mọi
+# scheme → pip --target tưởng lib_dir == target_dir → xoá chính source.
+# Chỉ vá 'posix_prefix' và các scheme host khác, chừa 'posix_user' nguyên gốc.
 try:
-    if hasattr(sysconfig, '_INSTALL_SCHEMES'):
-        _orig_schemes = sysconfig._INSTALL_SCHEMES
-        for k in list(_orig_schemes.keys()):
-            _orig_schemes[k] = dict(_s)
+    if hasattr(sysconfig, '_INSTALL_SCHEMES') and '_orig_p4a_schemes' not in sysconfig.__dict__:
+        sysconfig._orig_p4a_schemes = dict(sysconfig._INSTALL_SCHEMES)
+        _schemes = sysconfig._INSTALL_SCHEMES
+        for _k in list(_schemes.keys()):
+            if _k == 'posix_user':   # pip --target dùng posix_user
+                continue
+            _schemes[_k] = dict(_s)
 except Exception:
     pass
 SITEEOF
 echo "  ✅ sitecustomize OK"
+
+# ── Sanity test: delegation phải hoạt động ───────────────────
+"${HOST_PYTHON}" - <<'PYEOF' || { echo "❌ sitecustomize delegation broken"; exit 1; }
+import sysconfig, tempfile, os
+_expected_target = os.environ.get("TARGET_SITE", "")
+p_default = sysconfig.get_paths()['purelib']
+tmp = tempfile.mkdtemp(prefix="p4a-sanity-")
+p_tmp = sysconfig.get_paths(vars={'base': tmp, 'platbase': tmp})['purelib']
+print(f"  default purelib: {p_default}")
+print(f"  temp   purelib: {p_tmp}")
+assert _expected_target in p_default, f"target purelib wrong: {p_default}"
+assert tmp in p_tmp,               f"delegation broken: {p_tmp} does not contain {tmp}"
+assert p_tmp != p_default,         "delegation still returns TARGET_SITE"
+print("  ✅ sitecustomize sanity OK")
+PYEOF
 
 # Setup native tools
 echo "🔧 Setup native tools"
