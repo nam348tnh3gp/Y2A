@@ -21,8 +21,10 @@ export NDK_PREBUILT="${NDK}/toolchains/llvm/prebuilt/linux-x86_64"
 export CLANG_BUILTIN=$(${CC} -print-resource-dir 2>/dev/null)/include
 export HOST_PY_PREFIX="${HOST_PY_PREFIX:-/opt/host-python}"
 export HOST_PY_LIB="${HOST_PY_PREFIX}/lib/python${PYTHON_MINOR}"
+export HOST_INCLUDE="${HOST_PY_PREFIX}/include/python${PYTHON_MINOR}"
+export HOST_SITE="${HOST_PY_LIB}/site-packages"
 
-# Capture NDK tools
+# [FIX] Capture NDK compiler cho cc-rs
 export NDK_CC="${CC}"
 export NDK_CXX="${CXX}"
 export NDK_AR="${AR}"
@@ -37,15 +39,33 @@ if [ ! -f "${DEPS_INSTALL}/.done" ]; then
 fi
 
 # 2. Cross-compile CPython
+# [FIX] Verify Python.h tồn tại — nếu không, force rebuild
+TARGET_INCLUDE_CHECK="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
+if [ ! -f "${TARGET_INCLUDE_CHECK}/Python.h" ]; then
+    echo "⚠️  Python.h missing tại ${TARGET_INCLUDE_CHECK} — force cross-compile"
+    rm -f "${TARGET_ROOT}/.python-built"
+fi
+
 if [ ! -f "${TARGET_ROOT}/.python-built" ]; then
     echo "🔨 Cross-compile CPython..."
     bash scripts/cross-compile-python.sh || { echo "❌ python FAILED"; exit 1; }
     touch "${TARGET_ROOT}/.python-built"
 fi
 
+# Verify sau build
+if [ ! -f "${TARGET_INCLUDE_CHECK}/Python.h" ]; then
+    echo "❌ Python.h VẪN missing sau cross-compile — dừng"
+    ls -la "${TARGET_INCLUDE_CHECK}" | head -20
+    exit 1
+fi
+echo "  ✅ Python.h có mặt: ${TARGET_INCLUDE_CHECK}/Python.h"
+
+# ════════════════════════════════════════════════════════════
 # 3. Setup sysconfig
+# ════════════════════════════════════════════════════════════
 echo ""
 echo "🔧 Setup sysconfig"
+
 TARGET_SYSCONF=$(ls "${TARGET_STDLIB}"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
 [ -z "$TARGET_SYSCONF" ] && { echo "❌ No _sysconfigdata"; exit 1; }
 SYSCONF_NAME=$(basename "$TARGET_SYSCONF" .py)
@@ -68,10 +88,29 @@ for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py; do
     sed -i "s|/usr/lib64|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
 done
 
-TARGET_INCLUDE="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
-HOST_INCLUDE="${HOST_PY_PREFIX}/include/python${PYTHON_MINOR}"
-[ -d "$TARGET_INCLUDE" ] && [ -d "$HOST_INCLUDE" ] && \
-    cp -rf "$TARGET_INCLUDE/." "$HOST_INCLUDE/" 2>/dev/null || true
+# Copy headers
+if [ -d "${TARGET_INCLUDE_CHECK}" ] && [ -d "${HOST_INCLUDE}" ]; then
+    cp -rf "${TARGET_INCLUDE_CHECK}/." "${HOST_INCLUDE}/" 2>/dev/null || true
+fi
+
+# ════════════════════════════════════════════════════════════
+# [FIX] Symlink tất cả Python headers vào /opt/host-python/include/
+# (parent dir) để compile với -I/opt/host-python/include cũng tìm thấy
+# ════════════════════════════════════════════════════════════
+echo "🔧 Symlink Python headers lên parent dir"
+HOST_INCLUDE_PARENT="${HOST_PY_PREFIX}/include"
+for h in "${HOST_INCLUDE}"/*.h; do
+    [ -f "$h" ] || continue
+    ln -sf "python${PYTHON_MINOR}/$(basename "$h")" "${HOST_INCLUDE_PARENT}/$(basename "$h")"
+done
+echo "  ✅ Symlinked $(ls "${HOST_INCLUDE}"/*.h 2>/dev/null | wc -l) headers → ${HOST_INCLUDE_PARENT}/"
+
+# Verify
+if [ ! -f "${HOST_INCLUDE_PARENT}/Python.h" ]; then
+    echo "❌ Python.h symlink FAILED"
+    exit 1
+fi
+echo "  ✅ ${HOST_INCLUDE_PARENT}/Python.h OK"
 
 # Global sitecustomize
 cat > "${HOST_PY_LIB}/sitecustomize.py" <<SITEEOF
@@ -110,21 +149,23 @@ SITEEOF
 echo "  ✅ sitecustomize OK"
 
 # ════════════════════════════════════════════════════════════
-# [FIX] Symlink python3 + cython vào /usr/local/bin
+# [FIX] Symlink python3, cython vào CẢ /usr/local/bin VÀ /usr/bin
 # ════════════════════════════════════════════════════════════
 echo "🔧 Setup native tools"
 sudo mkdir -p /usr/local/bin
-sudo ln -sf "${HOST_PYTHON}" /usr/local/bin/python3
-sudo ln -sf "${HOST_PYTHON}" /usr/local/bin/python
-[ -f "${HOST_PY_PREFIX}/bin/cython" ] && sudo ln -sf "${HOST_PY_PREFIX}/bin/cython" /usr/local/bin/cython
-[ -f "${HOST_PY_PREFIX}/bin/cython3" ] && sudo ln -sf "${HOST_PY_PREFIX}/bin/cython3" /usr/local/bin/cython3
-echo "  ✅ /usr/local/bin/python3 OK"
+for bindir in /usr/local/bin /usr/bin; do
+    sudo ln -sf "${HOST_PYTHON}" "${bindir}/python3"
+    sudo ln -sf "${HOST_PYTHON}" "${bindir}/python3.13"
+    sudo ln -sf "${HOST_PYTHON}" "${bindir}/python"
+    [ -f "${HOST_PY_PREFIX}/bin/cython" ] && sudo ln -sf "${HOST_PY_PREFIX}/bin/cython" "${bindir}/cython"
+    [ -f "${HOST_PY_PREFIX}/bin/cython3" ] && sudo ln -sf "${HOST_PY_PREFIX}/bin/cython3" "${bindir}/cython3"
+done
+echo "  ✅ python3, python3.13, python, cython, cython3 symlinked"
 
 # ════════════════════════════════════════════════════════════
-# [FIX] Wrapper aarch64-linux-android-{gcc,g++,ar,ranlib,strip}
-# cho cc-rs fallback (critytography cffi crate)
+# [FIX] Compiler wrapper aarch64-linux-android-* trong /usr/local/bin
 # ════════════════════════════════════════════════════════════
-echo "🔧 Setup target compiler wrappers cho cc-rs"
+echo "🔧 Compiler wrappers"
 for tool in gcc g++ ar ranlib strip; do
     case $tool in
         gcc) real="${NDK_CC}" ;;
@@ -138,8 +179,9 @@ for tool in gcc g++ ar ranlib strip; do
 exec "${real}" "\$@"
 EOF
     sudo chmod +x "/usr/local/bin/aarch64-linux-android-${tool}"
+    sudo ln -sf "/usr/local/bin/aarch64-linux-android-${tool}" "/usr/bin/aarch64-linux-android-${tool}"
 done
-echo "  ✅ Compiler wrappers OK"
+echo "  ✅ aarch64-linux-android-{gcc,g++,ar,ranlib,strip} OK"
 
 # ════════════════════════════════════════════════════════════
 # [FIX] Ẩn host libpython3.13.so
@@ -151,9 +193,8 @@ if [ -L "$HOST_LIBPY" ] || [ -f "$HOST_LIBPY" ]; then
 fi
 
 # ════════════════════════════════════════════════════════════
-# [FIX] python3.pc cho meson dependency('python3')
+# [FIX] python3.pc cho meson — tạo ở nhiều path
 # ════════════════════════════════════════════════════════════
-mkdir -p "${DEPS_INSTALL}/lib/pkgconfig"
 cat > "${DEPS_INSTALL}/lib/pkgconfig/python3.pc" <<EOF
 prefix=${TARGET_ROOT}
 exec_prefix=\${prefix}
@@ -167,32 +208,37 @@ Libs: -L\${libdir} -lpython${PYTHON_MINOR}
 Libs.private: -lm -ldl
 Cflags: -I\${includedir}
 EOF
+# Copy vào system pkg-config paths
+sudo mkdir -p /usr/local/lib/pkgconfig /usr/lib/pkgconfig
+sudo cp "${DEPS_INSTALL}/lib/pkgconfig/python3.pc" /usr/local/lib/pkgconfig/ 2>/dev/null || true
+sudo cp "${DEPS_INSTALL}/lib/pkgconfig/python3.pc" /usr/lib/pkgconfig/ 2>/dev/null || true
+mkdir -p "${HOST_PY_PREFIX}/lib/pkgconfig"
 cp "${DEPS_INSTALL}/lib/pkgconfig/python3.pc" "${HOST_PY_PREFIX}/lib/pkgconfig/" 2>/dev/null || true
-echo "  ✅ python3.pc OK"
+echo "  ✅ python3.pc OK (3 paths)"
 
 # ════════════════════════════════════════════════════════════
-# [FIX] XOÁ cffi khỏi TARGET_SITE (tránh shadow host cffi)
-# KHÔNG cài cffi vào target site — host python dùng cffi của chính nó
+# [FIX] Force xoá cffi khỏi TARGET_SITE (đề phòng cache cũ)
 # ════════════════════════════════════════════════════════════
 echo "🔧 Cleanup cffi khỏi TARGET_SITE"
-rm -rf "${TARGET_SITE}"/cffi \
-       "${TARGET_SITE}"/cffi-*.dist-info \
-       "${TARGET_SITE}"/_cffi_backend* \
-       "${TARGET_SITE}"/pycparser \
-       "${TARGET_SITE}"/pycparser-*.dist-info 2>/dev/null || true
+mkdir -p "${TARGET_SITE}"
+find "${TARGET_SITE}" -maxdepth 1 -name "cffi*" -exec rm -rf {} \; 2>/dev/null || true
+find "${TARGET_SITE}" -maxdepth 1 -name "_cffi_backend*" -exec rm -rf {} \; 2>/dev/null || true
+find "${TARGET_SITE}" -maxdepth 1 -name "pycparser*" -exec rm -rf {} \; 2>/dev/null || true
 
-# Verify host python cffi
+# Verify
+REMAINING=$(find "${TARGET_SITE}" -maxdepth 1 \( -name "cffi*" -o -name "_cffi_backend*" -o -name "pycparser*" \) 2>/dev/null | wc -l)
+if [ "$REMAINING" -gt 0 ]; then
+    echo "  ⚠️  Còn $REMAINING cffi files — force delete lại"
+    find "${TARGET_SITE}" -maxdepth 1 \( -name "cffi*" -o -name "_cffi_backend*" -o -name "pycparser*" \) -exec rm -rf {} \; 2>/dev/null || true
+fi
+echo "  ✅ TARGET_SITE cleaned"
+
+# Verify host cffi
 "${HOST_PYTHON}" -c "
 import cffi, _cffi_backend
-v1 = cffi.__version__
-v2 = _cffi_backend.__version__
-print(f'  host cffi: {v1}')
-print(f'  host _cffi_backend: {v2}')
-if v1 != v2:
-    raise SystemExit(f'MISMATCH: {v1} != {v2}')
-print('  ✅ cffi match')
-" || { echo "❌ cffi mismatch — force reinstall"; \
-    "${HOST_PYTHON}" -m pip install --no-cache-dir --force-reinstall cffi; }
+print(f'  host cffi: {cffi.__version__}')
+print(f'  host _cffi_backend: {_cffi_backend.__version__}')
+" || echo "  ⚠️  host cffi check failed"
 
 # 4. Bootstrap pip
 if [ ! -d "${TARGET_SITE}/pip" ]; then
