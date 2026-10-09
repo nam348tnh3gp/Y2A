@@ -1,6 +1,5 @@
 #!/bin/bash
 # Build wheels trong container — p4a-style
-# Xuất summary + failures ra file để workflow đọc
 set -eo pipefail
 
 HOST_PY="${HOST_PYTHON}"
@@ -19,6 +18,40 @@ SYSCONF_NAME=$(basename "$SYSCONF_FILE" .py)
 SYSCONF_DIR="${WORKSPACE}/sysconfigdata-host"
 rm -rf "$SYSCONF_DIR" && mkdir -p "$SYSCONF_DIR"
 cp "$SYSCONF_FILE" "$SYSCONF_DIR/"
+
+# ════════════════════════════════════════════════════════════
+# [FIX] Patch CCSHARED trong sysconfigdata — bỏ hash-style
+#      để tránh -Werror fail khi compile .c
+# ════════════════════════════════════════════════════════════
+HOST_PY_LIB="${HOST_PY_PREFIX}/lib/python${PYTHON_MINOR}"
+echo "🔧 Patch sysconfigdata (CCSHARED = -fPIC only)"
+for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py "${SYSCONF_DIR}"/_sysconfigdata__*.py; do
+    [ -f "$f" ] || continue
+    sed -i "s|'CCSHARED': .*|'CCSHARED': '-fPIC',|g" "$f" 2>/dev/null || true
+    sed -i 's|"CCSHARED": .*|"CCSHARED": "-fPIC",|g' "$f" 2>/dev/null || true
+    sed -i "s|'LDSHARED': .*|'LDSHARED': '${CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
+    sed -i "s|'BLDSHARED': .*|'BLDSHARED': '${CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
+    sed -i "s|'LDCXXSHARED': .*|'LDCXXSHARED': '${CXX} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
+    # Patch host paths còn sót
+    sed -i "s|/opt/host-python/lib|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
+    sed -i "s|/opt/host-python/include|${TARGET_ROOT}/include|g" "$f" 2>/dev/null || true
+    sed -i "s|/usr/lib/x86_64-linux-gnu|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
+    sed -i "s|/usr/lib64|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
+    sed -i "s|/usr/local/lib|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
+    sed -i "s|/usr/local/include|${TARGET_ROOT}/include|g" "$f" 2>/dev/null || true
+    sed -i "s|'/usr/lib'|'${TARGET_ROOT}/lib'|g" "$f" 2>/dev/null || true
+    sed -i "s|'/usr/include'|'${TARGET_ROOT}/include'|g" "$f" 2>/dev/null || true
+done
+echo "  ✅ Patched"
+
+# Verify CCSHARED
+echo "  Verify CCSHARED:"
+"${HOST_PYTHON}" -c "
+import sysconfig
+print('    CCSHARED:', sysconfig.get_config_var('CCSHARED'))
+print('    LIBDIR:', sysconfig.get_config_var('LIBDIR'))
+print('    LIBPL:', sysconfig.get_config_var('LIBPL'))
+"
 
 HOST_INCLUDE="${HOST_PY_PREFIX}/include/python${PYTHON_MINOR}"
 mkdir -p "$HOST_INCLUDE"
@@ -65,8 +98,6 @@ export OPENSSL_INCLUDE_DIR="${DEPS_INSTALL}/include"
 
 SUCCESS=""
 FAIL=""
-
-# Reset summary files
 > "$FAILURES_FILE"
 
 for pkg in $PKGLIST; do
@@ -97,10 +128,9 @@ for pkg in $PKGLIST; do
             echo "✅ $pkg — OK: $(basename "$whl")"
             SUCCESS="$SUCCESS $pkg"
         else
-            echo "❌ $pkg — build OK nhưng không tìm thấy wheel"
+            echo "❌ $pkg — build OK nhưng không có wheel"
             echo "=== $pkg ===" >> "$FAILURES_FILE"
             echo "Reason: build OK but no wheel found" >> "$FAILURES_FILE"
-            echo "--- log (tail 30) ---" >> "$FAILURES_FILE"
             tail -30 "$BUILD_LOG" >> "$FAILURES_FILE"
             echo "" >> "$FAILURES_FILE"
             FAIL="$FAIL $pkg"
@@ -114,15 +144,10 @@ for pkg in $PKGLIST; do
         tail -40 "$BUILD_LOG" >> "$FAILURES_FILE"
         echo "" >> "$FAILURES_FILE"
         FAIL="$FAIL $pkg"
-
-        # Vẫn show log ra stdout
         tail -30 "$BUILD_LOG" || true
     fi
 done
 
-# ════════════════════════════════════════════════════════════
-# Write summary
-# ════════════════════════════════════════════════════════════
 SUCCESS=$(echo "$SUCCESS" | xargs)
 FAIL=$(echo "$FAIL" | xargs)
 SUCCESS_COUNT=$(echo "$SUCCESS" | wc -w)
@@ -137,7 +162,6 @@ else
     STATUS="FAILED"
 fi
 
-# Text summary — cho user đọc
 cat > "$SUMMARY_FILE" <<EOF
 ════════════════════════════════════════════
 BUILD SUMMARY — ${STATUS}
@@ -155,11 +179,10 @@ $([ -z "$SUCCESS" ] && echo "  (none)")
 $(for p in $FAIL; do echo "  • $p"; done)
 $([ -z "$FAIL" ] && echo "  (none)")
 
-Chi tiết lỗi xem file build-failures.txt
+Chi tiết: build-failures.txt
 ════════════════════════════════════════════
 EOF
 
-# ENV summary — cho workflow parse
 cat > "$SUMMARY_ENV" <<EOF
 BUILD_STATUS=${STATUS}
 BUILD_SUCCESS_COUNT=${SUCCESS_COUNT}
@@ -171,10 +194,4 @@ EOF
 
 echo ""
 cat "$SUMMARY_FILE"
-
-# Không exit 1 — để entrypoint tiếp tục
-if [ -n "$FAIL" ]; then
-    echo "⚠️  Có package fail:$FAIL"
-    echo "   (sẽ tiếp tục xử lý phần OK)"
-fi
 exit 0
