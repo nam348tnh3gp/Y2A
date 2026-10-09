@@ -1,6 +1,5 @@
 #!/bin/bash
 # build-p4a-style.sh — build 1 package cho Android
-# Sử dụng cho mọi package trong list.txt
 set -eo pipefail
 
 PKG_SPEC="${1:-}"
@@ -18,7 +17,7 @@ echo "  Building: $PKG_SPEC"
 echo "  PKG_NAME: $PKG_NAME"
 
 # ════════════════════════════════════════════════════════════
-# Symlink python3, python, cython vào TMP_BUILD/bin
+# Symlink python3, python, cython
 # ════════════════════════════════════════════════════════════
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python3"
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python"
@@ -66,7 +65,7 @@ SRC_PATH=$(find "${SRC_DIR}/extracted" -maxdepth 1 -type d | tail -n +2 | head -
 echo "  Source: $SRC_PATH"
 
 # ════════════════════════════════════════════════════════════
-# 2. Detect build backend
+# 2. Detect backend
 # ════════════════════════════════════════════════════════════
 BACKEND=$(SRC_PATH="$SRC_PATH" "${HOST_PYTHON}" - <<'PYEOF'
 import tomllib, os
@@ -117,7 +116,6 @@ make_wrapper ranlib "${RANLIB}"
 make_wrapper strip "${STRIP}"
 make_wrapper readelf "${READELF}"
 
-# Rust packages: KHÔNG dùng sandbox (cần host cc cho build script)
 USE_SANDBOX=1
 case "$PKG_NAME" in
     cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
@@ -125,7 +123,6 @@ case "$PKG_NAME" in
         ;;
 esac
 
-# PATH order: TMP_BUILD/bin → sandbox → /usr/local/bin → /usr/bin
 if [ "$USE_SANDBOX" -eq 1 ]; then
     export PATH="${TMP_BUILD}/bin:${SANDBOX}:${TMP_BUILD}:${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:/usr/local/bin:/usr/bin:${PATH}"
 else
@@ -133,7 +130,7 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# 5. Environment variables
+# 5. Environment
 # ════════════════════════════════════════════════════════════
 export _PYTHON_HOST_PLATFORM="${ANDROID_TAG}"
 export _PYTHON_PROJECT_BASE="${TARGET_ROOT}"
@@ -141,23 +138,17 @@ export TARGET_PYTHON_EXE="${TARGET_ROOT}/bin/python${PYTHON_MINOR}"
 
 unset FC F77 F90
 
-# NDK compilers
 export CC="${NDK_CC}" CXX="${NDK_CXX}" AR="${NDK_AR}" RANLIB="${RANLIB}" STRIP="${STRIP}"
 export CPP="${NDK_CC} -E" LD="${NDK_CC}" AS="${NDK_CC}"
 
-# [FIX] Target-specific env cho cc-rs (cryptography cffi crate)
+# [FIX] CHỈ dùng underscore form (bash cho phép). 
+# Hyphen form sẽ được truyền qua `env` command khi build bên dưới.
 export CC_aarch64_linux_android="${NDK_CC}"
 export CXX_aarch64_linux_android="${NDK_CXX}"
 export AR_aarch64_linux_android="${NDK_AR}"
 export CFLAGS_aarch64_linux_android="-fPIC -O2 -I${TARGET_ROOT}/include/python${PYTHON_MINOR} -I${DEPS_INSTALL}/include -Wno-implicit-function-declaration"
 export LDFLAGS_aarch64_linux_android="-L${DEPS_INSTALL}/lib -L${TARGET_ROOT}/lib -Wl,--hash-style=both"
-export CC_aarch64-linux-android="${NDK_CC}"
-export CXX_aarch64-linux-android="${NDK_CXX}"
-export AR_aarch64-linux-android="${NDK_AR}"
-export CFLAGS_aarch64-linux-android="${CFLAGS_aarch64_linux_android}"
-export LDFLAGS_aarch64-linux-android="${LDFLAGS_aarch64_linux_android}"
 
-# Linker
 export LDSHARED="${NDK_CC} -shared -L${DEPS_INSTALL}/lib -L${TARGET_ROOT}/lib -Wl,--hash-style=both"
 export CCSHARED="-fPIC"
 export BLDSHARED="${NDK_CC} -shared -L${DEPS_INSTALL}/lib -L${TARGET_ROOT}/lib -Wl,--hash-style=both"
@@ -165,7 +156,6 @@ export LDCXXSHARED="${NDK_CXX} -shared -L${DEPS_INSTALL}/lib -L${TARGET_ROOT}/li
 
 export LDFLAGS="-L${DEPS_INSTALL}/lib -L${TARGET_ROOT}/lib -L${NDK_SYSROOT}/usr/lib/aarch64-linux-android/${ANDROID_API}"
 
-# CMake
 export CMAKE_C_COMPILER="${NDK_CC}"
 export CMAKE_CXX_COMPILER="${NDK_CXX}"
 export CMAKE_AR="${NDK_AR}"
@@ -174,7 +164,6 @@ export CMAKE_SYSTEM_NAME="Android"
 export CMAKE_SYSTEM_PROCESSOR="aarch64"
 export CMAKE_ANDROID_API="${ANDROID_API}"
 
-# NumPy BLAS
 export NPY_DISABLE_SVML=1
 export NPY_USE_BLAS_ILP64=0
 export NPY_BLAS_LIBS="-lopenblas"
@@ -182,7 +171,7 @@ export NPY_CBLAS_LIBS="-lopenblas"
 export NPY_LAPACK_LIBS="-lopenblas"
 
 # ════════════════════════════════════════════════════════════
-# 6. PyO3 config cho Rust packages
+# 6. PyO3 config
 # ════════════════════════════════════════════════════════════
 PYO3_CONFIG="${TMP_BUILD}/pyo3-config.txt"
 cat > "$PYO3_CONFIG" <<EOF
@@ -200,7 +189,7 @@ EOF
 export PYO3_CONFIG_FILE="$PYO3_CONFIG"
 
 # ════════════════════════════════════════════════════════════
-# 7. site.cfg cho numpy/scipy
+# 7. site.cfg
 # ════════════════════════════════════════════════════════════
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
     cat > "$SRC_PATH/site.cfg" <<EOF
@@ -223,7 +212,6 @@ case "$BACKEND" in
         echo "  → Meson backend"
         case "$PKG_NAME" in
             numpy|scipy)
-                # [FIX] Native file cho build machine tools
                 cat > "${TMP_BUILD}/native-tools.ini" <<EOF
 [binaries]
 python3 = '${HOST_PYTHON}'
@@ -291,19 +279,17 @@ EOF
 esac
 
 # ════════════════════════════════════════════════════════════
-# 9. Patch đặc biệt theo từng package
+# 9. Patch đặc biệt
 # ════════════════════════════════════════════════════════════
 case "$PKG_NAME" in
     Pillow|pillow|PIL)
-        echo "  → Patch Pillow (aggressive filter + build_ext)"
+        echo "  → Patch Pillow"
         cd "$SRC_PATH"
         cp setup.py setup.py.bak 2>/dev/null || true
         cat > /tmp/patch_pillow.py <<'PYEOF'
 import re
 with open("setup.py", "r") as f:
     c = f.read()
-
-# Replace string literals cho host paths
 q1, q2 = chr(34), chr(39)
 skip = "/nonexistent/skip"
 for path in ["/usr/include", "/usr/local/include", "/usr/lib",
@@ -312,11 +298,7 @@ for path in ["/usr/include", "/usr/local/include", "/usr/lib",
              "/opt/host-python/bin"]:
     c = c.replace(q1+path+q1, q1+skip+q1)
     c = c.replace(q2+path+q2, q2+skip+q2)
-
-# Replace _add_directory() calls
 c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/(usr|opt/host)[^\x27\x22]*[\x27\x22]\)", "pass", c)
-
-# Filter code chèn trước setup()
 filter = '''
 import os as _os
 def _p4a_bad(p):
@@ -332,13 +314,11 @@ def _p4a_bad(p):
 def _p4a_clean(l):
     if not l: return l
     return [d for d in l if not _p4a_bad(d)]
-
 try:
     include_dirs[:] = _p4a_clean(include_dirs)
     library_dirs[:] = _p4a_clean(library_dirs)
 except (NameError, UnboundLocalError):
     pass
-
 try:
     from setuptools.command.build_ext import build_ext as _be_cls
     _orig_be_fo = _be_cls.finalize_options
@@ -360,7 +340,6 @@ if matches:
     indent = m.group(1)
     indented = "\n".join((indent+l) if l.strip() else l for l in filter.split("\n"))
     c = c[:idx] + indented + c[idx:]
-
 with open("setup.py", "w") as f:
     f.write(c)
 PYEOF
@@ -368,14 +347,12 @@ PYEOF
         ;;
 
     cffi)
-        echo "  → cffi: Py_LIMITED_API"
         export CFFI_PY_LIMITED_API="0x030D0000"
         SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=cp313")
         ;;
 
     zstandard)
-        echo "  → zstandard: đảm bảo cffi không conflict"
-        # cffi đã được dọn khỏi TARGET_SITE trong entrypoint
+        echo "  → zstandard: cffi đã dọn"
         ;;
 
     cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
@@ -394,6 +371,7 @@ esac
 
 # ════════════════════════════════════════════════════════════
 # 10. Build
+# [FIX] Dùng `env` để truyền biến có dấu `-` (cc-rs cần)
 # ════════════════════════════════════════════════════════════
 cd "$SRC_PATH"
 
@@ -401,7 +379,14 @@ BUILD_CMD=("${HOST_PYTHON}" -m pip wheel . --no-deps --no-build-isolation --whee
 [ -n "$PLAT_NAME_ARG" ] && BUILD_CMD+=("$PLAT_NAME_ARG")
 [ "${#SETUP_ARGS[@]}" -gt 0 ] && BUILD_CMD+=("${SETUP_ARGS[@]}")
 
-if "${BUILD_CMD[@]}" > "$LOG" 2>&1; then
+# [FIX] Đây là chỗ quan trọng — pass biến có dấu `-` qua env
+if env \
+    "CC_aarch64-linux-android=${NDK_CC}" \
+    "CXX_aarch64-linux-android=${NDK_CXX}" \
+    "AR_aarch64-linux-android=${NDK_AR}" \
+    "CFLAGS_aarch64-linux-android=${CFLAGS_aarch64_linux_android}" \
+    "LDFLAGS_aarch64-linux-android=${LDFLAGS_aarch64_linux_android}" \
+    "${BUILD_CMD[@]}" > "$LOG" 2>&1; then
     tail -5 "$LOG"
     echo "✅ $PKG_NAME built"
 else
@@ -412,7 +397,7 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# 11. Patch cryptography-like wheels: NEEDED libpython + RPATH
+# 11. Patch cryptography wheel
 # ════════════════════════════════════════════════════════════
 case "$PKG_NAME" in
     cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
