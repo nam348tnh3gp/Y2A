@@ -18,7 +18,7 @@ echo "  Building: $PKG_SPEC"
 echo "  PKG_NAME: $PKG_NAME"
 
 # ============================================================
-# 0. Patch host sysconfig cho Pillow
+# 0. Patch host sysconfig cho Pillow (aggressive)
 # ============================================================
 PATCHED_SYSCONF=""
 restore_host_sysconf() {
@@ -53,6 +53,7 @@ for old, new in [
     ('"/lib"', f'"{tlib}"'), ("'/lib'", f"'{tlib}'"),
     ('"/lib64"', f'"{tlib}"'), ("'/lib64'", f"'{tlib}'"),
     ('"/opt/host-python/lib"', f'"{tlib}"'), ("'/opt/host-python/lib'", f"'{tlib}'"),
+    ('"/opt/host-python/include"', f'"{tinc}"'), ("'/opt/host-python/include'", f"'{tinc}'"),
 ]:
     c = c.replace(old, new)
 for pat in [r'-I/usr/local/include\s*', r'-I/usr/include\s*',
@@ -73,10 +74,7 @@ esac
 cd "$SRC_DIR"
 if ! "${HOST_PYTHON}" -m pip download "$PKG_SPEC" \
         --no-deps --no-binary=:all: --dest="$SRC_DIR" > /tmp/dl.log 2>&1; then
-
-    echo "⚠️  pip download failed — fetch sdist từ PyPI JSON"
-    tail -10 /tmp/dl.log
-
+    echo "⚠️  pip download failed — thử PyPI JSON"
     PKG_BASE="${PKG_SPEC%%[<>=!~]*}"
     PYPI_JSON=$(curl -sL "https://pypi.org/pypi/${PKG_BASE}/json" 2>/dev/null || echo "{}")
     SDIST_URL=$(echo "$PYPI_JSON" | "${HOST_PYTHON}" -c "
@@ -91,15 +89,11 @@ except Exception:
 " 2>/dev/null || echo "")
 
     if [ -z "$SDIST_URL" ]; then
-        echo "❌ Không tìm thấy sdist URL cho $PKG_BASE"
-        exit 1
+        echo "❌ Không tìm thấy sdist URL"; exit 1
     fi
 
-    echo "  → Download: $SDIST_URL"
     SDIST_NAME=$(basename "$SDIST_URL")
-    wget -q "$SDIST_URL" -O "${SRC_DIR}/${SDIST_NAME}" || {
-        echo "❌ Download sdist failed"; exit 1
-    }
+    wget -q "$SDIST_URL" -O "${SRC_DIR}/${SDIST_NAME}" || { echo "❌ Download failed"; exit 1; }
 fi
 
 TARBALL=$(find "$SRC_DIR" -maxdepth 1 \( -name "*.tar.gz" -o -name "*.tar.xz" \
@@ -164,9 +158,7 @@ make_wrapper ranlib "${RANLIB}"
 make_wrapper strip "${STRIP}"
 make_wrapper readelf "${READELF}"
 
-# ============================================================
-# [FIX] Rust packages cần host cc cho build script → không dùng sandbox
-# ============================================================
+# Rust packages: không dùng sandbox (cần host cc cho build script)
 USE_SANDBOX=1
 case "$PKG_NAME" in
     cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
@@ -191,12 +183,12 @@ unset FC F77 F90
 
 export CC CXX CPP="${CC} -E" LD="${CC}" AR AS="${CC}" RANLIB STRIP
 
+# [FIX] CCSHARED chỉ -fPIC — không hash-style (đã patch sysconfigdata)
 export LDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export CCSHARED="-fPIC"
 export BLDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export LDCXXSHARED="${CXX} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 
-# [FIX] Bỏ -Wl,--hash-style=both khỏi LDFLAGS env — chỉ giữ trong LDSHARED
 export LDFLAGS="-L${DEPS_INSTALL}/lib -L${NDK_SYSROOT}/usr/lib/aarch64-linux-android/${ANDROID_API}"
 
 export CMAKE_C_COMPILER="${CC}"
@@ -274,7 +266,7 @@ case "$BACKEND" in
         echo "  → Meson backend"
         case "$PKG_NAME" in
             numpy|scipy)
-                # [FIX] Thêm python3 binary cho link test
+                # [FIX] python3 cho Cython link test
                 cat > "${TMP_BUILD}/android-cross.ini" <<EOF
 [binaries]
 c = '${CC}'
@@ -283,6 +275,7 @@ ar = '${AR}'
 strip = '${STRIP}'
 ranlib = '${RANLIB}'
 python3 = '${HOST_PYTHON}'
+cython = '${HOST_PY_PREFIX}/bin/cython'
 exe_wrapper = '/bin/true'
 
 [host_machine]
@@ -295,7 +288,6 @@ endian = 'little'
 longdouble_format = 'IEEE_QUAD_LE'
 needs_exe_wrapper = true
 EOF
-                # [FIX] Native file cho meson
                 cat > "${TMP_BUILD}/meson-native.ini" <<EOF
 [binaries]
 c = '/usr/bin/gcc'
@@ -345,43 +337,64 @@ esac
 # ============================================================
 case "$PKG_NAME" in
     Pillow|pillow|PIL)
-        echo "  → Patch Pillow"
+        echo "  → Patch Pillow (aggressive filter)"
         cd "$SRC_PATH"
         cp setup.py setup.py.bak 2>/dev/null || true
         cat > /tmp/patch_pillow.py <<'PYEOF'
 import re
 with open("setup.py", "r") as f:
     c = f.read()
+
+# Replace string literal paths
 q1, q2 = chr(34), chr(39)
 skip = "/nonexistent/skip"
 for path in ["/usr/include", "/usr/local/include", "/usr/lib", "/usr/local/lib",
-             "/opt/host-python/lib", "/opt/host-python/include"]:
+             "/usr/lib/x86_64-linux-gnu", "/usr/lib64",
+             "/opt/host-python/lib", "/opt/host-python/include",
+             "/opt/host-python/bin"]:
     c = c.replace(q1+path+q1, q1+skip+q1)
     c = c.replace(q2+path+q2, q2+skip+q2)
+
+# Replace _add_directory calls
 c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/(usr|opt/host)[^\x27\x22]*[\x27\x22]\)", "pass", c)
+
+# Aggressive filter
 filter_code = '''
 import os as _os
-_BAD = ("/usr/include", "/usr/local/include", "/usr/lib", "/usr/local/lib",
-        "/opt/host-python/lib", "/opt/host-python/include")
+_ALLOWED = ("/work/python-android", "/work/deps-install", "/opt/ndk", "/tmp/p4a-build")
+_BAD = (
+    "/usr/include", "/usr/local/include",
+    "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib",
+    "/usr/local/lib",
+    "/opt/host-python/lib", "/opt/host-python/include",
+    "/opt/host-python/bin",
+)
 def _is_bad(p):
     p = str(p)
-    pl = p.lower()
-    if "android" in pl or "deps-install" in p or "python-android" in p:
-        return False
+    for a in _ALLOWED:
+        if a in p: return False
     for b in _BAD:
         if p.startswith(b): return True
     return False
+def _clean_list(lst):
+    if not lst: return lst
+    return [d for d in lst if not _is_bad(d)]
 try:
-    include_dirs[:] = [d for d in include_dirs if not _is_bad(d)]
-    library_dirs[:] = [d for d in library_dirs if not _is_bad(d)]
+    include_dirs[:] = _clean_list(include_dirs)
+    library_dirs[:] = _clean_list(library_dirs)
 except (NameError, UnboundLocalError):
     pass
 try:
     for _ext in ext_modules:
-        if hasattr(_ext, "include_dirs") and _ext.include_dirs:
-            _ext.include_dirs = [d for d in _ext.include_dirs if not _is_bad(d)]
-        if hasattr(_ext, "library_dirs") and _ext.library_dirs:
-            _ext.library_dirs = [d for d in _ext.library_dirs if not _is_bad(d)]
+        if hasattr(_ext, "include_dirs"):
+            _ext.include_dirs = _clean_list(_ext.include_dirs)
+        if hasattr(_ext, "library_dirs"):
+            _ext.library_dirs = _clean_list(_ext.library_dirs)
+        if hasattr(_ext, "runtime_library_dirs"):
+            _ext.runtime_library_dirs = _clean_list(_ext.runtime_library_dirs)
+        if hasattr(_ext, "extra_link_args") and _ext.extra_link_args:
+            _ext.extra_link_args = [a for a in _ext.extra_link_args
+                                    if not any(b in a for b in _BAD)]
 except (NameError, UnboundLocalError):
     pass
 
@@ -415,7 +428,6 @@ PYEOF
         export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
         export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include"
         export PYO3_CONFIG_FILE="${PYO3_CONFIG}"
-        # [FIX] Chỉ target-specific RUSTFLAGS, không global
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR} -C link-arg=-Wl,--hash-style=both"
         unset RUSTFLAGS
         ;;
