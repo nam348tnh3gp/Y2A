@@ -92,7 +92,6 @@ fi
 
 # ════════════════════════════════════════════════════════════
 # [FIX] Copy Python headers vào PARENT dir bao gồm subdirs
-# để compile với -I/opt/host-python/include vẫn tìm thấy cpython/*
 # ════════════════════════════════════════════════════════════
 echo "🔧 Copy Python headers vào parent dir (giữ subdirs)"
 cp -rn "${HOST_INCLUDE}/." "${HOST_INCLUDE_PARENT}/" 2>/dev/null || true
@@ -150,10 +149,8 @@ _s = {
     'data':        _TR,
 }
 
-# [FIX] Chỉ coi là "target call" khi base/platbase trùng TARGET_ROOT
-# (hoặc vars rỗng — caller mặc định hỏi scheme host/target).
-# Ngược lại → delegate về sysconfig gốc để pip --target dùng temp dir
-# (nếu không delegate, pip tưởng lib_dir == target_dir → xoá chính source).
+# [FIX] Chỉ coi là "target call" khi base/platbase trùng TARGET_ROOT.
+# Ngược lại → delegate về sysconfig gốc để pip --target dùng temp dir.
 def _is_target_call(vars):
     if not vars:
         return True
@@ -180,20 +177,13 @@ def _gps(scheme='posix_prefix', vars=None, expand=True):
     return dict(_s)
 sysconfig.get_paths = _gps
 
-# [FIX] KHÔNG ghi đè sysconfig._INSTALL_SCHEMES cho 'posix_user'.
-# Nếu ghi đè, _orig_gps() gọi bên trên cũng trả về TARGET_SITE cho mọi
-# scheme → pip --target tưởng lib_dir == target_dir → xoá chính source.
-# Chỉ vá 'posix_prefix' và các scheme host khác, chừa 'posix_user' nguyên gốc.
-try:
-    if hasattr(sysconfig, '_INSTALL_SCHEMES') and '_orig_p4a_schemes' not in sysconfig.__dict__:
-        sysconfig._orig_p4a_schemes = dict(sysconfig._INSTALL_SCHEMES)
-        _schemes = sysconfig._INSTALL_SCHEMES
-        for _k in list(_schemes.keys()):
-            if _k == 'posix_user':   # pip --target dùng posix_user
-                continue
-            _schemes[_k] = dict(_s)
-except Exception:
-    pass
+# [FIX] KHÔNG patch sysconfig._INSTALL_SCHEMES.
+#
+# Lý do: get_paths() gốc (qua _expand_vars) đọc _INSTALL_SCHEMES[scheme]
+# để substitute {base}/{platbase}. Nếu ta ghi đè bảng này bằng đường dẫn
+# tuyệt đối _s, thì _orig_gps() cũng sẽ trả về TARGET_SITE bất kể vars —
+# delegation vô hiệu. Vì vậy để nguyên _INSTALL_SCHEMES, chỉ dựa vào
+# _gp / _gps để phân biệt target-call vs delegate-call.
 SITEEOF
 echo "  ✅ sitecustomize OK"
 
