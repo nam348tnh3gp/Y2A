@@ -15,10 +15,7 @@ mkdir -p "$SRC_DIR" "${TMP_BUILD}/bin"
 
 echo "  Building: $PKG_SPEC"
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Symlink python3, python, cython vào TMP_BUILD/bin
-# để meson/setuptools find_program('python3') tìm thấy
-# ════════════════════════════════════════════════════════════
+# Symlink python3, cython
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python3"
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python"
 [ -f "${HOST_PY_PREFIX}/bin/cython" ] && ln -sf "${HOST_PY_PREFIX}/bin/cython" "${TMP_BUILD}/bin/cython"
@@ -100,15 +97,21 @@ make_wrapper ranlib "${RANLIB}"
 make_wrapper strip "${STRIP}"
 make_wrapper readelf "${READELF}"
 
-# Rust packages: không dùng sandbox
+# Rust packages: KHÔNG dùng sandbox + unset CC/CXX
 USE_SANDBOX=1
 case "$PKG_NAME" in
     cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
         USE_SANDBOX=0
+        # [FIX] Unset host CC/CXX cho Rust build script (dùng gcc host x86_64)
+        unset CC CXX AR RANLIB STRIP
+        export CC="gcc"
+        export CXX="g++"
+        export AR="ar"
+        export RANLIB="ranlib"
+        export STRIP="strip"
         ;;
 esac
 
-# [FIX] TMP_BUILD/bin lên đầu để python3 symlink được tìm thấy
 if [ "$USE_SANDBOX" -eq 1 ]; then
     export PATH="${TMP_BUILD}/bin:${SANDBOX}:${TMP_BUILD}:${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:${PATH}"
 else
@@ -122,7 +125,7 @@ export TARGET_PYTHON_EXE="${TARGET_ROOT}/bin/python${PYTHON_MINOR}"
 
 unset FC F77 F90
 
-export CC CXX CPP="${CC} -E" LD="${CC}" AR AS="${CC}" RANLIB STRIP
+export CPP="${CC} -E" LD="${CC}" AS="${CC}"
 
 export LDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export CCSHARED="-fPIC"
@@ -181,7 +184,6 @@ case "$BACKEND" in
         echo "  → Meson backend"
         case "$PKG_NAME" in
             numpy|scipy)
-                # [FIX] Cross-file với python3 rõ ràng
                 cat > "${TMP_BUILD}/android-cross.ini" <<EOF
 [binaries]
 c = '${CC}'
@@ -189,7 +191,7 @@ cpp = '${CXX}'
 ar = '${AR}'
 strip = '${STRIP}'
 ranlib = '${RANLIB}'
-python3 = '${HOST_PYTHON}'
+python3 = '${TMP_BUILD}/bin/python3'
 cython = '${TMP_BUILD}/bin/cython'
 exe_wrapper = '/bin/true'
 
@@ -229,6 +231,7 @@ EOF
         export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
         export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include"
         export PYO3_CONFIG_FILE="${PYO3_CONFIG}"
+        export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang"
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR} -C link-arg=-Wl,--hash-style=both"
         unset RUSTFLAGS
         ;;
@@ -241,7 +244,7 @@ esac
 # 8. Patch đặc biệt
 case "$PKG_NAME" in
     Pillow|pillow|PIL)
-        echo "  → Patch Pillow (aggressive, xoá host paths)"
+        echo "  → Patch Pillow (aggressive)"
         cd "$SRC_PATH"
         cp setup.py setup.py.bak 2>/dev/null || true
         cat > /tmp/patch_pillow.py <<'PYEOF'
@@ -249,7 +252,6 @@ import re
 with open("setup.py", "r") as f:
     c = f.read()
 
-# Replace string literals cho host paths
 q1, q2 = chr(34), chr(39)
 skip = "/nonexistent/skip"
 for path in ["/usr/include", "/usr/local/include", "/usr/lib",
@@ -259,23 +261,77 @@ for path in ["/usr/include", "/usr/local/include", "/usr/lib",
     c = c.replace(q1+path+q1, q1+skip+q1)
     c = c.replace(q2+path+q2, q2+skip+q2)
 
-# Replace _add_directory(_, path) calls
 c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/(usr|opt/host)[^\x27\x22]*[\x27\x22]\)", "pass", c)
 
-# Aggressive filter trước setup()
-filter_code = '''
-import os as _os
-_ALLOWED = ("/work/python-android", "/work/deps-install", "/opt/ndk", "/tmp/p4a-build")
-_BAD = (
+# Monkey-patch sysconfig in Pillow setup.py
+patch_code = '''
+# ============ p4a monkey-patch ============
+import sysconfig as _sysconfig
+_TARGET = "/work/python-android"
+_PYV = "python3.13"
+_allowed_prefixes = ("/work/python-android", "/work/deps-install",
+                     "/opt/ndk", "/tmp/p4a-build")
+_bad_prefixes = (
     "/usr/include", "/usr/local/include",
     "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib",
     "/usr/local/lib",
-    "/opt/host-python/lib", "/opt/host-python/include", "/opt/host-python/bin",
+    "/opt/host-python/lib", "/opt/host-python/include",
+    "/opt/host-python/bin",
 )
+def _allowed(p):
+    p = str(p)
+    for a in _allowed_prefixes:
+        if a in p: return True
+    return False
+def _bad(p):
+    p = str(p)
+    if _allowed(p): return False
+    for b in _bad_prefixes:
+        if p.startswith(b): return True
+    return False
+
+# Override sysconfig.get_config_var + get_path
+_orig_gcv = _sysconfig.get_config_var
+def _gcv(name):
+    if name == "LIBDIR": return _TARGET + "/lib"
+    if name == "LIBPL": return _TARGET + "/lib"
+    if name == "INCLUDEPY": return _TARGET + "/include/" + _PYV
+    if name == "CONFINCLUDEPY": return _TARGET + "/include/" + _PYV
+    if name == "CCSHARED": return "-fPIC"
+    return _orig_gcv(name)
+_sysconfig.get_config_var = _gcv
+
+_orig_gp = _sysconfig.get_path
+def _gp(name, *a, **kw):
+    if name == "include": return _TARGET + "/include/" + _PYV
+    if name == "platinclude": return _TARGET + "/include/" + _PYV
+    if name == "purelib": return _TARGET + "/lib/" + _PYV + "/site-packages"
+    if name == "platlib": return _TARGET + "/lib/" + _PYV + "/site-packages"
+    return _orig_gp(name, *a, **kw)
+_sysconfig.get_path = _gp
+
+# Filter include_dirs/library_dirs AFTER setup() args defined but BEFORE setup()
+# We inject this block right before setup() call - see main filter below
+# ============ end ============
+
+'''
+# Prepend patch_code to setup.py
+c = patch_code + c
+
+# Then filter trước setup()
+filter_code = '''
+import os as _os
 def _is_bad(p):
     p = str(p)
+    _ALLOWED = ("/work/python-android", "/work/deps-install", "/opt/ndk", "/tmp/p4a-build")
     for a in _ALLOWED:
         if a in p: return False
+    _BAD = (
+        "/usr/include", "/usr/local/include",
+        "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib",
+        "/usr/local/lib",
+        "/opt/host-python/lib", "/opt/host-python/include", "/opt/host-python/bin",
+    )
     for b in _BAD:
         if p.startswith(b): return True
     return False
@@ -294,16 +350,18 @@ try:
                 setattr(_ext, _attr, _clean_list(getattr(_ext, _attr)))
         if hasattr(_ext, "extra_compile_args") and _ext.extra_compile_args:
             _ext.extra_compile_args = [a for a in _ext.extra_compile_args
-                                       if not any(b in a for b in _BAD)]
+                                       if not _is_bad(a.split("=")[-1] if "=" in a else a)]
         if hasattr(_ext, "extra_link_args") and _ext.extra_link_args:
             _ext.extra_link_args = [a for a in _ext.extra_link_args
-                                    if not any(b in a for b in _BAD)]
+                                    if not _is_bad(a.split("=")[-1] if "=" in a else a)]
 except (NameError, UnboundLocalError):
     pass
 
 '''
-m = re.search(r'^(\s*)setup\(', c, re.MULTILINE)
-if m:
+# Find last setup( call and inject before
+matches = list(re.finditer(r'^(\s*)setup\(', c, re.MULTILINE))
+if matches:
+    m = matches[-1]
     idx = m.start()
     indent = m.group(1)
     indented = "\n".join(
@@ -311,6 +369,7 @@ if m:
         for line in filter_code.split("\n")
     )
     c = c[:idx] + indented + c[idx:]
+
 with open("setup.py", "w") as f:
     f.write(c)
 PYEOF
@@ -323,6 +382,12 @@ PYEOF
         SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=cp313")
         ;;
 
+    zstandard)
+        echo "  → zstandard: ensure cffi installed"
+        "${HOST_PYTHON}" -c "import _cffi_backend" 2>/dev/null || \
+            "${HOST_PYTHON}" -m pip install --no-cache-dir --force-reinstall cffi
+        ;;
+
     cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
         echo "  → $PKG_NAME: Rust + PyO3"
         export PYO3_PYTHON="${HOST_PYTHON}"
@@ -331,6 +396,7 @@ PYEOF
         export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
         export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include"
         export PYO3_CONFIG_FILE="${PYO3_CONFIG}"
+        export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang"
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR} -C link-arg=-Wl,--hash-style=both"
         unset RUSTFLAGS
         ;;
@@ -370,11 +436,11 @@ case "$PKG_NAME" in
             RUST_SO=$(find . -name "_rust*.so" -o -name "*.abi3.so" | head -1)
             if [ -n "$RUST_SO" ]; then
                 PATCHED=0
-                if ! ${READELF} -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
+                if ! ${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
                     patchelf --add-needed "libpython${PYTHON_MINOR}.so" "$RUST_SO"
                     PATCHED=1
                 fi
-                if ! ${READELF} -d "$RUST_SO" | grep -qE "RPATH|RUNPATH"; then
+                if ! ${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d "$RUST_SO" | grep -qE "RPATH|RUNPATH"; then
                     patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
                     PATCHED=1
                 fi
