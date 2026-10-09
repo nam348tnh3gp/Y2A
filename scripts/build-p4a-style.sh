@@ -14,9 +14,11 @@ mkdir -p "$SRC_DIR" "${TMP_BUILD}/bin"
 
 echo "  Building: $PKG_SPEC"
 
-# Symlink python tools
+# [FIX] Symlink python3 + cython
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python3"
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python"
+[ -f "${HOST_PY_PREFIX}/bin/cython" ] && ln -sf "${HOST_PY_PREFIX}/bin/cython" "${TMP_BUILD}/bin/cython"
+[ -f "${HOST_PY_PREFIX}/bin/cython3" ] && ln -sf "${HOST_PY_PREFIX}/bin/cython3" "${TMP_BUILD}/bin/cython3"
 
 # 1. Tải source
 cd "$SRC_DIR"
@@ -40,7 +42,6 @@ fi
 TARBALL=$(find "$SRC_DIR" -maxdepth 1 \( -name "*.tar.gz" -o -name "*.tar.xz" \
     -o -name "*.tar.bz2" -o -name "*.zip" \) | head -1)
 [ -z "$TARBALL" ] && { echo "❌ No source"; exit 1; }
-
 mkdir -p "${SRC_DIR}/extracted"
 tar -xf "$TARBALL" -C "${SRC_DIR}/extracted"
 SRC_PATH=$(find "${SRC_DIR}/extracted" -maxdepth 1 -type d | tail -n +2 | head -1)
@@ -81,7 +82,7 @@ mk() {
 for n in gcc cc clang x86_64-linux-gnu-gcc aarch64-linux-gnu-gcc; do mk "$n" "${NDK_CC}"; done
 for n in g++ c++ clang++ x86_64-linux-gnu-g++ aarch64-linux-gnu-g++; do mk "$n" "${NDK_CXX}"; done
 mk ar "${NDK_AR}"
-mk ranlib "${AR}"
+mk ranlib "${RANLIB}"
 mk strip "${STRIP}"
 mk readelf "${READELF}"
 
@@ -92,6 +93,7 @@ case "$PKG_NAME" in
         ;;
 esac
 
+# [FIX] /usr/local/bin trước PATH để wrapper aarch64-linux-android-gcc tìm thấy
 if [ "$USE_SANDBOX" -eq 1 ]; then
     export PATH="${TMP_BUILD}/bin:${SANDBOX}:${TMP_BUILD}:${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:/usr/local/bin:${PATH}"
 else
@@ -105,19 +107,15 @@ export TARGET_PYTHON_EXE="${TARGET_ROOT}/bin/python${PYTHON_MINOR}"
 
 unset FC F77 F90
 
-# [FIX] Cho Rust cc-rs: set rõ CC/CFLAGS cho target aarch64-linux-android
+export CC="${NDK_CC}" CXX="${NDK_CXX}" AR="${NDK_AR}" RANLIB="${RANLIB}" STRIP="${STRIP}"
+export CPP="${NDK_CC} -E" LD="${NDK_CC}" AS="${NDK_CC}"
+
+# [FIX] Set CC/CFLAGS cho target để cc-rs dùng (cả 2 form)
 export CC_aarch64_linux_android="${NDK_CC}"
 export CXX_aarch64_linux_android="${NDK_CXX}"
 export AR_aarch64_linux_android="${NDK_AR}"
-export CC_aarch64-linux-android="${NDK_CC}"
-export CXX_aarch64-linux-android="${NDK_CXX}"
-export AR_aarch64-linux-android="${NDK_AR}"
 export CFLAGS_aarch64_linux_android="-fPIC -O2 -I${TARGET_ROOT}/include/python${PYTHON_MINOR} -I${DEPS_INSTALL}/include -Wno-implicit-function-declaration"
-export CFLAGS_aarch64-linux-android="${CFLAGS_aarch64_linux_android}"
 export LDFLAGS_aarch64_linux_android="-L${DEPS_INSTALL}/lib -L${TARGET_ROOT}/lib -Wl,--hash-style=both"
-
-export CC="${NDK_CC}" CXX="${NDK_CXX}" AR="${NDK_AR}" RANLIB="${RANLIB}" STRIP="${STRIP}"
-export CPP="${NDK_CC} -E" LD="${NDK_CC}" AS="${NDK_CC}"
 
 export LDSHARED="${NDK_CC} -shared -L${DEPS_INSTALL}/lib -L${TARGET_ROOT}/lib -Wl,--hash-style=both"
 export CCSHARED="-fPIC"
@@ -175,7 +173,6 @@ case "$BACKEND" in
     *meson*)
         case "$PKG_NAME" in
             numpy|scipy)
-                # [FIX] Native file cho build_machine python3 + cython
                 cat > "${TMP_BUILD}/native-tools.ini" <<EOF
 [binaries]
 python3 = '${HOST_PYTHON}'
@@ -243,7 +240,6 @@ import re
 with open("setup.py", "r") as f:
     c = f.read()
 
-# Filter string literals
 q1, q2 = chr(34), chr(39)
 skip = "/nonexistent/skip"
 for path in ["/usr/include", "/usr/local/include", "/usr/lib",
@@ -255,9 +251,7 @@ for path in ["/usr/include", "/usr/local/include", "/usr/lib",
 
 c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/(usr|opt/host)[^\x27\x22]*[\x27\x22]\)", "pass", c)
 
-# Inject filter AFTER module setup, BEFORE first setup() call
 filter = '''
-# ============ p4a filter ============
 import os as _os
 def _p4a_bad(p):
     p = str(p)
@@ -273,14 +267,12 @@ def _p4a_clean(l):
     if not l: return l
     return [d for d in l if not _p4a_bad(d)]
 
-# Filter module-level
 try:
     include_dirs[:] = _p4a_clean(include_dirs)
     library_dirs[:] = _p4a_clean(library_dirs)
 except (NameError, UnboundLocalError):
     pass
 
-# [FIX] Patch build_ext.finalize_options — filter mọi ext + self.library_dirs
 try:
     from setuptools.command.build_ext import build_ext as _be_cls
     _orig_be_fo = _be_cls.finalize_options
@@ -293,10 +285,8 @@ try:
     _be_cls.finalize_options = _new_be_fo
 except Exception:
     pass
-# ============ end ============
 
 '''
-# Find LAST setup( call
 matches = list(re.finditer(r'^(\s*)setup\(', c, re.MULTILINE))
 if matches:
     m = matches[-1]
@@ -314,10 +304,6 @@ PYEOF
     cffi)
         export CFFI_PY_LIMITED_API="0x030D0000"
         SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=cp313")
-        ;;
-
-    zstandard)
-        # cffi đã được sync trong entrypoint
         ;;
 esac
 
