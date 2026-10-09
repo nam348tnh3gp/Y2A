@@ -104,7 +104,9 @@ echo "  ✅ cpython/pymem.h ở ${HOST_INCLUDE_PARENT}/cpython/pymem.h"
     ln -sfn "python${PYTHON_MINOR}/internal" "${HOST_INCLUDE_PARENT}/internal" 2>/dev/null || true
 }
 
+# ════════════════════════════════════════════════════════════
 # Global sitecustomize
+# ════════════════════════════════════════════════════════════
 cat > "${HOST_PY_LIB}/sitecustomize.py" <<SITEEOF
 import os, sysconfig
 if '_PYTHON_SYSCONFIGDATA_NAME' not in os.environ:
@@ -121,22 +123,47 @@ _p = {'LIBPL': _TR+'/lib', 'LIBDIR': _TR+'/lib', 'LIBDEST': _TR+'/lib/'+_PY,
 _orig = sysconfig.get_config_var
 def _gcv(n): return _p.get(n, _orig(n))
 sysconfig.get_config_var = _gcv
+
 _s = {'stdlib': _TR+'/lib/'+_PY, 'platstdlib': _TR+'/lib/'+_PY,
       'purelib': _TR+'/lib/'+_PY+'/site-packages',
       'platlib': _TR+'/lib/'+_PY+'/site-packages',
       'include': _TR+'/include/'+_PY, 'platinclude': _TR+'/include/'+_PY,
       'scripts': _TR+'/bin', 'data': _TR}
+
+# ════════════════════════════════════════════════════════════
+# [FIX] Tôn trọng 'vars' khi caller truyền base/platbase khác TARGET_ROOT
+# (pip install --target dùng temp dir → phải delegate về sysconfig gốc,
+#  nếu không sẽ xoá nhầm chính source của pip)
+# ════════════════════════════════════════════════════════════
+def _is_target_call(vars):
+    if not vars:
+        return True
+    base = vars.get('base') or vars.get('platbase')
+    if base is None:
+        return True
+    return base.rstrip('/') == _TR.rstrip('/')
+
 _ogp = sysconfig.get_path
-def _gp(n, *a, **kw): return _s.get(n, _ogp(n, *a, **kw))
+def _gp(n, scheme='posix_prefix', vars=None, expand=True):
+    if not _is_target_call(vars):
+        return _ogp(n, scheme, vars, expand)
+    return _s.get(n, _ogp(n, scheme, vars, expand))
 sysconfig.get_path = _gp
+
 _ogps = sysconfig.get_paths
-def _gps(scheme='posix_prefix', vars=None, expand=True): return dict(_s)
+def _gps(scheme='posix_prefix', vars=None, expand=True):
+    if not _is_target_call(vars):
+        return _ogps(scheme, vars, expand)
+    return dict(_s)
 sysconfig.get_paths = _gps
+
 try:
     if hasattr(sysconfig, '_INSTALL_SCHEMES'):
-        for k in list(sysconfig._INSTALL_SCHEMES.keys()):
-            sysconfig._INSTALL_SCHEMES[k] = dict(_s)
-except Exception: pass
+        _orig_schemes = sysconfig._INSTALL_SCHEMES
+        for k in list(_orig_schemes.keys()):
+            _orig_schemes[k] = dict(_s)
+except Exception:
+    pass
 SITEEOF
 echo "  ✅ sitecustomize OK"
 
@@ -196,7 +223,6 @@ Libs.private: -lm -ldl
 Cflags: -I\${includedir}
 EOF
 
-# Copy vào tất cả default paths (Ubuntu default pkg-config search)
 for dst in \
     "${HOST_PY_PREFIX}/lib/pkgconfig" \
     "/usr/lib/x86_64-linux-gnu/pkgconfig" \
@@ -210,7 +236,7 @@ echo "  ✅ python3.pc OK (5 paths)"
 echo "  pkg-config test: $(pkg-config --modversion python3 2>&1 || echo 'not found')"
 
 # ════════════════════════════════════════════════════════════
-# [FIX] Xoá cffi khỏi TARGET_SITE — dùng rm -rf trực tiếp
+# [FIX] Cleanup cffi khỏi TARGET_SITE
 # ════════════════════════════════════════════════════════════
 echo "🔧 Cleanup cffi khỏi TARGET_SITE"
 mkdir -p "${TARGET_SITE}"
@@ -220,13 +246,25 @@ rm -rf "${TARGET_SITE}/pycparser" 2>/dev/null || true
 rm -rf "${TARGET_SITE}/pycparser-"*.dist-info 2>/dev/null || true
 rm -f  "${TARGET_SITE}/_cffi_backend"* 2>/dev/null || true
 
-# Verify
-LEFTOVER=$(ls -d "${TARGET_SITE}"/cffi* "${TARGET_SITE}"/_cffi_backend* "${TARGET_SITE}"/pycparser* 2>/dev/null | wc -l || echo 0)
-if [ "$LEFTOVER" -gt 0 ]; then
-    echo "  ⚠️  Còn $LEFTOVER leftover — force remove"
+# ════════════════════════════════════════════════════════════
+# [FIX] Verify leftover — dùng find, KHÔNG dùng ls|wc (tránh
+# lỗi "[: 0\n0: integer expression expected" do pipefail)
+# ════════════════════════════════════════════════════════════
+LEFTOVER=$(find "${TARGET_SITE}" -maxdepth 1 -mindepth 1 \
+    \( -name "cffi*" -o -name "_cffi_backend*" -o -name "pycparser*" \) \
+    2>/dev/null | wc -l)
+LEFTOVER=${LEFTOVER:-0}
+LEFTOVER=$(echo "$LEFTOVER" | tr -d '[:space:]')
+
+if [ "${LEFTOVER:-0}" -gt 0 ]; then
+    echo "  ⚠️  Còn ${LEFTOVER} leftover — force remove"
     sudo rm -rf "${TARGET_SITE}"/cffi* "${TARGET_SITE}"/_cffi_backend* "${TARGET_SITE}"/pycparser* 2>/dev/null || true
+    LEFTOVER=$(find "${TARGET_SITE}" -maxdepth 1 -mindepth 1 \
+        \( -name "cffi*" -o -name "_cffi_backend*" -o -name "pycparser*" \) \
+        2>/dev/null | wc -l)
+    LEFTOVER=$(echo "$LEFTOVER" | tr -d '[:space:]')
 fi
-echo "  ✅ TARGET_SITE cleaned (leftover=$LEFTOVER)"
+echo "  ✅ TARGET_SITE cleaned (leftover=${LEFTOVER:-0})"
 
 # Verify host cffi
 "${HOST_PYTHON}" -c "
@@ -235,7 +273,9 @@ print(f'  host cffi: {cffi.__version__}')
 print(f'  host _cffi_backend: {_cffi_backend.__version__}')
 " || echo "  ⚠️  host cffi check failed"
 
+# ════════════════════════════════════════════════════════════
 # 4. Bootstrap pip
+# ════════════════════════════════════════════════════════════
 if [ ! -d "${TARGET_SITE}/pip" ]; then
     echo "🔨 Bootstrap pip..."
     ${HOST_PYTHON} -m pip install \
