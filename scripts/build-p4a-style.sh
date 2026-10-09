@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-p4a-style.sh — build 1 package cho Android
+# build-p4a-style.sh
 set -eo pipefail
 
 PKG_SPEC="${1:-}"
@@ -8,73 +8,28 @@ PKG_NAME="${PKG_SPEC%%[<>=!~]*}"
 
 TMP_BUILD="/tmp/p4a-build-${PKG_NAME}"
 SRC_DIR="${TMP_BUILD}/src"
-PYSITE="${TMP_BUILD}/pysite"
 LOG="/tmp/p4a-${PKG_NAME}.log"
 
 rm -rf "$TMP_BUILD"
-mkdir -p "$SRC_DIR" "$PYSITE"
+mkdir -p "$SRC_DIR" "${TMP_BUILD}/bin"
 
 echo "  Building: $PKG_SPEC"
-echo "  PKG_NAME: $PKG_NAME"
 
-# ============================================================
-# 0. Patch host sysconfig cho Pillow (aggressive)
-# ============================================================
-PATCHED_SYSCONF=""
-restore_host_sysconf() {
-    if [ -n "$PATCHED_SYSCONF" ] && [ -f "${PATCHED_SYSCONF}.p4a-bak" ]; then
-        mv "${PATCHED_SYSCONF}.p4a-bak" "$PATCHED_SYSCONF"
-    fi
-}
-trap restore_host_sysconf EXIT
+# ════════════════════════════════════════════════════════════
+# [FIX] Symlink python3, python, cython vào TMP_BUILD/bin
+# để meson/setuptools find_program('python3') tìm thấy
+# ════════════════════════════════════════════════════════════
+ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python3"
+ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python"
+[ -f "${HOST_PY_PREFIX}/bin/cython" ] && ln -sf "${HOST_PY_PREFIX}/bin/cython" "${TMP_BUILD}/bin/cython"
+[ -f "${HOST_PY_PREFIX}/bin/cython3" ] && ln -sf "${HOST_PY_PREFIX}/bin/cython3" "${TMP_BUILD}/bin/cython3"
+[ -f "${HOST_PY_PREFIX}/bin/pip3" ] && ln -sf "${HOST_PY_PREFIX}/bin/pip3" "${TMP_BUILD}/bin/pip3"
+[ -f "${HOST_PY_PREFIX}/bin/pip" ] && ln -sf "${HOST_PY_PREFIX}/bin/pip" "${TMP_BUILD}/bin/pip"
 
-case "$PKG_NAME" in
-    Pillow|pillow|PIL)
-        HS=$(find "${HOST_PY_PREFIX}/lib" -name "_sysconfigdata__*.py" | head -1)
-        if [ -n "$HS" ]; then
-            cp "$HS" "${HS}.p4a-bak"
-            PATCHED_SYSCONF="$HS"
-            HS="$HS" \
-            TARGET_INC="${TARGET_ROOT}/include/python${PYTHON_MINOR}" \
-            TARGET_LIB="${TARGET_ROOT}/lib" \
-            "${HOST_PYTHON}" - <<'PYEOF'
-import os, re
-path = os.environ["HS"]
-tinc = os.environ["TARGET_INC"]
-tlib = os.environ["TARGET_LIB"]
-with open(path, "r", encoding="utf-8") as f:
-    c = f.read()
-for old, new in [
-    ('"/usr/include"', f'"{tinc}"'), ("'/usr/include'", f"'{tinc}'"),
-    ('"/usr/local/include"', f'"{tinc}"'), ("'/usr/local/include'", f"'{tinc}'"),
-    ('"/usr/lib"', f'"{tlib}"'), ("'/usr/lib'", f"'{tlib}'"),
-    ('"/usr/local/lib"', f'"{tlib}"'), ("'/usr/local/lib'", f"'{tlib}'"),
-    ('"/usr/lib/x86_64-linux-gnu"', f'"{tlib}"'), ("'/usr/lib/x86_64-linux-gnu'", f"'{tlib}'"),
-    ('"/lib"', f'"{tlib}"'), ("'/lib'", f"'{tlib}'"),
-    ('"/lib64"', f'"{tlib}"'), ("'/lib64'", f"'{tlib}'"),
-    ('"/opt/host-python/lib"', f'"{tlib}"'), ("'/opt/host-python/lib'", f"'{tlib}'"),
-    ('"/opt/host-python/include"', f'"{tinc}"'), ("'/opt/host-python/include'", f"'{tinc}'"),
-]:
-    c = c.replace(old, new)
-for pat in [r'-I/usr/local/include\s*', r'-I/usr/include\s*',
-            r'-L/usr/local/lib\s*', r'-L/usr/lib/x86_64-linux-gnu\s*',
-            r'-L/usr/lib64\s*', r'-L/usr/lib\s*', r'-L/lib\s*',
-            r'-L/opt/host-python/lib\s*']:
-    c = re.sub(pat, '', c)
-with open(path, "w", encoding="utf-8") as f:
-    f.write(c)
-PYEOF
-        fi
-        ;;
-esac
-
-# ============================================================
 # 1. Tải source
-# ============================================================
 cd "$SRC_DIR"
 if ! "${HOST_PYTHON}" -m pip download "$PKG_SPEC" \
         --no-deps --no-binary=:all: --dest="$SRC_DIR" > /tmp/dl.log 2>&1; then
-    echo "⚠️  pip download failed — thử PyPI JSON"
     PKG_BASE="${PKG_SPEC%%[<>=!~]*}"
     PYPI_JSON=$(curl -sL "https://pypi.org/pypi/${PKG_BASE}/json" 2>/dev/null || echo "{}")
     SDIST_URL=$(echo "$PYPI_JSON" | "${HOST_PYTHON}" -c "
@@ -87,13 +42,8 @@ try:
 except Exception:
     pass
 " 2>/dev/null || echo "")
-
-    if [ -z "$SDIST_URL" ]; then
-        echo "❌ Không tìm thấy sdist URL"; exit 1
-    fi
-
-    SDIST_NAME=$(basename "$SDIST_URL")
-    wget -q "$SDIST_URL" -O "${SRC_DIR}/${SDIST_NAME}" || { echo "❌ Download failed"; exit 1; }
+    [ -z "$SDIST_URL" ] && { echo "❌ Không có sdist"; exit 1; }
+    wget -q "$SDIST_URL" -O "${SRC_DIR}/$(basename "$SDIST_URL")" || exit 1
 fi
 
 TARBALL=$(find "$SRC_DIR" -maxdepth 1 \( -name "*.tar.gz" -o -name "*.tar.xz" \
@@ -106,9 +56,7 @@ SRC_PATH=$(find "${SRC_DIR}/extracted" -maxdepth 1 -type d | tail -n +2 | head -
 [ -z "$SRC_PATH" ] && SRC_PATH="${SRC_DIR}/extracted"
 echo "  Source: $SRC_PATH"
 
-# ============================================================
 # 2. Detect backend
-# ============================================================
 BACKEND=$(SRC_PATH="$SRC_PATH" "${HOST_PYTHON}" - <<'PYEOF'
 import tomllib, os
 src = os.environ.get("SRC_PATH", ".")
@@ -122,9 +70,7 @@ PYEOF
 )
 echo "  Backend: $BACKEND"
 
-# ============================================================
-# 3. Wrapper scripts
-# ============================================================
+# 3. numpy-config wrapper
 cat > "${TMP_BUILD}/numpy-config" <<NCEOF
 #!/bin/sh
 if [ "\$1" = "--version" ]; then
@@ -135,18 +81,14 @@ fi
 NCEOF
 chmod +x "${TMP_BUILD}/numpy-config"
 
-# ============================================================
 # 4. Sandbox compiler
-# ============================================================
 SANDBOX="${TMP_BUILD}/sandbox-bin"
 mkdir -p "$SANDBOX"
-
 make_wrapper() {
     local name="$1" real="$2"
     printf '#!/bin/sh\nexec "%s" "$@"\n' "$real" > "$SANDBOX/$name"
     chmod +x "$SANDBOX/$name"
 }
-
 for n in gcc cc clang x86_64-linux-gnu-gcc aarch64-linux-gnu-gcc; do
     make_wrapper "$n" "${CC}"
 done
@@ -158,7 +100,7 @@ make_wrapper ranlib "${RANLIB}"
 make_wrapper strip "${STRIP}"
 make_wrapper readelf "${READELF}"
 
-# Rust packages: không dùng sandbox (cần host cc cho build script)
+# Rust packages: không dùng sandbox
 USE_SANDBOX=1
 case "$PKG_NAME" in
     cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
@@ -166,15 +108,14 @@ case "$PKG_NAME" in
         ;;
 esac
 
+# [FIX] TMP_BUILD/bin lên đầu để python3 symlink được tìm thấy
 if [ "$USE_SANDBOX" -eq 1 ]; then
-    export PATH="${SANDBOX}:${TMP_BUILD}:${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:${PATH}"
+    export PATH="${TMP_BUILD}/bin:${SANDBOX}:${TMP_BUILD}:${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:${PATH}"
 else
-    export PATH="${TMP_BUILD}:${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:${PATH}"
+    export PATH="${TMP_BUILD}/bin:${TMP_BUILD}:${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:${PATH}"
 fi
 
-# ============================================================
 # 5. Env
-# ============================================================
 export _PYTHON_HOST_PLATFORM="${ANDROID_TAG}"
 export _PYTHON_PROJECT_BASE="${TARGET_ROOT}"
 export TARGET_PYTHON_EXE="${TARGET_ROOT}/bin/python${PYTHON_MINOR}"
@@ -183,7 +124,6 @@ unset FC F77 F90
 
 export CC CXX CPP="${CC} -E" LD="${CC}" AR AS="${CC}" RANLIB STRIP
 
-# [FIX] CCSHARED chỉ -fPIC — không hash-style (đã patch sysconfigdata)
 export LDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export CCSHARED="-fPIC"
 export BLDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
@@ -221,30 +161,7 @@ suppress_build_script_link_lines=false
 EOF
 export PYO3_CONFIG_FILE="$PYO3_CONFIG"
 
-# sitecustomize
-cat > "${PYSITE}/sitecustomize.py" <<SITEEOF
-import sysconfig
-_patches = {
-    'LIBPL': "${TARGET_ROOT}/lib",
-    'LIBDIR': "${TARGET_ROOT}/lib",
-    'LIBDEST': "${TARGET_ROOT}/lib",
-    'INCLUDEPY': "${TARGET_ROOT}/include/python${PYTHON_MINOR}",
-    'CONFINCLUDEPY': "${TARGET_ROOT}/include/python${PYTHON_MINOR}",
-    'LIBRARY': "python${PYTHON_MINOR}",
-    'LDLIBRARY': "libpython${PYTHON_MINOR}.so",
-    'BLDLIBRARY': "-lpython${PYTHON_MINOR}",
-}
-_orig = sysconfig.get_config_var
-def _gcv(name):
-    return _patches.get(name, _orig(name))
-sysconfig.get_config_var = _gcv
-SITEEOF
-
-export PYTHONPATH="${PYSITE}:${PYTHONPATH}"
-
-# ============================================================
-# 6. site.cfg cho numpy/scipy
-# ============================================================
+# 6. site.cfg
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
     cat > "$SRC_PATH/site.cfg" <<EOF
 [openblas]
@@ -255,9 +172,7 @@ runtime_library_dirs = ${DEPS_INSTALL}/lib
 EOF
 fi
 
-# ============================================================
-# 7. Setup args theo backend
-# ============================================================
+# 7. Setup args
 SETUP_ARGS=()
 PLAT_NAME_ARG=""
 
@@ -266,7 +181,7 @@ case "$BACKEND" in
         echo "  → Meson backend"
         case "$PKG_NAME" in
             numpy|scipy)
-                # [FIX] python3 cho Cython link test
+                # [FIX] Cross-file với python3 rõ ràng
                 cat > "${TMP_BUILD}/android-cross.ini" <<EOF
 [binaries]
 c = '${CC}'
@@ -275,7 +190,7 @@ ar = '${AR}'
 strip = '${STRIP}'
 ranlib = '${RANLIB}'
 python3 = '${HOST_PYTHON}'
-cython = '${HOST_PY_PREFIX}/bin/cython'
+cython = '${TMP_BUILD}/bin/cython'
 exe_wrapper = '/bin/true'
 
 [host_machine]
@@ -288,17 +203,8 @@ endian = 'little'
 longdouble_format = 'IEEE_QUAD_LE'
 needs_exe_wrapper = true
 EOF
-                cat > "${TMP_BUILD}/meson-native.ini" <<EOF
-[binaries]
-c = '/usr/bin/gcc'
-cpp = '/usr/bin/g++'
-ar = '/usr/bin/ar'
-strip = '/usr/bin/strip'
-python3 = '${HOST_PYTHON}'
-EOF
                 SETUP_ARGS=(
                     "-Csetup-args=--cross-file=${TMP_BUILD}/android-cross.ini"
-                    "-Csetup-args=--native-file=${TMP_BUILD}/meson-native.ini"
                     "-Csetup-args=-Dblas=openblas"
                     "-Csetup-args=-Dlapack=openblas"
                     "-Csetup-args=-Dallow-noblas=false"
@@ -332,12 +238,10 @@ EOF
         ;;
 esac
 
-# ============================================================
 # 8. Patch đặc biệt
-# ============================================================
 case "$PKG_NAME" in
     Pillow|pillow|PIL)
-        echo "  → Patch Pillow (aggressive filter)"
+        echo "  → Patch Pillow (aggressive, xoá host paths)"
         cd "$SRC_PATH"
         cp setup.py setup.py.bak 2>/dev/null || true
         cat > /tmp/patch_pillow.py <<'PYEOF'
@@ -345,20 +249,20 @@ import re
 with open("setup.py", "r") as f:
     c = f.read()
 
-# Replace string literal paths
+# Replace string literals cho host paths
 q1, q2 = chr(34), chr(39)
 skip = "/nonexistent/skip"
-for path in ["/usr/include", "/usr/local/include", "/usr/lib", "/usr/local/lib",
-             "/usr/lib/x86_64-linux-gnu", "/usr/lib64",
+for path in ["/usr/include", "/usr/local/include", "/usr/lib",
+             "/usr/local/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib64",
              "/opt/host-python/lib", "/opt/host-python/include",
              "/opt/host-python/bin"]:
     c = c.replace(q1+path+q1, q1+skip+q1)
     c = c.replace(q2+path+q2, q2+skip+q2)
 
-# Replace _add_directory calls
+# Replace _add_directory(_, path) calls
 c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/(usr|opt/host)[^\x27\x22]*[\x27\x22]\)", "pass", c)
 
-# Aggressive filter
+# Aggressive filter trước setup()
 filter_code = '''
 import os as _os
 _ALLOWED = ("/work/python-android", "/work/deps-install", "/opt/ndk", "/tmp/p4a-build")
@@ -366,8 +270,7 @@ _BAD = (
     "/usr/include", "/usr/local/include",
     "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib",
     "/usr/local/lib",
-    "/opt/host-python/lib", "/opt/host-python/include",
-    "/opt/host-python/bin",
+    "/opt/host-python/lib", "/opt/host-python/include", "/opt/host-python/bin",
 )
 def _is_bad(p):
     p = str(p)
@@ -386,12 +289,12 @@ except (NameError, UnboundLocalError):
     pass
 try:
     for _ext in ext_modules:
-        if hasattr(_ext, "include_dirs"):
-            _ext.include_dirs = _clean_list(_ext.include_dirs)
-        if hasattr(_ext, "library_dirs"):
-            _ext.library_dirs = _clean_list(_ext.library_dirs)
-        if hasattr(_ext, "runtime_library_dirs"):
-            _ext.runtime_library_dirs = _clean_list(_ext.runtime_library_dirs)
+        for _attr in ("include_dirs", "library_dirs", "runtime_library_dirs"):
+            if hasattr(_ext, _attr):
+                setattr(_ext, _attr, _clean_list(getattr(_ext, _attr)))
+        if hasattr(_ext, "extra_compile_args") and _ext.extra_compile_args:
+            _ext.extra_compile_args = [a for a in _ext.extra_compile_args
+                                       if not any(b in a for b in _BAD)]
         if hasattr(_ext, "extra_link_args") and _ext.extra_link_args:
             _ext.extra_link_args = [a for a in _ext.extra_link_args
                                     if not any(b in a for b in _BAD)]
@@ -433,9 +336,7 @@ PYEOF
         ;;
 esac
 
-# ============================================================
 # 9. Build
-# ============================================================
 cd "$SRC_PATH"
 
 BUILD_CMD=("${HOST_PYTHON}" -m pip wheel . --no-deps --no-build-isolation --wheel-dir "${WHEELS_OUT}")
@@ -452,9 +353,7 @@ else
     exit $RC
 fi
 
-# ============================================================
-# 10. Patch cryptography NEEDED libpython
-# ============================================================
+# 10. Patch cryptography
 case "$PKG_NAME" in
     cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
         pkg_under=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
