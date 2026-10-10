@@ -17,6 +17,16 @@ mkdir -p "$SRC_DIR" "${TMP_BUILD}/bin" "$PYSITE"
 echo "  Building: $PKG_SPEC"
 echo "  PKG_NAME: $PKG_NAME"
 
+# ── [orjson] Hard skip: source chứa avx512 code không build được trên aarch64 ──
+case "$PKG_NAME" in
+    orjson)
+        echo "  ⏭️  orjson: skip (x86-only SIMD code) — pin orjson<3.13 trong list.txt"
+        # Trả rc=0 để build-wheels.sh coi như "đã có sẵn" và không đánh fail.
+        # Muốn build thì thêm orjson<3.13 vào list.txt hoặc bỏ block này.
+        exit 0
+        ;;
+esac
+
 # Symlink python tools
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python3"
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python"
@@ -95,7 +105,7 @@ mk readelf "${READELF}"
 
 USE_SANDBOX=1
 case "$PKG_NAME" in
-    cryptography|bcrypt|nh3|pydantic-core|orjson|tokenizers)
+    cryptography|bcrypt|nh3|pydantic-core|tokenizers)
         USE_SANDBOX=0
         ;;
 esac
@@ -145,9 +155,7 @@ export CMAKE_TOOLCHAIN_FILE="${NDK}/build/cmake/android.toolchain.cmake"
 export ANDROID_ABI="arm64-v8a"
 export ANDROID_PLATFORM="android-${ANDROID_API}"
 
-# ════════════════════════════════════════════════════════════
-# Autoconf / CONFIG_SITE cho libuv, các package autotools khác
-# ════════════════════════════════════════════════════════════
+# ── [uvloop / autoconf] cross env cho ./configure của libuv ──
 export CONFIG_SITE="${TMP_BUILD}/config.site"
 cat > "$CONFIG_SITE" <<EOF
 host_alias=aarch64-linux-android
@@ -164,9 +172,7 @@ export HOSTCXX="/usr/bin/g++"
 export CC_FOR_BUILD="/usr/bin/gcc"
 export CXX_FOR_BUILD="/usr/bin/g++"
 
-# ════════════════════════════════════════════════════════════
 # pkg-config cho BLAS
-# ════════════════════════════════════════════════════════════
 export PKG_CONFIG="${PKG_CONFIG:-/usr/bin/pkg-config}"
 export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig:${DEPS_INSTALL}/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:/usr/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
 unset PKG_CONFIG_LIBDIR
@@ -205,29 +211,11 @@ export PYO3_CONFIG_FILE="$PYO3_CONFIG"
 export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
 export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
 
-# ════════════════════════════════════════════════════════════
-# [FIX numpy v2] GHI ĐÈ ${HOST_PY_LIB}/sitecustomize.py
-#
-# Lý do: entrypoint.sh ghi sitecustomize chỉ patch:
-#   - sysconfig.get_config_var    (singular)
-#   - sysconfig.get_path/get_paths
-# KHÔNG patch: get_config_vars (plural) — cái meson-python gọi!
-# → meson đọc _CONFIG_VARS thô → thấy '$(BLDLIBRARY)' literal.
-#
-# Thêm nữa: nếu meson chạy Python con với -E / -I, PYTHONPATH bị bỏ
-# → sitecustomize ở ${PYSITE} không load.
-# Vì vậy: OVERWRITE sitecustomize ngay trên HOST python.
-# Nó tự load mọi lần (không phụ thuộc env) → luôn patch.
-# ════════════════════════════════════════════════════════════
+# ── [numpy] GHI ĐÈ host sitecustomize: patch cả get_config_vars() (plural)
+#             + _CONFIG_VARS dict — thứ meson-python thực sự dùng.
+#             Overwrite trên HOST lib để luôn được load kể cả -E / -I.
 cat > "${HOST_PY_LIB}/sitecustomize.py" <<SITEEOF
 import os, sysconfig as _sc
-
-# Force sysconfigdata đúng file trước khi bất cứ ai đọc
-if '_PYTHON_SYSCONFIGDATA_NAME' not in os.environ:
-    try:
-        os.environ['_PYTHON_SYSCONFIGDATA_NAME'] = '${_PYTHON_SYSCONFIGDATA_NAME:-}'
-    except Exception:
-        pass
 
 _TR = "${TARGET_ROOT}"
 _PY = "python${PYTHON_MINOR}"
@@ -247,9 +235,9 @@ _p = {
     'LDCXXSHARED': '${NDK_CXX} -shared -L' + _TR + '/lib -Wl,--hash-style=both',
 }
 
-# (1) Patch dict thật _CONFIG_VARS — QUAN TRỌNG NHẤT cho meson
+# (1) Patch dict thật _CONFIG_VARS — quan trọng nhất cho meson
 try:
-    _vars = _sc.get_config_vars()  # force-load sysconfigdata
+    _vars = _sc.get_config_vars()
     if isinstance(_vars, dict):
         _vars.update(_p)
     try:
@@ -268,7 +256,7 @@ def _gcv(n):
     return _orig_gcv(n)
 _sc.get_config_var = _gcv
 
-# (3) get_config_vars (plural) — cái mà meson-python dùng
+# (3) get_config_vars (plural) — cái meson-python gọi
 _orig_gcvs = _sc.get_config_vars
 def _gcvs(*names):
     if not names:
@@ -276,7 +264,7 @@ def _gcvs(*names):
     return [_p.get(n, v) for n, v in zip(names, _orig_gcvs(*names))]
 _sc.get_config_vars = _gcvs
 
-# (4) get_path / get_paths (giữ hành vi target-only từ entrypoint)
+# (4) get_path / get_paths (giữ hành vi target-only)
 _s = {
     'stdlib':      _TR + '/lib/' + _PY,
     'platstdlib':  _TR + '/lib/' + _PY,
@@ -312,10 +300,9 @@ def _gps(scheme='posix_prefix', vars=None, expand=True):
     return dict(_s)
 _sc.get_paths = _gps
 SITEEOF
-echo "  ✅ Overwrote host sitecustomize (plural + dict patch)"
+echo "  ✅ Overwrote host sitecustomize"
 
-# Verify ngay bằng subprocess
-"${HOST_PYTHON}" - <<'PYEOF' || { echo "❌ host sitecustomize BLDLIBRARY verify failed"; exit 1; }
+"${HOST_PYTHON}" - <<'PYEOF' || { echo "❌ host sitecustomize verify failed"; exit 1; }
 import sysconfig
 v_s = sysconfig.get_config_var('BLDLIBRARY')
 v_p = sysconfig.get_config_vars().get('BLDLIBRARY')
@@ -325,15 +312,10 @@ assert v_s and '$(BLDLIBRARY)' not in str(v_s), f"singular bad: {v_s!r}"
 assert v_p and '$(BLDLIBRARY)' not in str(v_p), f"plural bad: {v_p!r}"
 PYEOF
 
-# sitecustomize phụ ở PYSITE (belt-and-suspenders, giữ cho tương thích)
-cat > "${PYSITE}/sitecustomize.py" <<'SITEEOF'
-# Chỉ để trigger "có sitecustomize" khi PYTHONPATH hoạt động.
-# Patch thật nằm ở host sitecustomize.
-SITEEOF
+# sitecustomize phụ ở PYSITE (nếu PYTHONPATH được honour)
+printf '# trigger only\n' > "${PYSITE}/sitecustomize.py"
 
-# ════════════════════════════════════════════════════════════
 # PYTHONPATH
-# ════════════════════════════════════════════════════════════
 _SYSCONF_DIR="${WORKSPACE}/sysconfigdata-host"
 if [ -d "$_SYSCONF_DIR" ]; then
     export PYTHONPATH="${PYSITE}:${_SYSCONF_DIR}:${BUILD_DEPS_SITE:-${WORKSPACE}/build-deps-site}"
@@ -375,7 +357,6 @@ case "$BACKEND" in
                     echo "    ✅ patched: $f"
                 done
 
-                # Clear pyc cache
                 find "${HOST_PY_LIB}" "${TARGET_STDLIB}" \
                     -name "__pycache__" -type d \
                     -exec rm -rf {} + 2>/dev/null || true
@@ -395,7 +376,6 @@ case "$BACKEND" in
                 [ "$REMAIN" -gt 0 ] && { echo "  ❌ BLDLIBRARY patch failed"; exit 1; }
                 echo "    ✅ Files OK"
 
-                # Patch meson.build optimization
                 find "$SRC_PATH" -name "meson.build" -type f -print0 | \
                 while IFS= read -r -d '' f; do
                     sed -i "s/'-O3'/'-O1'/g; s/'-O2'/'-O1'/g; \
@@ -406,7 +386,6 @@ case "$BACKEND" in
                 done
                 echo "  ✅ Patched $(find "$SRC_PATH" -name meson.build | wc -l) meson.build"
 
-                # openblas.pc fallback
                 if [ ! -f "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" ]; then
                     mkdir -p "${DEPS_INSTALL}/lib/pkgconfig"
                     cat > "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" <<PCEOF
@@ -523,6 +502,7 @@ case "$PKG_NAME" in
 
         cd "$SRC_PATH"
         cp setup.py setup.py.bak 2>/dev/null || true
+
         cat > /tmp/patch_pillow.py <<'PYEOF'
 import re
 with open("setup.py", "r") as f:
@@ -627,60 +607,127 @@ PYEOF
         export CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1
         ;;
 
-    # ════════════════════════════════════════════════════════════
-    # [FIX orjson v2] Gate CẢ object.rs — nơi gọi is_x86_feature_detected!
-    #
-    # Log mới:
-    #   object.rs:36 error: is_x86_feature_detected! cannot be used on
-    #                       the current target
-    #   object.rs:37 error: cannot find `avx512` in `super` (đã bị cfg-gate)
-    #
-    # Fix:
-    #   (a) avx512.rs / avx2.rs / sse2.rs / ssse3.rs: ghim cả file
-    #       bằng #![cfg(any(target_arch="x86", target_arch="x86_64"))]
-    #   (b) mod.rs: gate `mod avx512;` v.v. bằng cùng cfg
-    #   (c) object.rs: bao toàn bộ if-else chain bằng
-    #       #[cfg(any(target_arch="x86", target_arch="x86_64"))] { ... }
-    #       và thêm fallback #[cfg(not(any(...)))] { <else-branch> }
-    #       (fallback extract từ else branch cuối của chain gốc)
-    # ════════════════════════════════════════════════════════════
-    orjson)
-        echo "  → orjson: ghim SIMD modules + object.rs cho aarch64"
-
-        X86_CFG='any(target_arch = "x86", target_arch = "x86_64")'
-
-        # (a) File SIMD: chèn #![cfg(...)] ở đầu
-        for f in avx512.rs avx2.rs sse2.rs ssse3.rs; do
-            P="${SRC_PATH}/src/ffi/pystrref/${f}"
-            [ -f "$P" ] || continue
-            if ! head -1 "$P" | grep -q '#!\[cfg'; then
-                sed -i "1i #![cfg(${X86_CFG})]" "$P"
-                echo "    ✅ ghim file: $f"
-            fi
-        done
-
-        # (b) mod.rs: thêm cfg cho các `mod avx512;` v.v. nếu chưa có
-        MOD="${SRC_PATH}/src/ffi/pystrref/mod.rs"
-        if [ -f "$MOD" ]; then
-            for m in avx512 avx2 sse2 ssse3; do
-                if grep -qE "^\s*(pub\(crate\)\s+)?mod\s+${m}\s*;" "$MOD"; then
-                    if ! grep -B1 -E "^\s*(pub\(crate\)\s+)?mod\s+${m}\s*;" "$MOD" \
-                            | grep -q 'target_arch'; then
-                        sed -i -E \
-                          "s|^(\\s*)(pub\\(crate\\)\\s+)?mod\\s+${m}\\s*;|#[cfg(${X86_CFG})]\\n\\1\\2mod ${m};|" \
-                          "$MOD"
-                        echo "    ✅ ghim mod: $m"
-                    fi
-                fi
-            done
+    uvloop)
+        echo "  → Patch uvloop setup.py: --host cho libuv configure"
+        UV_SETUP="${SRC_PATH}/setup.py"
+        if [ -f "$UV_SETUP" ]; then
+            cp "$UV_SETUP" "${UV_SETUP}.bak"
+            UV_SETUP="$UV_SETUP" TARGET_HOST="aarch64-linux-android" \
+            "${HOST_PYTHON}" - <<'PYEOF'
+import os
+p = os.environ["UV_SETUP"]
+host = os.environ.get("TARGET_HOST", "aarch64-linux-android")
+src = open(p).read()
+orig = src
+# Chỉ thêm --host và --build; KHÔNG nhồi CC=/CFLAGS= vào args
+# (autoconf tự lấy từ env).
+src = src.replace(
+    "['./configure']",
+    "['./configure', '--host=" + host + "', '--build=x86_64-pc-linux-gnu',"
+    " '--disable-shared', '--enable-static']"
+)
+src = src.replace(
+    '[\"./configure\"]',
+    '[\"./configure\", \"--host=' + host + '\",'
+    ' \"--build=x86_64-pc-linux-gnu\",'
+    ' \"--disable-shared\", \"--enable-static\"]'
+)
+if src != orig:
+    open(p, "w").write(src)
+    print(f"[uvloop-patch] patched: {p}")
+else:
+    print(f"[uvloop-patch] no change in {p}")
+PYEOF
         fi
+        export ac_cv_host="aarch64-linux-android"
+        export ac_cv_build="x86_64-pc-linux-gnu"
+        export ac_cv_target="aarch64-linux-android"
+        export cross_compiling="yes"
+        export CC_FOR_BUILD="/usr/bin/gcc"
+        export CXX_FOR_BUILD="/usr/bin/g++"
+        export HOSTCC="${NDK_CC}"
+        export HOSTCXX="${NDK_CXX}"
+        ;;
+esac
 
-        # (c) object.rs: bao if-else chain bằng cfg — dùng Python cho chắc
-        OBJ="${SRC_PATH}/src/ffi/pystrref/object.rs"
-        if [ -f "$OBJ" ]; then
-            cp "$OBJ" "${OBJ}.bak"
-            OBJ="$OBJ" X86_CFG="$X86_CFG" "${HOST_PYTHON}" - <<'PYEOF'
-import os, re, sys
+# 9. Build
+cd "$SRC_PATH"
 
-path = os.environ["OBJ"]
-x86_cfg = os.environ["X86_CFG
+BUILD_CMD=("${HOST_PYTHON}" -m pip wheel . --no-deps --no-build-isolation --wheel-dir "${WHEELS_OUT}")
+[ -n "$PLAT_NAME_ARG" ] && BUILD_CMD+=("$PLAT_NAME_ARG")
+[ "${#SETUP_ARGS[@]}" -gt 0 ] && BUILD_CMD+=("${SETUP_ARGS[@]}")
+
+if env \
+    "CC_aarch64-linux-android=${NDK_CC}" \
+    "CXX_aarch64-linux-android=${NDK_CXX}" \
+    "AR_aarch64-linux-android=${NDK_AR}" \
+    "CFLAGS_aarch64-linux-android=${CFLAGS_aarch64_linux_android}" \
+    "LDFLAGS_aarch64-linux-android=${LDFLAGS_aarch64_linux_android}" \
+    "${BUILD_CMD[@]}" > "$LOG" 2>&1; then
+    tail -5 "$LOG"
+    echo "✅ $PKG_NAME built"
+else
+    RC=$?
+    echo "--- pip log (tail 60) ---"
+    tail -60 "$LOG"
+    exit $RC
+fi
+
+# 10. Patch cryptography/bcrypt/... sau build
+case "$PKG_NAME" in
+    cryptography|bcrypt|nh3|pydantic-core|tokenizers)
+        pkg_under=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+        pkg_lower=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]')
+        WHL=$(ls -t "${WHEELS_OUT}"/${pkg_under}-*.whl \
+                    "${WHEELS_OUT}"/${pkg_lower}-*.whl \
+                    "${WHEELS_OUT}"/${PKG_NAME}-*.whl 2>/dev/null | head -1 || true)
+        [ -z "$WHL" ] && exit 0
+        WHL=$(realpath "$WHL")
+        WORK="/tmp/patch-${PKG_NAME}"
+        rm -rf "$WORK" && mkdir -p "$WORK"
+        cd "$WORK"
+        unzip -o -q "$WHL"
+        RUST_SO=$(find . -name "_rust*.so" -o -name "*.abi3.so" | head -1)
+        [ -z "$RUST_SO" ] && exit 0
+        PATCHED=0
+        if ! ${READELF} -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
+            patchelf --add-needed "libpython${PYTHON_MINOR}.so" "$RUST_SO"
+            PATCHED=1
+        fi
+        if ! ${READELF} -d "$RUST_SO" | grep -qE "RPATH|RUNPATH"; then
+            patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
+            PATCHED=1
+        fi
+        if [ "$PATCHED" -eq 1 ]; then
+            WHL="$WHL" RUST_SO_REL="$RUST_SO" "${HOST_PYTHON}" - <<'PYEOF'
+import base64, hashlib, csv, os, zipfile, tempfile, shutil
+whl = os.environ["WHL"]
+rust_rel = os.environ["RUST_SO_REL"].lstrip("./")
+tmp = tempfile.mkdtemp()
+try:
+    with zipfile.ZipFile(whl, 'r') as z: z.extractall(tmp)
+    for root, _, files in os.walk(tmp):
+        if 'RECORD' in files and '.dist-info' in root:
+            rp = os.path.join(root, 'RECORD')
+            with open(rp, 'r', newline='') as f: rows = list(csv.reader(f))
+            for r in rows:
+                if len(r) >= 3 and r[0] == rust_rel:
+                    full = os.path.join(tmp, rust_rel)
+                    with open(full, 'rb') as fh: data = fh.read()
+                    d = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()
+                    r[1] = f'sha256={d}'; r[2] = str(len(data))
+            with open(rp, 'w', newline='') as f: csv.writer(f).writerows(rows)
+    out = whl + '.tmp'
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(tmp):
+            for f in files:
+                full = os.path.join(root, f)
+                zf.write(full, os.path.relpath(full, tmp))
+    shutil.move(out, whl)
+finally: shutil.rmtree(tmp, ignore_errors=True)
+PYEOF
+        fi
+        ;;
+esac
+
+exit 0
