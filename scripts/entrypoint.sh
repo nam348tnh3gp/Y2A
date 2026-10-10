@@ -400,6 +400,8 @@ BUILD_DEPS=(
     "expandvars>=0.12"
     "tomli>=2.0"
     "pkgconfig>=1.5"
+    "lief>=0.15"
+    "patchelf>=0.18"
 )
 
 if ! ${HOST_PYTHON} -m pip install \
@@ -429,7 +431,8 @@ for spec in \
     "setuptools-rust:setuptools_rust" \
     "expandvars:expandvars" \
     "tomli:tomli" \
-    "pkgconfig:pkgconfig"; do
+    "pkgconfig:pkgconfig" \
+    "lief:lief"; do
     pkg_name="${spec%%:*}"
     mod_name="${spec##*:}"
     if PYTHONPATH="${BUILD_DEPS_SITE}" ${HOST_PYTHON} -c "import ${mod_name}" 2>/dev/null; then
