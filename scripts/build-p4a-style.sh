@@ -224,6 +224,15 @@ pkg-config = '/usr/bin/pkg-config'
 [properties]
 pkg_config_path = '/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:/work/deps-install/lib/pkgconfig'
 EOF
+                # ════════════════════════════════════════════════════════════
+                # [FIX ICE clang 14.0.7 / NDK r25c]
+                # Bug: clang crash (exit code 70) khi compile
+                #      lowlevel_strided_loops.c cho aarch64 với -O2/-O3.
+                # Ref: android/ndk#1991, numpy/numpy#25578.
+                # Giải pháp: hạ -O1 + tắt vectorize/SLP cho NumPy/SciPy.
+                # Ảnh hưởng: CHỈ NumPy/SciPy. Các lib khác KHÔNG đụng vì
+                # cross-file này nằm riêng trong ${TMP_BUILD} của từng pkg.
+                # ════════════════════════════════════════════════════════════
                 cat > "${TMP_BUILD}/android-cross.ini" <<EOF
 [binaries]
 c = '${NDK_CC}'
@@ -244,6 +253,10 @@ endian = 'little'
 [properties]
 longdouble_format = 'IEEE_QUAD_LE'
 needs_exe_wrapper = true
+
+[built-in options]
+c_args   = ['-O1', '-fno-vectorize', '-fno-slp-vectorize']
+cpp_args = ['-O1', '-fno-vectorize', '-fno-slp-vectorize']
 EOF
                 SETUP_ARGS=(
                     "-Csetup-args=--cross-file=${TMP_BUILD}/android-cross.ini"
@@ -251,7 +264,7 @@ EOF
                     "-Csetup-args=-Dblas=openblas"
                     "-Csetup-args=-Dlapack=openblas"
                     "-Csetup-args=-Dallow-noblas=false"
-                    "-Csetup-args=-Dbuildtype=release"
+                    "-Csetup-args=-Dbuildtype=plain"
                 )
                 ;;
             *)
