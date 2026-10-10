@@ -265,7 +265,6 @@ assert p_tmp != p_default,         "delegation still returns TARGET_SITE"
 print("  ✅ sitecustomize sanity OK")
 PYEOF
 
-# Setup native tools
 echo "🔧 Setup native tools"
 sudo mkdir -p /usr/local/bin
 for bindir in /usr/local/bin /usr/bin; do
@@ -433,22 +432,32 @@ done
 [ "$FAIL" -eq 1 ] && { echo "❌ Some build-time deps missing"; exit 1; }
 echo "  ✅ All build-time deps OK"
 
-# 6. Package list
+# ════════════════════════════════════════════════════════════
+# 6. Package list — [FIX Invalid range end]
+# ════════════════════════════════════════════════════════════
 if [ -n "${INPUT_PACKAGES}" ]; then LIST="${INPUT_PACKAGES}"
 else LIST=$(grep -v '^#' wheels/list.txt | grep -v '^$' | tr '\n' ' '); fi
+
 CLEAN=""
 for p in $LIST; do
-    echo "$p" | grep -qE '^[a-zA-Z][a-zA-Z0-9_.\-=<>!~]*$' && CLEAN="$CLEAN $p"
+    [ -z "$p" ] && continue
+    if printf '%s' "$p" | LC_ALL=C grep -qE '^[a-zA-Z][a-zA-Z0-9_.=<>!~,-]*$'; then
+        CLEAN="$CLEAN $p"
+    else
+        echo "  ⚠️  Skip invalid pkg spec: $p"
+    fi
 done
+
 CLEAN=$(echo "$CLEAN" | xargs)
 export PKGLIST="${CLEAN}"
 echo "📦 Packages: ${PKGLIST}"
 
-# Debug: verify orjson pin
-echo "🔍 Verify orjson pin:"
-echo "$PKGLIST" | tr ' ' '\n' | grep -E "orjson|uvloop" || echo "  (không có orjson/uvloop)"
+echo "🔍 Verify pin/comment:"
+echo "$PKGLIST" | tr ' ' '\n' | grep -E "orjson|uvloop" 2>/dev/null || echo "  (không có orjson/uvloop)"
 
+# ════════════════════════════════════════════════════════════
 # 7. Build
+# ════════════════════════════════════════════════════════════
 bash scripts/build-wheels.sh || true
 
 WHEEL_COUNT=$(ls "${WHEELS_OUT}"/*.whl 2>/dev/null | wc -l)
