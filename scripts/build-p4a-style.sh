@@ -156,6 +156,27 @@ export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig:${DEPS_INSTALL}/share/pkgc
 unset PKG_CONFIG_LIBDIR
 unset PKG_CONFIG_SYSROOT_DIR
 
+# ════════════════════════════════════════════════════════════
+# [FIX NumPy ICE clang 14.0.7 / NDK r25c]
+# Bug: clang crash (exit code 70) khi compile lowlevel_strided_loops.c
+#      cho aarch64 với -O2/-O3.
+# Ref: android/ndk#1991, numpy/numpy#25578.
+#
+# Tại sao dùng CFLAGS/CXXFLAGS env thay vì chỉ [built-in options]?
+#   NumPy meson.build gọi add_project_arguments() với -O2/-O3 cho
+#   từng target → flag trong [built-in options] bị override.
+#   CFLAGS/CXXFLAGS env được Meson append SAU tất cả → luôn thắng.
+#
+# Ảnh hưởng: CHỈ NumPy/SciPy vì build trong process riêng.
+# ════════════════════════════════════════════════════════════
+case "$PKG_NAME" in
+    numpy|scipy)
+        export CFLAGS="-O1 -fno-vectorize -fno-slp-vectorize"
+        export CXXFLAGS="-O1 -fno-vectorize -fno-slp-vectorize"
+        echo "  → NumPy/SciPy: CFLAGS=$CFLAGS"
+        ;;
+esac
+
 export NPY_DISABLE_SVML=1
 export NPY_USE_BLAS_ILP64=0
 export NPY_BLAS_LIBS="-lopenblas"
@@ -281,9 +302,12 @@ EOF
                 # Bug: clang crash (exit code 70) khi compile
                 #      lowlevel_strided_loops.c cho aarch64 với -O2/-O3.
                 # Ref: android/ndk#1991, numpy/numpy#25578.
-                # Giải pháp: hạ -O1 + tắt vectorize/SLP cho NumPy/SciPy.
-                # Ảnh hưởng: CHỈ NumPy/SciPy. Các lib khác KHÔNG đụng vì
-                # cross-file này nằm riêng trong ${TMP_BUILD} của từng pkg.
+                #
+                # LƯU Ý: [built-in options] c_args KHÔNG đủ — NumPy
+                # meson.build gọi add_project_arguments() override
+                # per-target. Flag -O1 đảm bảo đến compiler bằng cách
+                # export CFLAGS/CXXFLAGS env ở section 5 (Meson append
+                # các env này SAU tất cả → luôn thắng).
                 #
                 # [FIX BLAS] pkg-config + pkg_config_path bổ sung:
                 #   - pkg-config = '/usr/bin/pkg-config' trong [binaries]
@@ -358,64 +382,159 @@ esac
 case "$PKG_NAME" in
     Pillow|pillow|PIL)
         echo "  → Patch Pillow"
+
+        # ════════════════════════════════════════════════════════
+        # [FIX Pillow link HOST libs] Ép Pillow dùng cross-compiled
+        # libs qua env vars. Pillow 12.x đọc các biến này trước khi
+        # fallback về hardcoded /usr/include, /usr/lib.
+        #
+        # Triệu chứng gốc: link command chứa
+        #   -I/usr/include/freetype2
+        #   -L/usr/lib/x86_64-linux-gnu -L/usr/lib
+        #   -lfreetype (không tìm thấy aarch64 libfreetype)
+        # ════════════════════════════════════════════════════════
+        export FREETYPE_ROOT="${DEPS_INSTALL}"
+        export ZLIB_ROOT="${DEPS_INSTALL}"
+        export JPEG_ROOT="${DEPS_INSTALL}"
+        export TIFF_ROOT="${DEPS_INSTALL}"
+        export LCMS_ROOT="${DEPS_INSTALL}"
+        export OPENJPEG_ROOT="${DEPS_INSTALL}"
+        export LIBIMAGEQUANT_ROOT="${DEPS_INSTALL}"
+        export WEBP_ROOT="${DEPS_INSTALL}"
+        export XCB_ROOT="/nonexistent/skip"
+
+        # Verify libfreetype.so cross-compiled tồn tại
+        if [ ! -f "${DEPS_INSTALL}/lib/libfreetype.so" ] && \
+           [ ! -f "${DEPS_INSTALL}/lib/libfreetype.a" ]; then
+            echo "  ❌ libfreetype cross-compiled KHÔNG tồn tại"
+            echo "     Expected: ${DEPS_INSTALL}/lib/libfreetype.{so,a}"
+            ls -la "${DEPS_INSTALL}/lib/" 2>/dev/null | grep -iE "freetype|libz\.|jpeg|png" | head
+            exit 1
+        fi
+        echo "  ✅ freetype: $(ls ${DEPS_INSTALL}/lib/libfreetype.so* 2>/dev/null | head -1)"
+
         cd "$SRC_PATH"
         cp setup.py setup.py.bak 2>/dev/null || true
+
         cat > /tmp/patch_pillow.py <<'PYEOF'
 import re
 with open("setup.py", "r") as f:
     c = f.read()
+
 q1, q2 = chr(34), chr(39)
 skip = "/nonexistent/skip"
+
+# ── Tầng 1: đổi hardcode path trong setup.py thành skip ──
 for path in ["/usr/include", "/usr/local/include", "/usr/lib",
              "/usr/local/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib64",
+             "/usr/include/freetype2", "/usr/include/libpng16",
              "/opt/host-python/lib", "/opt/host-python/include",
              "/opt/host-python/bin"]:
     c = c.replace(q1+path+q1, q1+skip+q1)
     c = c.replace(q2+path+q2, q2+skip+q2)
-c = re.sub(r"_add_directory\([^,]+,\s*[\x27\x22]/(usr|opt/host)[^\x27\x22]*[\x27\x22]\)", "pass", c)
-filter = '''
+
+# Đổi _add_directory(..., "/usr/...") thành pass
+c = re.sub(
+    r"_add_directory\([^,]+,\s*[\x27\x22]/(usr|opt/host)[^\x27\x22]*[\x27\x22]\)",
+    "pass", c)
+
+# ── Tầng 2: inject filter mạnh tay TRƯỚC setup() ──
+filter_code = '''
 import os as _os
+
+# [FIX Pillow HOST libs] Lọc bỏ mọi path host khỏi include_dirs,
+# library_dirs, rpath. Giữ lại /work/python-android và /work/deps-install.
+_ALLOWED_PREFIXES = (
+    "/work/python-android",
+    "/work/deps-install",
+    "/tmp/p4a-build",
+    "/opt/ndk",
+)
+_BAD_PREFIXES = (
+    "/usr/include",
+    "/usr/local/include",
+    "/usr/lib",
+    "/usr/local/lib",
+    "/usr/lib64",
+    "/usr/lib/x86_64-linux-gnu",
+    "/opt/host-python",
+)
+
 def _p4a_bad(p):
     p = str(p)
-    for a in ("/work/python-android", "/work/deps-install", "/opt/ndk", "/tmp/p4a-build"):
-        if a in p: return False
-    for b in ("/usr/include", "/usr/local/include",
-              "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib",
-              "/usr/local/lib", "/opt/host-python/lib",
-              "/opt/host-python/include", "/opt/host-python/bin"):
-        if p.startswith(b): return True
+    for a in _ALLOWED_PREFIXES:
+        if p.startswith(a):
+            return False
+    for b in _BAD_PREFIXES:
+        if p.startswith(b):
+            return True
     return False
-def _p4a_clean(l):
-    if not l: return l
-    return [d for d in l if not _p4a_bad(d)]
-try:
-    include_dirs[:] = _p4a_clean(include_dirs)
-    library_dirs[:] = _p4a_clean(library_dirs)
-except (NameError, UnboundLocalError):
-    pass
+
+def _p4a_clean(lst):
+    if not lst:
+        return lst
+    out = []
+    for d in lst:
+        if isinstance(d, str) and ("libpython" in d or "pkgconfig" in d):
+            out.append(d)
+            continue
+        if _p4a_bad(d):
+            print("[p4a-pillow] drop:", d)
+            continue
+        out.append(d)
+    return out
+
+# Patch build_ext.finalize_options
 try:
     from setuptools.command.build_ext import build_ext as _be_cls
-    _orig_be_fo = _be_cls.finalize_options
-    def _new_be_fo(self):
-        _orig_be_fo(self)
+    _orig_fo = _be_cls.finalize_options
+    def _new_fo(self):
+        _orig_fo(self)
+        # Clean sau khi finalize (bao gồm mọi path Pillow thêm trong __init__)
         self.include_dirs = _p4a_clean(self.include_dirs)
         self.library_dirs = _p4a_clean(self.library_dirs)
-        if getattr(self, 'rpath', None):
+        if getattr(self, "rpath", None):
             self.rpath = _p4a_clean(self.rpath)
-    _be_cls.finalize_options = _new_be_fo
-except Exception:
-    pass
+        # Ép thêm cross-compiled paths lên đầu
+        deps = _os.environ.get("DEPS_INSTALL", "")
+        if deps:
+            for d in (deps + "/include", deps + "/include/freetype2",
+                      deps + "/include/libpng16"):
+                if _os.path.isdir(d) and d not in self.include_dirs:
+                    self.include_dirs.insert(0, d)
+            for d in (deps + "/lib",):
+                if _os.path.isdir(d) and d not in self.library_dirs:
+                    self.library_dirs.insert(0, d)
+    _be_cls.finalize_options = _new_fo
+except Exception as e:
+    print("[p4a-pillow] WARN patch finalize_options failed:", e)
 
+# Patch thêm cho build_ext.build_extension (belt + suspenders)
+try:
+    _orig_be = _be_cls.build_extension
+    def _new_be(self, ext):
+        ext.include_dirs = _p4a_clean(ext.include_dirs)
+        ext.library_dirs = _p4a_clean(ext.library_dirs)
+        return _orig_be(self, ext)
+    _be_cls.build_extension = _new_be
+except Exception as e:
+    print("[p4a-pillow] WARN patch build_extension failed:", e)
 '''
+
+# Inject NGAY TRƯỚC setup() cuối cùng
 matches = list(re.finditer(r'^(\s*)setup\(', c, re.MULTILINE))
 if matches:
     m = matches[-1]
     idx = m.start()
     indent = m.group(1)
-    indented = "\n".join((indent+l) if l.strip() else l for l in filter.split("\n"))
+    indented = "\n".join((indent+l) if l.strip() else l
+                         for l in filter_code.split("\n"))
     c = c[:idx] + indented + c[idx:]
+
 with open("setup.py", "w") as f:
     f.write(c)
+
+print("[p4a-pillow] setup.py patched")
 PYEOF
         "${HOST_PYTHON}" /tmp/patch_pillow.py
         ;;
