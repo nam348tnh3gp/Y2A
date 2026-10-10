@@ -178,12 +178,6 @@ def _gps(scheme='posix_prefix', vars=None, expand=True):
 sysconfig.get_paths = _gps
 
 # [FIX] KHÔNG patch sysconfig._INSTALL_SCHEMES.
-#
-# Lý do: get_paths() gốc (qua _expand_vars) đọc _INSTALL_SCHEMES[scheme]
-# để substitute {base}/{platbase}. Nếu ta ghi đè bảng này bằng đường dẫn
-# tuyệt đối _s, thì _orig_gps() cũng sẽ trả về TARGET_SITE bất kể vars —
-# delegation vô hiệu. Vì vậy để nguyên _INSTALL_SCHEMES, chỉ dựa vào
-# _gp / _gps để phân biệt target-call vs delegate-call.
 SITEEOF
 echo "  ✅ sitecustomize OK"
 
@@ -282,8 +276,7 @@ rm -rf "${TARGET_SITE}/pycparser-"*.dist-info 2>/dev/null || true
 rm -f  "${TARGET_SITE}/_cffi_backend"* 2>/dev/null || true
 
 # ════════════════════════════════════════════════════════════
-# [FIX] Verify leftover — dùng find, KHÔNG dùng ls|wc (tránh
-# lỗi "[: 0\n0: integer expression expected" do pipefail)
+# [FIX] Verify leftover — dùng find, KHÔNG dùng ls|wc
 # ════════════════════════════════════════════════════════════
 LEFTOVER=$(find "${TARGET_SITE}" -maxdepth 1 -mindepth 1 \
     \( -name "cffi*" -o -name "_cffi_backend*" -o -name "pycparser*" \) \
@@ -318,6 +311,34 @@ if [ ! -d "${TARGET_SITE}/pip" ]; then
         --no-deps --no-cache-dir --only-binary=:all: \
         --upgrade pip setuptools wheel || exit 1
 fi
+
+# ════════════════════════════════════════════════════════════
+# [FIX build-time deps] Cài vào HOST_PYTHON
+#
+# build-p4a-style.sh chạy `pip wheel --no-build-isolation` → pip
+# KHÔNG tự cài build-system.requires. Backend cần có sẵn trong
+# interpreter build (HOST_PYTHON). Cài các dep thường gặp:
+#   - hatch-vcs / setuptools-scm: chardet, một số lib dùng
+#     dynamic version từ git tag
+#   - cppy: kiwisolver (C++ build helper)
+#   - meson-python: numpy, scipy backend
+#   - hatchling / flit-core: backend thuần Python
+#   - scikit-build-core: một số lib dùng CMake
+# ════════════════════════════════════════════════════════════
+echo "🔨 Install build-time deps vào HOST_PYTHON..."
+${HOST_PYTHON} -m pip install --no-cache-dir --upgrade \
+    "hatch-vcs>=0.4" \
+    "hatchling>=1.25" \
+    "setuptools-scm>=8.0" \
+    "cppy>=1.2" \
+    "meson-python>=0.16" \
+    "meson>=1.4" \
+    "ninja>=1.11" \
+    "flit-core>=3.9" \
+    "scikit-build-core>=0.10" \
+    "cmake>=3.28" \
+    || echo "  ⚠️  some build-time deps failed — continuing"
+echo "  ✅ build-time deps installed"
 
 # 5. Package list
 if [ -n "${INPUT_PACKAGES}" ]; then LIST="${INPUT_PACKAGES}"
