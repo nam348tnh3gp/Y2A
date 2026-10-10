@@ -30,6 +30,17 @@ export NDK_AR="${AR}"
 
 mkdir -p "${TARGET_ROOT}" "${DEPS_INSTALL}" "${WHEELS_OUT}" "${WHEELS_FINAL}"
 
+# ════════════════════════════════════════════════════════════
+# [NDK r27] Verify NDK version
+# ════════════════════════════════════════════════════════════
+NDK_REV=$(grep 'Pkg.Revision' "${NDK}/source.properties" 2>/dev/null | cut -d= -f2 | tr -d ' ' || echo "unknown")
+echo "📌 NDK revision: ${NDK_REV}"
+echo "📌 Clang: $(${NDK_CC} --version 2>/dev/null | head -1 || echo 'unknown')"
+case "${NDK_REV}" in
+    27.*|28.*|29.*) echo "  ✅ NDK r27+ — Clang 18+, ICE clang 14 không còn" ;;
+    *) echo "  ⚠️  NDK ${NDK_REV} — có thể gặp ICE clang 14 với NumPy" ;;
+esac
+
 # 1. Cross-compile core deps
 if [ ! -f "${DEPS_INSTALL}/.done" ]; then
     echo "🔨 Cross-compile core deps..."
@@ -115,7 +126,6 @@ if '_PYTHON_SYSCONFIGDATA_NAME' not in os.environ:
 _TR = "${TARGET_ROOT}"
 _PY = "python${PYTHON_MINOR}"
 
-# ── get_config_var patches ───────────────────────────────────
 _p = {
     'LIBPL': _TR + '/lib',
     'LIBDIR': _TR + '/lib',
@@ -137,7 +147,6 @@ def _gcv(n):
     return _orig_gcv(n)
 sysconfig.get_config_var = _gcv
 
-# ── get_path / get_paths patches ─────────────────────────────
 _s = {
     'stdlib':      _TR + '/lib/' + _PY,
     'platstdlib':  _TR + '/lib/' + _PY,
@@ -149,8 +158,6 @@ _s = {
     'data':        _TR,
 }
 
-# [FIX] Chỉ coi là "target call" khi base/platbase trùng TARGET_ROOT.
-# Ngược lại → delegate về sysconfig gốc để pip --target dùng temp dir.
 def _is_target_call(vars):
     if not vars:
         return True
@@ -176,12 +183,10 @@ def _gps(scheme='posix_prefix', vars=None, expand=True):
         return _orig_gps(scheme, vars, expand)
     return dict(_s)
 sysconfig.get_paths = _gps
-
-# [FIX] KHÔNG patch sysconfig._INSTALL_SCHEMES.
 SITEEOF
 echo "  ✅ sitecustomize OK"
 
-# ── Sanity test: delegation phải hoạt động ───────────────────
+# ── Sanity test
 "${HOST_PYTHON}" - <<'PYEOF' || { echo "❌ sitecustomize delegation broken"; exit 1; }
 import sysconfig, tempfile, os
 _expected_target = os.environ.get("TARGET_SITE", "")
@@ -275,9 +280,6 @@ rm -rf "${TARGET_SITE}/pycparser" 2>/dev/null || true
 rm -rf "${TARGET_SITE}/pycparser-"*.dist-info 2>/dev/null || true
 rm -f  "${TARGET_SITE}/_cffi_backend"* 2>/dev/null || true
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Verify leftover — dùng find, KHÔNG dùng ls|wc
-# ════════════════════════════════════════════════════════════
 LEFTOVER=$(find "${TARGET_SITE}" -maxdepth 1 -mindepth 1 \
     \( -name "cffi*" -o -name "_cffi_backend*" -o -name "pycparser*" \) \
     2>/dev/null | wc -l)
@@ -294,7 +296,6 @@ if [ "${LEFTOVER:-0}" -gt 0 ]; then
 fi
 echo "  ✅ TARGET_SITE cleaned (leftover=${LEFTOVER:-0})"
 
-# Verify host cffi
 "${HOST_PYTHON}" -c "
 import cffi, _cffi_backend
 print(f'  host cffi: {cffi.__version__}')
@@ -302,10 +303,10 @@ print(f'  host _cffi_backend: {_cffi_backend.__version__}')
 " || echo "  ⚠️  host cffi check failed"
 
 # ════════════════════════════════════════════════════════════
-# 4. Bootstrap pip
+# 4. Bootstrap pip vào TARGET_SITE
 # ════════════════════════════════════════════════════════════
 if [ ! -d "${TARGET_SITE}/pip" ]; then
-    echo "🔨 Bootstrap pip..."
+    echo "🔨 Bootstrap pip vào TARGET_SITE..."
     ${HOST_PYTHON} -m pip install \
         --target="${TARGET_SITE}" \
         --no-deps --no-cache-dir --only-binary=:all: \
@@ -313,32 +314,63 @@ if [ ! -d "${TARGET_SITE}/pip" ]; then
 fi
 
 # ════════════════════════════════════════════════════════════
-# [FIX build-time deps] Cài vào HOST_PYTHON
+# [FIX build-deps] Cài build-time deps vào thư mục RIÊNG
 #
-# build-p4a-style.sh chạy `pip wheel --no-build-isolation` → pip
-# KHÔNG tự cài build-system.requires. Backend cần có sẵn trong
-# interpreter build (HOST_PYTHON). Cài các dep thường gặp:
-#   - hatch-vcs / setuptools-scm: chardet, một số lib dùng
-#     dynamic version từ git tag
-#   - cppy: kiwisolver (C++ build helper)
-#   - meson-python: numpy, scipy backend
-#   - hatchling / flit-core: backend thuần Python
-#   - scikit-build-core: một số lib dùng CMake
+# Tại sao không cài vào HOST_PYTHON?
+#   HOST_PYTHON có sitecustomize.py override sysconfig.get_paths()
+#   → pip install mặc định nghĩ site-packages là TARGET_SITE → cài
+#   nhầm vào đó. Build subprocess với PYTHONPATH=PYSITE không thấy.
+#
+# Giải pháp: cài vào BUILD_DEPS_SITE riêng, rồi build script export
+# cả PYSITE + BUILD_DEPS_SITE vào PYTHONPATH.
 # ════════════════════════════════════════════════════════════
-echo "🔨 Install build-time deps vào HOST_PYTHON..."
-${HOST_PYTHON} -m pip install --no-cache-dir --upgrade \
-    "hatch-vcs>=0.4" \
-    "hatchling>=1.25" \
-    "setuptools-scm>=8.0" \
-    "cppy>=1.2" \
-    "meson-python>=0.16" \
-    "meson>=1.4" \
-    "ninja>=1.11" \
-    "flit-core>=3.9" \
-    "scikit-build-core>=0.10" \
-    "cmake>=3.28" \
-    || echo "  ⚠️  some build-time deps failed — continuing"
-echo "  ✅ build-time deps installed"
+export BUILD_DEPS_SITE="${WORKSPACE}/build-deps-site"
+mkdir -p "${BUILD_DEPS_SITE}"
+
+echo "🔨 Install build-time deps vào ${BUILD_DEPS_SITE}..."
+BUILD_DEPS=(
+    "hatch-vcs>=0.4"
+    "hatchling>=1.25"
+    "setuptools-scm>=8.0"
+    "cppy>=1.2"
+    "meson-python>=0.16"
+    "meson>=1.4"
+    "ninja>=1.11"
+    "flit-core>=3.9"
+    "scikit-build-core>=0.10"
+    "cmake>=3.28"
+    "packaging>=24"
+    "wheel>=0.44"
+    "pybind11>=2.12"
+    "poetry-core>=1.9"
+    "setuptools-rust>=1.9"
+    "expandvars>=0.12"
+    "tomli>=2.0"
+    "pkgconfig>=1.5"
+)
+
+if ! ${HOST_PYTHON} -m pip install \
+        --target="${BUILD_DEPS_SITE}" \
+        --no-cache-dir --no-compile --upgrade \
+        "${BUILD_DEPS[@]}" 2>&1 | tee /tmp/build-deps.log | tail -10; then
+    echo "❌ Build-time deps install FAILED"
+    cat /tmp/build-deps.log
+    exit 1
+fi
+
+# Verify từng module importable từ BUILD_DEPS_SITE
+echo "🔍 Verify build-time deps..."
+FAIL=0
+for mod in setuptools_scm cppy hatch_vcs hatchling mesonpy ninja flit_core scikit_build_core cmake packaging pybind11 poetry_core setuptools_rust expandvars tomli pkgconfig; do
+    if PYTHONPATH="${BUILD_DEPS_SITE}" ${HOST_PYTHON} -c "import $mod" 2>/dev/null; then
+        echo "  ✅ $mod"
+    else
+        echo "  ❌ $mod NOT importable"
+        FAIL=1
+    fi
+done
+[ "$FAIL" -eq 1 ] && { echo "❌ Some build-time deps missing"; exit 1; }
+echo "  ✅ All build-time deps OK"
 
 # 5. Package list
 if [ -n "${INPUT_PACKAGES}" ]; then LIST="${INPUT_PACKAGES}"
