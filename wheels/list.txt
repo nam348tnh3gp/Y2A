@@ -2,9 +2,9 @@
 # Format: tên[==version]
 # Không có version → lấy bản mới nhất
 
-# ============================================
+# ════════════════════════════════════════════════════════════
 # BATCH 1: C ext thuần (chắc pass)
-# ============================================
+# ════════════════════════════════════════════════════════════
 charset-normalizer
 MarkupSafe
 PyYAML
@@ -18,55 +18,122 @@ xxhash
 mmh3
 cython
 
-# ============================================
+# ════════════════════════════════════════════════════════════
 # BATCH 2: cần build backend thêm
-# ============================================
+# ════════════════════════════════════════════════════════════
 ujson
 Pillow
 lz4
 
-# ============================================
+# ════════════════════════════════════════════════════════════
 # BATCH 3: async HTTP
-# ============================================
+# ════════════════════════════════════════════════════════════
 multidict
 yarl
 frozenlist
 aiohttp
 aiosignal
 
-# ============================================
+# ════════════════════════════════════════════════════════════
 # BATCH 4: compression
-# ============================================
+# ════════════════════════════════════════════════════════════
 zstandard
 brotli
 
-# ============================================
-# BATCH 5: misc
-# ============================================
+# ════════════════════════════════════════════════════════════
+# BATCH 5: misc C ext
+# ════════════════════════════════════════════════════════════
 protobuf
 pyrsistent
 immutables
 greenlet
 
-# ============================================
+# ════════════════════════════════════════════════════════════
 # BATCH 6: cần native libs (đã cross-compile)
-# ============================================
+# ════════════════════════════════════════════════════════════
 lxml
 
-# ============================================
+# ════════════════════════════════════════════════════════════
 # BATCH 7: crypto (Rust + OpenSSL)
-# ============================================
+# → đi qua case cryptography|bcrypt|... trong section 8+10
+# ════════════════════════════════════════════════════════════
 cryptography
 
-# ============================================
+# ════════════════════════════════════════════════════════════
 # BATCH 8: numpy (OpenBLAS)
-# ============================================
+# → đi qua case numpy|scipy (dùng -O1, pkg-config, openblas.pc)
+# ════════════════════════════════════════════════════════════
 numpy
 
-# ============================================
-# KHÔNG build — Android không hỗ trợ
-# ============================================
-# psutil     (utmpx.h không tồn tại)
-# scipy      (cần Fortran)
-# pandas     (cần numpy + scipy)
-# matplotlib (cần numpy)
+# ════════════════════════════════════════════════════════════
+# BATCH 9: Rust / maturin bổ sung
+# → tự động đi qua case cryptography|bcrypt|nh3|pydantic-core|
+#   orjson|tokenizers (patchelf --add-needed libpython3.13.so)
+# ════════════════════════════════════════════════════════════
+bcrypt
+orjson
+pydantic-core
+nh3
+tokenizers
+
+# ════════════════════════════════════════════════════════════
+# BATCH 10: HTTP/network native
+# ════════════════════════════════════════════════════════════
+httptools
+uvloop
+websockets
+h11
+
+# ════════════════════════════════════════════════════════════
+# BATCH 11: database / serialization
+# ════════════════════════════════════════════════════════════
+apsw
+sqlalchemy
+sqlparse
+aiosqlite
+
+# ════════════════════════════════════════════════════════════
+# BATCH 12: encoding / tokenization
+# ════════════════════════════════════════════════════════════
+chardet
+cchardet
+pycparser
+
+# ════════════════════════════════════════════════════════════
+# BATCH 13: utils C/C++ ext
+# ════════════════════════════════════════════════════════════
+kiwisolver
+wrapt
+docutils
+packaging
+
+# ════════════════════════════════════════════════════════════
+# BATCH 14: extra phổ biến (optional)
+# ════════════════════════════════════════════════════════════
+xxhash
+python-dateutil
+pytz
+six
+certifi
+idna
+sniffio
+anyio
+typing-extensions
+
+# ════════════════════════════════════════════════════════════
+# KHÔNG build — Android không hỗ trợ hoặc phức tạp
+# ════════════════════════════════════════════════════════════
+# psutil        (utmpx.h không tồn tại trên Android)
+# scipy         (cần Fortran compiler)
+# pandas        (cần numpy + scipy)
+# matplotlib    (cần numpy + Qt/backend phức tạp)
+# contourpy     (cần numpy + C++ heavy)
+# scikit-learn  (cần scipy)
+# torch         (quá lớn, không support Android chính thức)
+# tensorflow    (quá lớn, build system riêng)
+# opencv-python (build system riêng, cần OpenCV)
+# pyarrow       (cần Arrow C++ libs, rất phức tạp)
+# pyzmq         (cần libzmq — có thể build được nếu thêm DEPS)
+# pyqt5/pyside6 (cần Qt — không thực tế)
+# numba         (cần LLVM, không support cross-compile)
+# llvmlite      (cần LLVM Python bindings)
