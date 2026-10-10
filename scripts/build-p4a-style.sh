@@ -137,19 +137,12 @@ export CMAKE_RANLIB="${RANLIB}"
 export CMAKE_SYSTEM_NAME="Android"
 export CMAKE_SYSTEM_PROCESSOR="aarch64"
 export CMAKE_ANDROID_API="${ANDROID_API}"
+export CMAKE_TOOLCHAIN_FILE="${NDK}/build/cmake/android.toolchain.cmake"
+export ANDROID_ABI="arm64-v8a"
+export ANDROID_PLATFORM="android-${ANDROID_API}"
 
 # ════════════════════════════════════════════════════════════
 # [FIX BLAS detection] pkg-config cho NumPy meson build
-#
-# NumPy meson KHÔNG đọc site.cfg (khác setuptools). Nó tìm BLAS
-# qua pkg-config → cần:
-#   1. pkg-config binary có trong PATH
-#   2. openblas.pc được cài ở DEPS_INSTALL/lib/pkgconfig
-#   3. PKG_CONFIG_PATH trỏ đúng DEPS_INSTALL
-#
-# Tránh 2 biến có thể làm pkg-config "tắt" khi cross-build:
-#   - PKG_CONFIG_LIBDIR: nếu set, pkg-config CHỈ tìm trong đó
-#   - PKG_CONFIG_SYSROOT_DIR: tự prepend sysroot → sai path
 # ════════════════════════════════════════════════════════════
 export PKG_CONFIG="${PKG_CONFIG:-/usr/bin/pkg-config}"
 export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig:${DEPS_INSTALL}/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:/usr/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
@@ -158,16 +151,7 @@ unset PKG_CONFIG_SYSROOT_DIR
 
 # ════════════════════════════════════════════════════════════
 # [FIX NumPy ICE clang 14.0.7 / NDK r25c]
-# Bug: clang crash (exit code 70) khi compile lowlevel_strided_loops.c
-#      cho aarch64 với -O2/-O3.
-# Ref: android/ndk#1991, numpy/numpy#25578.
-#
-# Tại sao dùng CFLAGS/CXXFLAGS env thay vì chỉ [built-in options]?
-#   NumPy meson.build gọi add_project_arguments() với -O2/-O3 cho
-#   từng target → flag trong [built-in options] bị override.
-#   CFLAGS/CXXFLAGS env được Meson append SAU tất cả → luôn thắng.
-#
-# Ảnh hưởng: CHỈ NumPy/SciPy vì build trong process riêng.
+# Export CFLAGS/CXXFLAGS + patch meson.build (xem thêm ở section 7)
 # ════════════════════════════════════════════════════════════
 case "$PKG_NAME" in
     numpy|scipy)
@@ -199,9 +183,6 @@ suppress_build_script_link_lines=false
 EOF
 export PYO3_CONFIG_FILE="$PYO3_CONFIG"
 
-# ════════════════════════════════════════════════════════════
-# [FIX] PYO3_CROSS_INCLUDE_DIR = full path có python3.13
-# ════════════════════════════════════════════════════════════
 export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
 export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
 
@@ -224,10 +205,6 @@ def _gcv(name):
 sysconfig.get_config_var = _gcv
 SITEEOF
 
-# ════════════════════════════════════════════════════════════
-# [FIX] PYTHONPATH = PYSITE only, KHÔNG có TARGET_SITE
-# (tránh cffi 1.17.1 trong TARGET_SITE shadow host cffi 2.1.1)
-# ════════════════════════════════════════════════════════════
 export PYTHONPATH="${PYSITE}"
 
 # 6. site.cfg
@@ -251,8 +228,28 @@ case "$BACKEND" in
         case "$PKG_NAME" in
             numpy|scipy)
                 # ════════════════════════════════════════════════════════
-                # [FIX BLAS] Đảm bảo openblas.pc tồn tại. Nếu
-                # cross-compile-deps.sh không tạo, tự sinh fallback.
+                # [FIX NumPy ICE] Patch thẳng meson.build
+                #
+                # Lý do: NumPy meson.build gọi add_project_arguments()
+                # với '-O3'/'optimization: 3'. Meson append project args
+                # SAU env → env CFLAGS không thắng được cho các target
+                # có flag riêng. Sed-replace trực tiếp để chắc chắn.
+                # ════════════════════════════════════════════════════════
+                echo "  → Patch NumPy/SciPy meson.build: -O3/-O2 → -O1"
+                find "$SRC_PATH" -name "meson.build" -type f -print0 | \
+                while IFS= read -r -d '' f; do
+                    sed -i "s/'-O3'/'-O1'/g; s/'-O2'/'-O1'/g; \
+                            s/optimization: 3/optimization: 1/g; \
+                            s/optimization: 2/optimization: 1/g; \
+                            s/optimization:'3'/optimization:'1'/g; \
+                            s/optimization:'2'/optimization:'1'/g; \
+                            s/optimization:\"3\"/optimization:\"1\"/g; \
+                            s/optimization:\"2\"/optimization:\"1\"/g" "$f"
+                done
+                echo "  ✅ Patched $(find "$SRC_PATH" -name meson.build | wc -l) meson.build files"
+
+                # ════════════════════════════════════════════════════════
+                # [FIX BLAS] Đảm bảo openblas.pc tồn tại
                 # ════════════════════════════════════════════════════════
                 if [ ! -f "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" ]; then
                     echo "  ⚠️  openblas.pc missing — generating fallback"
@@ -272,7 +269,6 @@ Cflags: -I\${includedir}
 PCEOF
                 fi
 
-                # Sanity check pkg-config tìm được openblas
                 if ! PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig" \
                      /usr/bin/pkg-config --exists openblas; then
                     echo "  ❌ pkg-config KHÔNG tìm thấy openblas"
@@ -283,7 +279,6 @@ PCEOF
                 fi
                 echo "  ✅ pkg-config OK: $(PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig" /usr/bin/pkg-config --modversion openblas)"
 
-                # [FIX] Native file có pkg_config_path trỏ /usr/lib/x86_64-linux-gnu/pkgconfig
                 cat > "${TMP_BUILD}/native-tools.ini" <<EOF
 [binaries]
 python3 = '${HOST_PYTHON}'
@@ -297,23 +292,6 @@ pkg-config = '/usr/bin/pkg-config'
 pkg_config_path = '${DEPS_INSTALL}/lib/pkgconfig:${DEPS_INSTALL}/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig'
 EOF
 
-                # ════════════════════════════════════════════════════════════
-                # [FIX ICE clang 14.0.7 / NDK r25c]
-                # Bug: clang crash (exit code 70) khi compile
-                #      lowlevel_strided_loops.c cho aarch64 với -O2/-O3.
-                # Ref: android/ndk#1991, numpy/numpy#25578.
-                #
-                # LƯU Ý: [built-in options] c_args KHÔNG đủ — NumPy
-                # meson.build gọi add_project_arguments() override
-                # per-target. Flag -O1 đảm bảo đến compiler bằng cách
-                # export CFLAGS/CXXFLAGS env ở section 5 (Meson append
-                # các env này SAU tất cả → luôn thắng).
-                #
-                # [FIX BLAS] pkg-config + pkg_config_path bổ sung:
-                #   - pkg-config = '/usr/bin/pkg-config' trong [binaries]
-                #   - pkg_config_path trong [built-in options] (KHÔNG phải
-                #     [properties] — đặt sai section sẽ bị Meson bỏ qua)
-                # ════════════════════════════════════════════════════════════
                 cat > "${TMP_BUILD}/android-cross.ini" <<EOF
 [binaries]
 c = '${NDK_CC}'
@@ -384,14 +362,7 @@ case "$PKG_NAME" in
         echo "  → Patch Pillow"
 
         # ════════════════════════════════════════════════════════
-        # [FIX Pillow link HOST libs] Ép Pillow dùng cross-compiled
-        # libs qua env vars. Pillow 12.x đọc các biến này trước khi
-        # fallback về hardcoded /usr/include, /usr/lib.
-        #
-        # Triệu chứng gốc: link command chứa
-        #   -I/usr/include/freetype2
-        #   -L/usr/lib/x86_64-linux-gnu -L/usr/lib
-        #   -lfreetype (không tìm thấy aarch64 libfreetype)
+        # [FIX Pillow] Ép dùng cross-compiled freetype/libjpeg/libpng
         # ════════════════════════════════════════════════════════
         export FREETYPE_ROOT="${DEPS_INSTALL}"
         export ZLIB_ROOT="${DEPS_INSTALL}"
@@ -403,15 +374,31 @@ case "$PKG_NAME" in
         export WEBP_ROOT="${DEPS_INSTALL}"
         export XCB_ROOT="/nonexistent/skip"
 
-        # Verify libfreetype.so cross-compiled tồn tại
-        if [ ! -f "${DEPS_INSTALL}/lib/libfreetype.so" ] && \
-           [ ! -f "${DEPS_INSTALL}/lib/libfreetype.a" ]; then
-            echo "  ❌ libfreetype cross-compiled KHÔNG tồn tại"
-            echo "     Expected: ${DEPS_INSTALL}/lib/libfreetype.{so,a}"
-            ls -la "${DEPS_INSTALL}/lib/" 2>/dev/null | grep -iE "freetype|libz\.|jpeg|png" | head
-            exit 1
+        # Verify cross-compiled libs tồn tại — nếu thiếu thì warn,
+        # KHÔNG exit (Pillow có thể build không có feature đó).
+        MISSING_PILLOW=""
+        for lib in libfreetype libjpeg libpng libz; do
+            if [ ! -f "${DEPS_INSTALL}/lib/${lib}.a" ] && \
+               [ ! -f "${DEPS_INSTALL}/lib/${lib}.so" ]; then
+                MISSING_PILLOW="$MISSING_PILLOW ${lib}"
+            fi
+        done
+        if [ -n "$MISSING_PILLOW" ]; then
+            echo "  ⚠️  Missing cross-compiled:${MISSING_PILLOW}"
+            echo "     → Pillow sẽ build thiếu feature tương ứng"
+            # Tắt hẳn feature thiếu để Pillow không fallback về HOST
+            case "$MISSING_PILLOW" in
+                *libfreetype*) export FREETYPE_ROOT="/nonexistent/skip" ;;
+            esac
+            case "$MISSING_PILLOW" in
+                *libjpeg*) export JPEG_ROOT="/nonexistent/skip" ;;
+            esac
+            case "$MISSING_PILLOW" in
+                *libpng*) export ZLIB_ROOT="/nonexistent/skip" ;;
+            esac
+        else
+            echo "  ✅ cross-compiled libs OK (freetype/jpeg/png/z)"
         fi
-        echo "  ✅ freetype: $(ls ${DEPS_INSTALL}/lib/libfreetype.so* 2>/dev/null | head -1)"
 
         cd "$SRC_PATH"
         cp setup.py setup.py.bak 2>/dev/null || true
@@ -424,7 +411,6 @@ with open("setup.py", "r") as f:
 q1, q2 = chr(34), chr(39)
 skip = "/nonexistent/skip"
 
-# ── Tầng 1: đổi hardcode path trong setup.py thành skip ──
 for path in ["/usr/include", "/usr/local/include", "/usr/lib",
              "/usr/local/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib64",
              "/usr/include/freetype2", "/usr/include/libpng16",
@@ -433,17 +419,13 @@ for path in ["/usr/include", "/usr/local/include", "/usr/lib",
     c = c.replace(q1+path+q1, q1+skip+q1)
     c = c.replace(q2+path+q2, q2+skip+q2)
 
-# Đổi _add_directory(..., "/usr/...") thành pass
 c = re.sub(
     r"_add_directory\([^,]+,\s*[\x27\x22]/(usr|opt/host)[^\x27\x22]*[\x27\x22]\)",
     "pass", c)
 
-# ── Tầng 2: inject filter mạnh tay TRƯỚC setup() ──
 filter_code = '''
 import os as _os
 
-# [FIX Pillow HOST libs] Lọc bỏ mọi path host khỏi include_dirs,
-# library_dirs, rpath. Giữ lại /work/python-android và /work/deps-install.
 _ALLOWED_PREFIXES = (
     "/work/python-android",
     "/work/deps-install",
@@ -484,18 +466,15 @@ def _p4a_clean(lst):
         out.append(d)
     return out
 
-# Patch build_ext.finalize_options
 try:
     from setuptools.command.build_ext import build_ext as _be_cls
     _orig_fo = _be_cls.finalize_options
     def _new_fo(self):
         _orig_fo(self)
-        # Clean sau khi finalize (bao gồm mọi path Pillow thêm trong __init__)
         self.include_dirs = _p4a_clean(self.include_dirs)
         self.library_dirs = _p4a_clean(self.library_dirs)
         if getattr(self, "rpath", None):
             self.rpath = _p4a_clean(self.rpath)
-        # Ép thêm cross-compiled paths lên đầu
         deps = _os.environ.get("DEPS_INSTALL", "")
         if deps:
             for d in (deps + "/include", deps + "/include/freetype2",
@@ -509,7 +488,6 @@ try:
 except Exception as e:
     print("[p4a-pillow] WARN patch finalize_options failed:", e)
 
-# Patch thêm cho build_ext.build_extension (belt + suspenders)
 try:
     _orig_be = _be_cls.build_extension
     def _new_be(self, ext):
@@ -521,7 +499,6 @@ except Exception as e:
     print("[p4a-pillow] WARN patch build_extension failed:", e)
 '''
 
-# Inject NGAY TRƯỚC setup() cuối cùng
 matches = list(re.finditer(r'^(\s*)setup\(', c, re.MULTILINE))
 if matches:
     m = matches[-1]
@@ -539,6 +516,71 @@ PYEOF
         "${HOST_PYTHON}" /tmp/patch_pillow.py
         ;;
 
+    # ════════════════════════════════════════════════════════════
+    # [FIX orjson 3.13] Gate AVX512 cho non-x86_64
+    #
+    # Triệu chứng: orjson 3.13 build src/ffi/pystrref/avx512.rs
+    # không có #[cfg(target_arch = "x86_64")] → rustc báo:
+    #   error: the feature named `avx512bw` is not valid for this target
+    # trên aarch64.
+    #
+    # Giải pháp: prepend cfg gate cho toàn bộ file avx512.rs và
+    # gate mod declaration trong pystrref.rs.
+    # ════════════════════════════════════════════════════════════
+    orjson)
+        echo "  → Patch orjson: gate AVX512 cho non-x86_64"
+        AVX_FILE="$SRC_PATH/src/ffi/pystrref/avx512.rs"
+        if [ -f "$AVX_FILE" ]; then
+            sed -i '1i #![cfg(target_arch = "x86_64")]' "$AVX_FILE" || true
+            echo "  ✅ Patched: $AVX_FILE"
+        fi
+        MOD_FILE="$SRC_PATH/src/ffi/pystrref.rs"
+        if [ -f "$MOD_FILE" ] && ! grep -q 'cfg(target_arch = "x86_64")' "$MOD_FILE"; then
+            sed -i 's/^mod avx512;/#[cfg(target_arch = "x86_64")]\nmod avx512;/' "$MOD_FILE" || true
+            echo "  ✅ Patched: $MOD_FILE"
+        fi
+        ;;
+
+    # ════════════════════════════════════════════════════════════
+    # [FIX uvloop] Cross-compile libuv
+    #
+    # Triệu chứng: libuv ./configure exit 77 (config.status fail)
+    # vì autoconf không detect được cross-compile.
+    #
+    # Giải pháp:
+    #   1. Export env hint cho autoconf (ac_cv_func_*)
+    #   2. Export NDK toolchain để ./configure dùng đúng compiler
+    #   3. Set LIBUV_CROSS_COMPILE=1 cho uvloop build script
+    # ════════════════════════════════════════════════════════════
+    uvloop)
+        echo "  → Patch uvloop: cross-compile libuv"
+        export LIBUV_CROSS_COMPILE=1
+        export CROSS_COMPILE="aarch64-linux-android-"
+        export ac_cv_func_epoll_ctl=yes
+        export ac_cv_func_epoll_create1=yes
+        export ac_cv_func_eventfd=yes
+        export ac_cv_func_pipe2=yes
+        export ac_cv_func_inotify_init1=yes
+        export ac_cv_func_getrandom=yes
+        export ac_cv_func_pthread_condattr_setclock=yes
+        export ac_cv_func_pthread_barrier_init=yes
+        export ac_cv_lib_rt_clock_gettime=yes
+        export CC="${NDK_CC}"
+        export CXX="${NDK_CXX}"
+        export AR="${NDK_AR}"
+        export RANLIB="${RANLIB}"
+        export STRIP="${STRIP}"
+        export CFLAGS="-fPIC -O2 -I${DEPS_INSTALL}/include"
+        export LDFLAGS="-L${DEPS_INSTALL}/lib -L${TARGET_ROOT}/lib"
+        ;;
+
+    # ════════════════════════════════════════════════════════════
+    # [FIX chardet] Không cần patch — dep hatch-vcs đã cài ở entrypoint
+    # ════════════════════════════════════════════════════════════
+    chardet)
+        echo "  → chardet: hatch-vcs (đã cài ở entrypoint)"
+        ;;
+
     cffi)
         export CFFI_PY_LIMITED_API="0x030D0000"
         SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=cp313")
@@ -550,19 +592,6 @@ PYEOF
 
     # ════════════════════════════════════════════════════════════
     # [FIX cryptography 50.x] Tắt legacy provider NGAY LÚC BUILD
-    #
-    # Vấn đề: cryptography 50.x chuyển sang OpenSSL 4.0, khiến biến
-    #         runtime CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1 không còn
-    #         được kiểm tra → warning "OpenSSL 3's legacy provider
-    #         failed to load..." vẫn xuất hiện khi import.
-    #
-    # Giải pháp: set CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1 ở bước
-    #            build. Đây là biến chính thức cryptography dùng để
-    #            compile mà không nhúng logic load legacy provider.
-    #
-    # Ảnh hưởng: CHỈ cryptography. Các lib khác (bcrypt, nh3,
-    #            pydantic-core, orjson, tokenizers) không dùng
-    #            OpenSSL trong cùng ngữ cảnh nên không bị đụng.
     # ════════════════════════════════════════════════════════════
     cryptography)
         echo "  → cryptography: CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1"
