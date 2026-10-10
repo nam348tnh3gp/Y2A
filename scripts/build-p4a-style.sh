@@ -149,17 +149,13 @@ unset PKG_CONFIG_LIBDIR
 unset PKG_CONFIG_SYSROOT_DIR
 
 # ════════════════════════════════════════════════════════════
-# [NDK r27] NumPy ICE workaround — giữ như defense-in-depth
-#
-# Với clang 18 (NDK r27), ICE clang 14 đã hết. Nhưng vẫn giữ
-# -O1 để đảm bảo không có bất ngờ. Có thể bỏ nếu muốn NumPy
-# performance tối đa (không khuyến nghị).
+# [NDK r27] NumPy ICE workaround
 # ════════════════════════════════════════════════════════════
 case "$PKG_NAME" in
     numpy|scipy)
         export CFLAGS="-O1 -fno-vectorize -fno-slp-vectorize"
         export CXXFLAGS="-O1 -fno-vectorize -fno-slp-vectorize"
-        echo "  → NumPy/SciPy: CFLAGS=$CFLAGS (defense với clang 18)"
+        echo "  → NumPy/SciPy: CFLAGS=$CFLAGS"
         ;;
 esac
 
@@ -208,13 +204,7 @@ sysconfig.get_config_var = _gcv
 SITEEOF
 
 # ════════════════════════════════════════════════════════════
-# [FIX build-deps] PYTHONPATH = PYSITE + BUILD_DEPS_SITE
-#
-# - PYSITE: package override (numpy-config, v.v.)
-# - BUILD_DEPS_SITE: backend như setuptools_scm, cppy, hatch_vcs,
-#   mesonpy... mà pip build cần (do --no-build-isolation).
-#
-# KHÔNG thêm TARGET_SITE (có cffi cũ shadow host cffi).
+# PYTHONPATH = PYSITE + BUILD_DEPS_SITE
 # ════════════════════════════════════════════════════════════
 export PYTHONPATH="${PYSITE}:${BUILD_DEPS_SITE:-${WORKSPACE}/build-deps-site}"
 
@@ -238,7 +228,55 @@ case "$BACKEND" in
         echo "  → Meson backend"
         case "$PKG_NAME" in
             numpy|scipy)
-                # Patch meson.build — defense với clang 18
+                # ════════════════════════════════════════════════════════════
+                # [FIX NumPy BLDLIBRARY] Aggressive patch
+                #
+                # Vấn đề: _sysconfigdata chứa 'BLDLIBRARY': '$(BLDLIBRARY)'
+                # (placeholder Makefile). NumPy meson đọc trực tiếp →
+                # nhận literal → clang++ "no such file: $(BLDLIBRARY)".
+                #
+                # Fix: thay THẲNG mọi occurrence của placeholder bằng
+                # giá trị thật, KHÔNG quan tâm quoting/structure. Patch
+                # mọi file sysconfigdata có thể có + xoá __pycache__.
+                # ════════════════════════════════════════════════════════════
+                echo "  → Aggressive patch BLDLIBRARY trong sysconfigdata"
+                for f in \
+                    "${HOST_PY_LIB}"/_sysconfigdata__*.py \
+                    "${TARGET_STDLIB}"/_sysconfigdata__*.py \
+                    "${HOST_PY_PREFIX}/lib/python${PYTHON_MINOR}"/_sysconfigdata__*.py \
+                    "${TARGET_ROOT}/lib/python${PYTHON_MINOR}"/_sysconfigdata__*.py; do
+                    [ -f "$f" ] || continue
+                    sed -i "s|\$(BLDLIBRARY)|-lpython${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
+                    sed -i "s|\$(LDLIBRARY)|libpython${PYTHON_MINOR}.so|g" "$f" 2>/dev/null || true
+                    sed -i "s|\$(LIBRARY)|python${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
+                    echo "    ✅ patched: $f"
+                done
+
+                # Xoá __pycache__ để Python KHÔNG load .pyc cũ
+                find "${HOST_PY_LIB}" "${TARGET_STDLIB}" \
+                    -name "__pycache__" -type d \
+                    -exec rm -rf {} + 2>/dev/null || true
+                rm -f "${HOST_PY_LIB}"/__pycache__/_sysconfigdata*.pyc 2>/dev/null || true
+                rm -f "${TARGET_STDLIB}"/__pycache__/_sysconfigdata*.pyc 2>/dev/null || true
+
+                # Verify bằng cách đọc trực tiếp từ module
+                echo "  🔍 Verify BLDLIBRARY qua Python:"
+                PYTHONPATH="${PYSITE}" "${HOST_PYTHON}" -c "
+import os, importlib
+os.environ['_PYTHON_SYSCONFIGDATA_NAME'] = '${SYSCONF_NAME}'
+import sys as _s
+for m in list(_s.modules):
+    if m.startswith('_sysconfigdata'):
+        del _s.modules[m]
+mod = importlib.import_module('${SYSCONF_NAME}')
+v = mod.build_time_vars.get('BLDLIBRARY', 'MISSING')
+print(f'    BLDLIBRARY = {v!r}')
+if '\$(' in str(v):
+    raise SystemExit('BLDLIBRARY vẫn còn placeholder!')
+print('    ✅ BLDLIBRARY OK')
+" || { echo "  ❌ BLDLIBRARY patch failed"; exit 1; }
+
+                # Patch meson.build optimization
                 echo "  → Patch NumPy/SciPy meson.build: -O3/-O2 → -O1"
                 find "$SRC_PATH" -name "meson.build" -type f -print0 | \
                 while IFS= read -r -d '' f; do
