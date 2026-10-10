@@ -31,7 +31,7 @@ export NDK_AR="${AR}"
 mkdir -p "${TARGET_ROOT}" "${DEPS_INSTALL}" "${WHEELS_OUT}" "${WHEELS_FINAL}"
 
 # ════════════════════════════════════════════════════════════
-# [ABI3] Chuẩn hoá target — off|cp38|cp39|cp310|cp311|cp312
+# [ABI3] Chuẩn hoá target
 # ════════════════════════════════════════════════════════════
 ABI3_RAW="${INPUT_ABI3_TARGET:-cp38}"
 case "$ABI3_RAW" in
@@ -103,9 +103,7 @@ for f in "${TARGET_STDLIB}"/_sysconfigdata__*.py; do
     [ -f "$f" ] && cp -v "$f" "$HOST_PY_LIB/" 2>/dev/null || true
 done
 
-# ════════════════════════════════════════════════════════════
-# [FIX NumPy] Patch BLDLIBRARY/LIBRARY/LDLIBRARY bằng Python
-# ════════════════════════════════════════════════════════════
+# ═══ Patch BLDLIBRARY/LIBRARY/LDLIBRARY ═══
 echo "🔧 Patch sysconfigdata (BLDLIBRARY, LIBRARY, LDLIBRARY)"
 
 PATCH_PY="${WORKSPACE}/.patch-sysconf-$$.py"
@@ -185,7 +183,6 @@ if grep -qE "'BLDLIBRARY'\s*:\s*'\\\$\(BLDLIBRARY\)'" \
 fi
 echo "  ✅ BLDLIBRARY patched OK"
 
-# Copy target headers → host include (subdir python3.13)
 if [ -d "${TARGET_INCLUDE_CHECK}" ] && [ -d "${HOST_INCLUDE}" ]; then
     cp -rf "${TARGET_INCLUDE_CHECK}/." "${HOST_INCLUDE}/" 2>/dev/null || true
 fi
@@ -198,9 +195,7 @@ echo "  ✅ Python.h ở ${HOST_INCLUDE_PARENT}/Python.h"
     ln -sfn "python${PYTHON_MINOR}/internal" "${HOST_INCLUDE_PARENT}/internal" 2>/dev/null || true
 }
 
-# ════════════════════════════════════════════════════════════
 # Global sitecustomize
-# ════════════════════════════════════════════════════════════
 cat > "${HOST_PY_LIB}/sitecustomize.py" <<SITEEOF
 import os, sysconfig
 
@@ -372,9 +367,7 @@ print(f'  host cffi: {cffi.__version__}')
 print(f'  host _cffi_backend: {_cffi_backend.__version__}')
 " || echo "  ⚠️  host cffi check failed"
 
-# ════════════════════════════════════════════════════════════
-# 4. Bootstrap pip vào TARGET_SITE
-# ════════════════════════════════════════════════════════════
+# 4. Bootstrap pip
 if [ ! -d "${TARGET_SITE}/pip" ]; then
     echo "🔨 Bootstrap pip vào TARGET_SITE..."
     ${HOST_PYTHON} -m pip install \
@@ -383,9 +376,7 @@ if [ ! -d "${TARGET_SITE}/pip" ]; then
         --upgrade pip setuptools wheel || exit 1
 fi
 
-# ════════════════════════════════════════════════════════════
 # 5. Install build-time deps
-# ════════════════════════════════════════════════════════════
 export BUILD_DEPS_SITE="${WORKSPACE}/build-deps-site"
 mkdir -p "${BUILD_DEPS_SITE}"
 
@@ -451,9 +442,7 @@ done
 [ "$FAIL" -eq 1 ] && { echo "❌ Some build-time deps missing"; exit 1; }
 echo "  ✅ All build-time deps OK"
 
-# ════════════════════════════════════════════════════════════
-# 6. Package list — [FIX Invalid range end]
-# ════════════════════════════════════════════════════════════
+# 6. Package list
 if [ -n "${INPUT_PACKAGES}" ]; then LIST="${INPUT_PACKAGES}"
 else LIST=$(grep -v '^#' wheels/list.txt | grep -v '^$' | tr '\n' ' '); fi
 
@@ -474,16 +463,42 @@ echo "📦 Packages: ${PKGLIST}"
 echo "🔍 Verify pin/comment:"
 echo "$PKGLIST" | tr ' ' '\n' | grep -E "orjson|uvloop" 2>/dev/null || echo "  (không có orjson/uvloop)"
 
-# ════════════════════════════════════════════════════════════
 # 7. Build
-# ════════════════════════════════════════════════════════════
+echo "🔍 [pre-build] Kiểm tra ABI3 config:"
+echo "  ABI3_TARGET=${ABI3_TARGET:-<off>}"
+echo "  PYTHON_MINOR=${PYTHON_MINOR}"
+
 bash scripts/build-wheels.sh || true
 
 WHEEL_COUNT=$(ls "${WHEELS_OUT}"/*.whl 2>/dev/null | wc -l)
 [ "$WHEEL_COUNT" -eq 0 ] && { echo "❌ No wheels"; exit 1; }
 
+# ═══ Log trạng thái libpython của từng wheel ═══
+echo ""
+echo "════════════════════════════════════════════"
+echo "  Kiểm tra libpython linkage"
+echo "════════════════════════════════════════════"
+for whl in "${WHEELS_OUT}"/*.whl; do
+    [ -f "$whl" ] || continue
+    base=$(basename "$whl")
+    [[ "$base" == *"none-any"* ]] && continue
+    tmp=$(mktemp -d)
+    unzip -q -o "$whl" -d "$tmp" 2>/dev/null || true
+    tag="native"
+    [[ "$base" == *"-abi3-"* ]] && tag="abi3"
+    found=0
+    while IFS= read -r so; do
+        if ${READELF} -d "$so" 2>/dev/null | grep -qE 'NEEDED.*libpython3\.[0-9]+\.so'; then
+            echo "  [$tag] $base → $(basename "$so") NEEDED libpython"
+            found=1
+        fi
+    done < <(find "$tmp" -name "*.so" 2>/dev/null)
+    [ "$found" -eq 0 ] && echo "  [$tag] $base → OK (không NEEDED libpython)"
+    rm -rf "$tmp"
+done
+
 bash scripts/post-process.sh || exit 1
-bash scripts/verify-wheels.sh || echo "⚠️  Verify có lỗi"
+bash scripts/verify-wheels.sh || { echo "❌ Verify FAILED"; exit 1; }
 
 echo "✅ Build complete"
 exit 0
