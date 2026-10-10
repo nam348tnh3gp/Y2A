@@ -44,7 +44,7 @@ jobs:
         include:
           - python_version: '3.13.1'
             python_minor: '3.13'
-          - python_version: '3.14.0rc2'
+          - python_version: '3.14.0'
             python_minor: '3.14'
     runs-on: ubuntu-latest
     timeout-minutes: 300
