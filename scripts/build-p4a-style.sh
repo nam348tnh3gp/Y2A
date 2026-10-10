@@ -230,14 +230,6 @@ case "$BACKEND" in
             numpy|scipy)
                 # ════════════════════════════════════════════════════════════
                 # [FIX NumPy BLDLIBRARY] Aggressive patch
-                #
-                # Vấn đề: _sysconfigdata chứa 'BLDLIBRARY': '$(BLDLIBRARY)'
-                # (placeholder Makefile). NumPy meson đọc trực tiếp →
-                # nhận literal → clang++ "no such file: $(BLDLIBRARY)".
-                #
-                # Fix: thay THẲNG mọi occurrence của placeholder bằng
-                # giá trị thật, KHÔNG quan tâm quoting/structure. Patch
-                # mọi file sysconfigdata có thể có + xoá __pycache__.
                 # ════════════════════════════════════════════════════════════
                 echo "  → Aggressive patch BLDLIBRARY trong sysconfigdata"
                 for f in \
@@ -259,22 +251,29 @@ case "$BACKEND" in
                 rm -f "${HOST_PY_LIB}"/__pycache__/_sysconfigdata*.pyc 2>/dev/null || true
                 rm -f "${TARGET_STDLIB}"/__pycache__/_sysconfigdata*.pyc 2>/dev/null || true
 
-                # Verify bằng cách đọc trực tiếp từ module
-                echo "  🔍 Verify BLDLIBRARY qua Python:"
-                PYTHONPATH="${PYSITE}" "${HOST_PYTHON}" -c "
-import os, importlib
-os.environ['_PYTHON_SYSCONFIGDATA_NAME'] = '${SYSCONF_NAME}'
-import sys as _s
-for m in list(_s.modules):
-    if m.startswith('_sysconfigdata'):
-        del _s.modules[m]
-mod = importlib.import_module('${SYSCONF_NAME}')
-v = mod.build_time_vars.get('BLDLIBRARY', 'MISSING')
-print(f'    BLDLIBRARY = {v!r}')
-if '\$(' in str(v):
-    raise SystemExit('BLDLIBRARY vẫn còn placeholder!')
-print('    ✅ BLDLIBRARY OK')
-" || { echo "  ❌ BLDLIBRARY patch failed"; exit 1; }
+                # ════════════════════════════════════════════════════════════
+                # [FIX] Verify bằng GREP — KHÔNG dùng Python + SYSCONF_NAME
+                #
+                # Lý do: build-p4a-style.sh chạy như subprocess, không kế
+                # thừa env SYSCONF_NAME từ entrypoint → biến rỗng → lỗi
+                # "ValueError: Empty module name". Grep không cần biến đó.
+                # ════════════════════════════════════════════════════════════
+                echo "  🔍 Verify BLDLIBRARY (grep):"
+                REMAIN=0
+                for f in \
+                    "${HOST_PY_LIB}"/_sysconfigdata__*.py \
+                    "${TARGET_STDLIB}"/_sysconfigdata__*.py; do
+                    [ -f "$f" ] || continue
+                    if grep -qF '$(BLDLIBRARY)' "$f" 2>/dev/null; then
+                        echo "    ❌ Còn placeholder trong: $f"
+                        REMAIN=$((REMAIN+1))
+                    fi
+                done
+                if [ "$REMAIN" -gt 0 ]; then
+                    echo "  ❌ BLDLIBRARY patch failed"
+                    exit 1
+                fi
+                echo "    ✅ BLDLIBRARY OK (không còn placeholder)"
 
                 # Patch meson.build optimization
                 echo "  → Patch NumPy/SciPy meson.build: -O3/-O2 → -O1"
