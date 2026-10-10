@@ -37,8 +37,8 @@ NDK_REV=$(grep 'Pkg.Revision' "${NDK}/source.properties" 2>/dev/null | cut -d= -
 echo "📌 NDK revision: ${NDK_REV}"
 echo "📌 Clang: $(${NDK_CC} --version 2>/dev/null | head -1 || echo 'unknown')"
 case "${NDK_REV}" in
-    27.*|28.*|29.*) echo "  ✅ NDK r27+ — Clang 18+, ICE clang 14 không còn" ;;
-    *) echo "  ⚠️  NDK ${NDK_REV} — có thể gặp ICE clang 14 với NumPy" ;;
+    27.*|28.*|29.*) echo "  ✅ NDK r27+ — Clang 18+" ;;
+    *) echo "  ⚠️  NDK ${NDK_REV}" ;;
 esac
 
 # 1. Cross-compile core deps
@@ -85,54 +85,96 @@ for f in "${TARGET_STDLIB}"/_sysconfigdata__*.py; do
 done
 
 # ════════════════════════════════════════════════════════════
-# [FIX] Patch sysconfigdata — thay placeholder shell vars
-#
-# Vấn đề: file _sysconfigdata chứa các giá trị như:
-#   'BLDLIBRARY': '$(BLDLIBRARY)'
-#   'LIBRARY': '$(LIBRARY)'
-#   'LDLIBRARY': '$(LDLIBRARY)'
-# Đây là placeholder cho Makefile của CPython, cần shell expand.
-# Khi Meson/NumPy đọc trực tiếp sysconfig, chúng nhận literal
-# "$(BLDLIBRARY)" → clang++ báo "no such file or directory".
-#
-# Fix: thay bằng giá trị cụ thể.
+# [FIX NumPy] Patch BLDLIBRARY/LIBRARY/LDLIBRARY bằng Python
 # ════════════════════════════════════════════════════════════
 echo "🔧 Patch sysconfigdata (BLDLIBRARY, LIBRARY, LDLIBRARY)"
-for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py; do
+
+PATCH_PY="${WORKSPACE}/.patch-sysconf-$$.py"
+cat > "$PATCH_PY" <<'PYEOF'
+import re, sys
+
+PY_MINOR = sys.argv[1]
+files = sys.argv[2:]
+
+REPLACEMENTS = [
+    ("BLDLIBRARY", f"-lpython{PY_MINOR}"),
+    ("LIBRARY",    f"python{PY_MINOR}"),
+    ("LDLIBRARY",  f"libpython{PY_MINOR}.so"),
+]
+
+total = 0
+for f in files:
+    try:
+        with open(f) as fp:
+            c = fp.read()
+    except Exception as e:
+        print(f"  ⚠️  Skip {f}: {e}")
+        continue
+
+    before = c
+    for key, val in REPLACEMENTS:
+        c = re.sub(rf"'{key}'\s*:\s*'[^']*'", f"'{key}': '{val}'", c)
+        c = re.sub(rf'"{key}"\s*:\s*"[^"]*"', f'"{key}": "{val}"', c)
+
+    if c != before:
+        with open(f, "w") as fp:
+            fp.write(c)
+        print(f"  ✅ patched: {f}")
+        total += 1
+    else:
+        print(f"  ⚠️  no change: {f}")
+
+print(f"  → {total} file(s) patched")
+PYEOF
+
+SYSCONF_FILES=()
+for d in "${HOST_PY_LIB}" "${TARGET_STDLIB}"; do
+    for f in "${d}"/_sysconfigdata__*.py; do
+        [ -f "$f" ] && SYSCONF_FILES+=("$f")
+    done
+done
+
+if [ ${#SYSCONF_FILES[@]} -gt 0 ]; then
+    "${HOST_PYTHON}" "$PATCH_PY" "${PYTHON_MINOR}" "${SYSCONF_FILES[@]}"
+else
+    echo "  ⚠️  Không tìm thấy _sysconfigdata nào"
+fi
+rm -f "$PATCH_PY"
+
+# Patch path
+for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py "${TARGET_STDLIB}"/_sysconfigdata__*.py; do
     [ -f "$f" ] || continue
     sed -i "s|'CCSHARED': .*|'CCSHARED': '-fPIC',|g" "$f" 2>/dev/null || true
     sed -i "s|'LDSHARED': .*|'LDSHARED': '${NDK_CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
     sed -i "s|'BLDSHARED': .*|'BLDSHARED': '${NDK_CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
     sed -i "s|'LDCXXSHARED': .*|'LDCXXSHARED': '${NDK_CXX} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
-    # [FIX NumPy] BLDLIBRARY/LIBRARY/LDLIBRARY — NumPy meson đọc trực tiếp
-    sed -i "s|'BLDLIBRARY': .*|'BLDLIBRARY': '-lpython${PYTHON_MINOR}',|g" "$f" 2>/dev/null || true
-    sed -i "s|'LIBRARY': .*|'LIBRARY': 'python${PYTHON_MINOR}',|g" "$f" 2>/dev/null || true
-    sed -i "s|'LDLIBRARY': .*|'LDLIBRARY': 'libpython${PYTHON_MINOR}.so',|g" "$f" 2>/dev/null || true
-    # Path patches
     sed -i "s|/opt/host-python/lib|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
     sed -i "s|/opt/host-python/include|${TARGET_ROOT}/include|g" "$f" 2>/dev/null || true
     sed -i "s|/usr/lib/x86_64-linux-gnu|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
     sed -i "s|/usr/lib64|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
 done
 
-# Verify BLDLIBRARY đã được patch
-echo "  🔍 Verify BLDLIBRARY:"
-grep -E "^\s*'BLDLIBRARY'" "${HOST_PY_LIB}"/_sysconfigdata__*.py | head -3
+echo "  🔍 Verify BLDLIBRARY (host):"
+grep -E "^\s*'BLDLIBRARY'" "${HOST_PY_LIB}"/_sysconfigdata__*.py 2>/dev/null | head -3 || echo "    (none)"
+echo "  🔍 Verify BLDLIBRARY (target):"
+grep -E "^\s*'BLDLIBRARY'" "${TARGET_STDLIB}"/_sysconfigdata__*.py 2>/dev/null | head -3 || echo "    (none)"
+
+if grep -qE "'BLDLIBRARY'\s*:\s*'\\\$\(BLDLIBRARY\)'" \
+    "${HOST_PY_LIB}"/_sysconfigdata__*.py "${TARGET_STDLIB}"/_sysconfigdata__*.py 2>/dev/null; then
+    echo "  ❌ BLDLIBRARY vẫn còn placeholder"
+    exit 1
+fi
+echo "  ✅ BLDLIBRARY patched OK"
 
 # Copy target headers → host include (subdir python3.13)
 if [ -d "${TARGET_INCLUDE_CHECK}" ] && [ -d "${HOST_INCLUDE}" ]; then
     cp -rf "${TARGET_INCLUDE_CHECK}/." "${HOST_INCLUDE}/" 2>/dev/null || true
 fi
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Copy Python headers vào PARENT dir bao gồm subdirs
-# ════════════════════════════════════════════════════════════
 echo "🔧 Copy Python headers vào parent dir (giữ subdirs)"
 cp -rn "${HOST_INCLUDE}/." "${HOST_INCLUDE_PARENT}/" 2>/dev/null || true
 echo "  ✅ Python.h ở ${HOST_INCLUDE_PARENT}/Python.h"
-echo "  ✅ cpython/pymem.h ở ${HOST_INCLUDE_PARENT}/cpython/pymem.h"
 [ -f "${HOST_INCLUDE_PARENT}/cpython/pymem.h" ] || {
-    echo "  ⚠️  cpython/pymem.h missing — fallback symlink"
     ln -sfn "python${PYTHON_MINOR}/cpython" "${HOST_INCLUDE_PARENT}/cpython" 2>/dev/null || true
     ln -sfn "python${PYTHON_MINOR}/internal" "${HOST_INCLUDE_PARENT}/internal" 2>/dev/null || true
 }
@@ -209,7 +251,6 @@ sysconfig.get_paths = _gps
 SITEEOF
 echo "  ✅ sitecustomize OK"
 
-# ── Sanity test
 "${HOST_PYTHON}" - <<'PYEOF' || { echo "❌ sitecustomize delegation broken"; exit 1; }
 import sysconfig, tempfile, os
 _expected_target = os.environ.get("TARGET_SITE", "")
@@ -236,7 +277,6 @@ for bindir in /usr/local/bin /usr/bin; do
 done
 echo "  ✅ python3, cython symlinked"
 
-# Compiler wrappers
 echo "🔧 Compiler wrappers"
 for tool in gcc g++ ar ranlib strip; do
     case $tool in
@@ -255,16 +295,12 @@ EOF
 done
 echo "  ✅ aarch64-linux-android-{gcc,g++,ar,ranlib,strip} OK"
 
-# Ẩn host libpython
 HOST_LIBPY="${HOST_PY_PREFIX}/lib/libpython${PYTHON_MINOR}.so"
 if [ -L "$HOST_LIBPY" ] || [ -f "$HOST_LIBPY" ]; then
     [ ! -f "${HOST_LIBPY}.hidden" ] && mv "$HOST_LIBPY" "${HOST_LIBPY}.hidden"
     echo "  ✅ Hidden: $HOST_LIBPY"
 fi
 
-# ════════════════════════════════════════════════════════════
-# [FIX] python3.pc cho meson — copy vào DEFAULT pkg-config paths
-# ════════════════════════════════════════════════════════════
 mkdir -p "${DEPS_INSTALL}/lib/pkgconfig"
 cat > "${DEPS_INSTALL}/lib/pkgconfig/python3.pc" <<EOF
 prefix=${TARGET_ROOT}
@@ -292,9 +328,6 @@ done
 echo "  ✅ python3.pc OK (5 paths)"
 echo "  pkg-config test: $(pkg-config --modversion python3 2>&1 || echo 'not found')"
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Cleanup cffi khỏi TARGET_SITE
-# ════════════════════════════════════════════════════════════
 echo "🔧 Cleanup cffi khỏi TARGET_SITE"
 mkdir -p "${TARGET_SITE}"
 rm -rf "${TARGET_SITE}/cffi" 2>/dev/null || true
@@ -312,10 +345,6 @@ LEFTOVER=$(echo "$LEFTOVER" | tr -d '[:space:]')
 if [ "${LEFTOVER:-0}" -gt 0 ]; then
     echo "  ⚠️  Còn ${LEFTOVER} leftover — force remove"
     sudo rm -rf "${TARGET_SITE}"/cffi* "${TARGET_SITE}"/_cffi_backend* "${TARGET_SITE}"/pycparser* 2>/dev/null || true
-    LEFTOVER=$(find "${TARGET_SITE}" -maxdepth 1 -mindepth 1 \
-        \( -name "cffi*" -o -name "_cffi_backend*" -o -name "pycparser*" \) \
-        2>/dev/null | wc -l)
-    LEFTOVER=$(echo "$LEFTOVER" | tr -d '[:space:]')
 fi
 echo "  ✅ TARGET_SITE cleaned (leftover=${LEFTOVER:-0})"
 
@@ -337,7 +366,7 @@ if [ ! -d "${TARGET_SITE}/pip" ]; then
 fi
 
 # ════════════════════════════════════════════════════════════
-# [FIX build-deps] Cài build-time deps vào thư mục RIÊNG
+# 5. Install build-time deps
 # ════════════════════════════════════════════════════════════
 export BUILD_DEPS_SITE="${WORKSPACE}/build-deps-site"
 mkdir -p "${BUILD_DEPS_SITE}"
@@ -373,7 +402,6 @@ if ! ${HOST_PYTHON} -m pip install \
     exit 1
 fi
 
-# Verify với mapping pip-name:import-name
 echo "🔍 Verify build-time deps..."
 FAIL=0
 for spec in \
@@ -405,18 +433,22 @@ done
 [ "$FAIL" -eq 1 ] && { echo "❌ Some build-time deps missing"; exit 1; }
 echo "  ✅ All build-time deps OK"
 
-# 5. Package list
+# 6. Package list
 if [ -n "${INPUT_PACKAGES}" ]; then LIST="${INPUT_PACKAGES}"
 else LIST=$(grep -v '^#' wheels/list.txt | grep -v '^$' | tr '\n' ' '); fi
 CLEAN=""
 for p in $LIST; do
-    echo "$p" | grep -qE '^[a-zA-Z][a-zA-Z0-9_.\-]*$' && CLEAN="$CLEAN $p"
+    echo "$p" | grep -qE '^[a-zA-Z][a-zA-Z0-9_.\-=<>!~]*$' && CLEAN="$CLEAN $p"
 done
 CLEAN=$(echo "$CLEAN" | xargs)
 export PKGLIST="${CLEAN}"
 echo "📦 Packages: ${PKGLIST}"
 
-# 6. Build
+# Debug: verify orjson pin
+echo "🔍 Verify orjson pin:"
+echo "$PKGLIST" | tr ' ' '\n' | grep -E "orjson|uvloop" || echo "  (không có orjson/uvloop)"
+
+# 7. Build
 bash scripts/build-wheels.sh || true
 
 WHEEL_COUNT=$(ls "${WHEELS_OUT}"/*.whl 2>/dev/null | wc -l)
