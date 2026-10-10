@@ -84,17 +84,40 @@ for f in "${TARGET_STDLIB}"/_sysconfigdata__*.py; do
     [ -f "$f" ] && cp -v "$f" "$HOST_PY_LIB/" 2>/dev/null || true
 done
 
+# ════════════════════════════════════════════════════════════
+# [FIX] Patch sysconfigdata — thay placeholder shell vars
+#
+# Vấn đề: file _sysconfigdata chứa các giá trị như:
+#   'BLDLIBRARY': '$(BLDLIBRARY)'
+#   'LIBRARY': '$(LIBRARY)'
+#   'LDLIBRARY': '$(LDLIBRARY)'
+# Đây là placeholder cho Makefile của CPython, cần shell expand.
+# Khi Meson/NumPy đọc trực tiếp sysconfig, chúng nhận literal
+# "$(BLDLIBRARY)" → clang++ báo "no such file or directory".
+#
+# Fix: thay bằng giá trị cụ thể.
+# ════════════════════════════════════════════════════════════
+echo "🔧 Patch sysconfigdata (BLDLIBRARY, LIBRARY, LDLIBRARY)"
 for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py; do
     [ -f "$f" ] || continue
     sed -i "s|'CCSHARED': .*|'CCSHARED': '-fPIC',|g" "$f" 2>/dev/null || true
     sed -i "s|'LDSHARED': .*|'LDSHARED': '${NDK_CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
     sed -i "s|'BLDSHARED': .*|'BLDSHARED': '${NDK_CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
     sed -i "s|'LDCXXSHARED': .*|'LDCXXSHARED': '${NDK_CXX} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
+    # [FIX NumPy] BLDLIBRARY/LIBRARY/LDLIBRARY — NumPy meson đọc trực tiếp
+    sed -i "s|'BLDLIBRARY': .*|'BLDLIBRARY': '-lpython${PYTHON_MINOR}',|g" "$f" 2>/dev/null || true
+    sed -i "s|'LIBRARY': .*|'LIBRARY': 'python${PYTHON_MINOR}',|g" "$f" 2>/dev/null || true
+    sed -i "s|'LDLIBRARY': .*|'LDLIBRARY': 'libpython${PYTHON_MINOR}.so',|g" "$f" 2>/dev/null || true
+    # Path patches
     sed -i "s|/opt/host-python/lib|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
     sed -i "s|/opt/host-python/include|${TARGET_ROOT}/include|g" "$f" 2>/dev/null || true
     sed -i "s|/usr/lib/x86_64-linux-gnu|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
     sed -i "s|/usr/lib64|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
 done
+
+# Verify BLDLIBRARY đã được patch
+echo "  🔍 Verify BLDLIBRARY:"
+grep -E "^\s*'BLDLIBRARY'" "${HOST_PY_LIB}"/_sysconfigdata__*.py | head -3
 
 # Copy target headers → host include (subdir python3.13)
 if [ -d "${TARGET_INCLUDE_CHECK}" ] && [ -d "${HOST_INCLUDE}" ]; then
@@ -315,14 +338,6 @@ fi
 
 # ════════════════════════════════════════════════════════════
 # [FIX build-deps] Cài build-time deps vào thư mục RIÊNG
-#
-# Tại sao không cài vào HOST_PYTHON?
-#   HOST_PYTHON có sitecustomize.py override sysconfig.get_paths()
-#   → pip install mặc định nghĩ site-packages là TARGET_SITE → cài
-#   nhầm vào đó. Build subprocess với PYTHONPATH=PYSITE không thấy.
-#
-# Giải pháp: cài vào BUILD_DEPS_SITE riêng, rồi build script export
-# cả PYSITE + BUILD_DEPS_SITE vào PYTHONPATH.
 # ════════════════════════════════════════════════════════════
 export BUILD_DEPS_SITE="${WORKSPACE}/build-deps-site"
 mkdir -p "${BUILD_DEPS_SITE}"
@@ -358,14 +373,7 @@ if ! ${HOST_PYTHON} -m pip install \
     exit 1
 fi
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Verify build-time deps với mapping pip-name:import-name
-#
-# Lý do dùng mapping:
-#   - poetry-core  → import poetry.core   (dot, không phải underscore)
-#   - Các package khác đều đổi '-' → '_'
-#     nhưng poetry-core là ngoại lệ phải viết tường minh.
-# ════════════════════════════════════════════════════════════
+# Verify với mapping pip-name:import-name
 echo "🔍 Verify build-time deps..."
 FAIL=0
 for spec in \
