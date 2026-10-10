@@ -19,10 +19,16 @@ SYSCONF_DIR="${WORKSPACE}/sysconfigdata-host"
 rm -rf "$SYSCONF_DIR" && mkdir -p "$SYSCONF_DIR"
 cp "$SYSCONF_FILE" "$SYSCONF_DIR/"
 
-# ════════════════════════════════════════════════════════════
-# [FIX] Patch CCSHARED trong sysconfigdata — bỏ hash-style
-#      để tránh -Werror fail khi compile .c
-# ════════════════════════════════════════════════════════════
+# ═══ [FIX] Sed placeholder trong bản copy ngay lập tức ═══
+for f in "${SYSCONF_DIR}"/_sysconfigdata__*.py; do
+    [ -f "$f" ] || continue
+    sed -i "s|\$(BLDLIBRARY)|-lpython${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
+    sed -i "s|\$(LDLIBRARY)|libpython${PYTHON_MINOR}.so|g" "$f" 2>/dev/null || true
+    sed -i "s|\$(LIBRARY)|python${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
+done
+echo "  ✅ sysconfigdata-host patched: $(grep -m1 BLDLIBRARY "${SYSCONF_DIR}"/_sysconfigdata__*.py | head -1)"
+
+# Patch CCSHARED
 HOST_PY_LIB="${HOST_PY_PREFIX}/lib/python${PYTHON_MINOR}"
 echo "🔧 Patch sysconfigdata (CCSHARED = -fPIC only)"
 for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py "${SYSCONF_DIR}"/_sysconfigdata__*.py; do
@@ -32,7 +38,6 @@ for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py "${SYSCONF_DIR}"/_sysconfigdata__
     sed -i "s|'LDSHARED': .*|'LDSHARED': '${CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
     sed -i "s|'BLDSHARED': .*|'BLDSHARED': '${CC} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
     sed -i "s|'LDCXXSHARED': .*|'LDCXXSHARED': '${CXX} -shared -L${TARGET_ROOT}/lib -Wl,--hash-style=both',|g" "$f" 2>/dev/null || true
-    # Patch host paths còn sót
     sed -i "s|/opt/host-python/lib|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
     sed -i "s|/opt/host-python/include|${TARGET_ROOT}/include|g" "$f" 2>/dev/null || true
     sed -i "s|/usr/lib/x86_64-linux-gnu|${TARGET_ROOT}/lib|g" "$f" 2>/dev/null || true
@@ -44,7 +49,6 @@ for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py "${SYSCONF_DIR}"/_sysconfigdata__
 done
 echo "  ✅ Patched"
 
-# Verify CCSHARED
 echo "  Verify CCSHARED:"
 "${HOST_PYTHON}" -c "
 import sysconfig
@@ -91,7 +95,6 @@ export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include"
 
 export CARGO_BUILD_TARGET="aarch64-linux-android"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${CC}"
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${DEPS_INSTALL}/lib"
 export OPENSSL_DIR="${DEPS_INSTALL}"
 export OPENSSL_LIB_DIR="${DEPS_INSTALL}/lib"
 export OPENSSL_INCLUDE_DIR="${DEPS_INSTALL}/include"
