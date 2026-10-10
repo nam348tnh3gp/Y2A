@@ -6,6 +6,28 @@ PKG_SPEC="${1:-}"
 [ -z "$PKG_SPEC" ] && { echo "❌ Missing pkg"; exit 1; }
 PKG_NAME="${PKG_SPEC%%[<>=!~]*}"
 
+# ════════════════════════════════════════════════════════════
+# [ABI3] Danh sách package hỗ trợ Py_LIMITED_API / PyO3-abi3.
+# Chỉ những package này mới build dạng cpXX-abi3.
+# Package không hỗ trợ → build như cũ (cp313-cp313).
+# ════════════════════════════════════════════════════════════
+ABI3_TARGET="${ABI3_TARGET:-}"
+ABI3_CANDIDATES="cryptography bcrypt nh3 pydantic-core cffi"
+USE_ABI3=0
+if [ -n "$ABI3_TARGET" ]; then
+    for _c in $ABI3_CANDIDATES; do
+        if [ "$PKG_NAME" = "$_c" ]; then
+            USE_ABI3=1
+            break
+        fi
+    done
+fi
+if [ "$USE_ABI3" -eq 1 ]; then
+    echo "  🔗 ABI3: ${ABI3_TARGET} → wheel tương thích Python ≥ ${ABI3_TARGET#cp}"
+else
+    echo "  📦 Build native cho Python ${PYTHON_MINOR}"
+fi
+
 TMP_BUILD="/tmp/p4a-build-${PKG_NAME}"
 SRC_DIR="${TMP_BUILD}/src"
 PYSITE="${TMP_BUILD}/pysite"
@@ -21,8 +43,6 @@ echo "  PKG_NAME: $PKG_NAME"
 case "$PKG_NAME" in
     orjson)
         echo "  ⏭️  orjson: skip (x86-only SIMD code) — pin orjson<3.13 trong list.txt"
-        # Trả rc=0 để build-wheels.sh coi như "đã có sẵn" và không đánh fail.
-        # Muốn build thì thêm orjson<3.13 vào list.txt hoặc bỏ block này.
         exit 0
         ;;
 esac
@@ -211,9 +231,7 @@ export PYO3_CONFIG_FILE="$PYO3_CONFIG"
 export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
 export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
 
-# ── [numpy] GHI ĐÈ host sitecustomize: patch cả get_config_vars() (plural)
-#             + _CONFIG_VARS dict — thứ meson-python thực sự dùng.
-#             Overwrite trên HOST lib để luôn được load kể cả -E / -I.
+# ── [numpy] GHI ĐÈ host sitecustomize ──
 cat > "${HOST_PY_LIB}/sitecustomize.py" <<SITEEOF
 import os, sysconfig as _sc
 
@@ -235,7 +253,6 @@ _p = {
     'LDCXXSHARED': '${NDK_CXX} -shared -L' + _TR + '/lib -Wl,--hash-style=both',
 }
 
-# (1) Patch dict thật _CONFIG_VARS — quan trọng nhất cho meson
 try:
     _vars = _sc.get_config_vars()
     if isinstance(_vars, dict):
@@ -248,7 +265,6 @@ except Exception as e:
     print("[sitecustomize] _CONFIG_VARS patch failed:", e,
           file=__import__('sys').stderr)
 
-# (2) get_config_var (singular)
 _orig_gcv = _sc.get_config_var
 def _gcv(n):
     if n in _p:
@@ -256,7 +272,6 @@ def _gcv(n):
     return _orig_gcv(n)
 _sc.get_config_var = _gcv
 
-# (3) get_config_vars (plural) — cái meson-python gọi
 _orig_gcvs = _sc.get_config_vars
 def _gcvs(*names):
     if not names:
@@ -264,7 +279,6 @@ def _gcvs(*names):
     return [_p.get(n, v) for n, v in zip(names, _orig_gcvs(*names))]
 _sc.get_config_vars = _gcvs
 
-# (4) get_path / get_paths (giữ hành vi target-only)
 _s = {
     'stdlib':      _TR + '/lib/' + _PY,
     'platstdlib':  _TR + '/lib/' + _PY,
@@ -312,7 +326,7 @@ assert v_s and '$(BLDLIBRARY)' not in str(v_s), f"singular bad: {v_s!r}"
 assert v_p and '$(BLDLIBRARY)' not in str(v_p), f"plural bad: {v_p!r}"
 PYEOF
 
-# sitecustomize phụ ở PYSITE (nếu PYTHONPATH được honour)
+# sitecustomize phụ ở PYSITE
 printf '# trigger only\n' > "${PYSITE}/sitecustomize.py"
 
 # PYTHONPATH
@@ -479,10 +493,22 @@ EOF
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK_CC}"
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR}"
         unset RUSTFLAGS
+
+        # ═══ [ABI3] Bật PyO3 abi3 cho Rust crate ═══
+        if [ "$USE_ABI3" -eq 1 ]; then
+            export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
+            SETUP_ARGS+=("--config-settings=--features=abi3")
+            echo "  🔗 maturin: --features=abi3 (PyO3 forward-compat)"
+        fi
         ;;
     *)
         echo "  → Setuptools backend"
         PLAT_NAME_ARG="--config-settings=--build-option=--plat-name=${ANDROID_TAG}"
+        # ═══ [ABI3] setuptools Extension(py_limited_api=True) ═══
+        if [ "$USE_ABI3" -eq 1 ]; then
+            SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=${ABI3_TARGET}")
+            echo "  🔗 setuptools: --py-limited-api=${ABI3_TARGET}"
+        fi
         ;;
 esac
 
@@ -594,8 +620,24 @@ PYEOF
         ;;
 
     cffi)
-        export CFFI_PY_LIMITED_API="0x030D0000"
-        SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=cp313")
+        if [ "$USE_ABI3" -eq 1 ]; then
+            # cp38 → 0x03080000, cp39 → 0x03090000, …
+            case "$ABI3_TARGET" in
+                cp37)  ABI3_HEX="0x03070000" ;;
+                cp38)  ABI3_HEX="0x03080000" ;;
+                cp39)  ABI3_HEX="0x03090000" ;;
+                cp310) ABI3_HEX="0x030A0000" ;;
+                cp311) ABI3_HEX="0x030B0000" ;;
+                cp312) ABI3_HEX="0x030C0000" ;;
+                *)     ABI3_HEX="0x03080000" ;;
+            esac
+            export CFFI_PY_LIMITED_API="$ABI3_HEX"
+            SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=${ABI3_TARGET}")
+            echo "  🔗 cffi: abi3 ${ABI3_TARGET} (Py_LIMITED_API=${ABI3_HEX})"
+        else
+            export CFFI_PY_LIMITED_API="0x030D0000"
+            SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=cp313")
+        fi
         ;;
 
     zstandard)
@@ -619,8 +661,6 @@ p = os.environ["UV_SETUP"]
 host = os.environ.get("TARGET_HOST", "aarch64-linux-android")
 src = open(p).read()
 orig = src
-# Chỉ thêm --host và --build; KHÔNG nhồi CC=/CFLAGS= vào args
-# (autoconf tự lấy từ env).
 src = src.replace(
     "['./configure']",
     "['./configure', '--host=" + host + "', '--build=x86_64-pc-linux-gnu',"
@@ -676,6 +716,13 @@ fi
 # 10. Patch cryptography/bcrypt/... sau build
 case "$PKG_NAME" in
     cryptography|bcrypt|nh3|pydantic-core|tokenizers)
+        # ═══ [ABI3] Wheel abi3 KHÔNG được link libpython${PYTHON_MINOR}
+        #           → để portable giữa các phiên bản Python.
+        if [ "$USE_ABI3" -eq 1 ]; then
+            echo "  ⏭️  Skip libpython patch (ABI3 mode)"
+            exit 0
+        fi
+
         pkg_under=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
         pkg_lower=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]')
         WHL=$(ls -t "${WHEELS_OUT}"/${pkg_under}-*.whl \
