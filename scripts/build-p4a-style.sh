@@ -212,21 +212,37 @@ export NPY_BLAS_LIBS="-lopenblas"
 export NPY_CBLAS_LIBS="-lopenblas"
 export NPY_LAPACK_LIBS="-lopenblas"
 
-# PyO3 config
+# ════════════════════════════════════════════════════════════
+# [FIX-ROOT] PyO3 config — KEY: suppress_build_script_link_lines
+# Khi file này được set, PyO3 CHỈ đọc nó và bỏ qua auto-detect.
+# - abi3=true + suppress=false → PyO3 vẫn emit
+#     cargo:rustc-link-lib=python3.13 → wheel abi3 dính NEEDED libpython.
+# - abi3=true + suppress=true  → PyO3 KHÔNG emit → wheel abi3 sạch.
+# ════════════════════════════════════════════════════════════
 PYO3_CONFIG="${TMP_BUILD}/pyo3-config.txt"
+
+if [ "$USE_ABI3" -eq 1 ]; then
+    PYO3_ABI3="true"
+    PYO3_SUPPRESS="true"
+else
+    PYO3_ABI3="false"
+    PYO3_SUPPRESS="false"
+fi
+
 cat > "$PYO3_CONFIG" <<EOF
 implementation=CPython
 version=${PYTHON_MINOR}
 shared=true
-abi3=true
+abi3=${PYO3_ABI3}
 lib_name=python${PYTHON_MINOR}
 lib_dir=${TARGET_ROOT}/lib
 executable=${TARGET_ROOT}/bin/python${PYTHON_MINOR}
 pointer_width=64
 build_flags=
-suppress_build_script_link_lines=false
+suppress_build_script_link_lines=${PYO3_SUPPRESS}
 EOF
 export PYO3_CONFIG_FILE="$PYO3_CONFIG"
+echo "  🔧 PYO3_CONFIG: abi3=${PYO3_ABI3} suppress_link_lines=${PYO3_SUPPRESS}"
 
 export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
 export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
@@ -326,7 +342,7 @@ assert v_s and '$(BLDLIBRARY)' not in str(v_s), f"singular bad: {v_s!r}"
 assert v_p and '$(BLDLIBRARY)' not in str(v_p), f"plural bad: {v_p!r}"
 PYEOF
 
-# ═══ [FIX] Copy sitecustomize THẬT vào PYSITE (che file rỗng) ═══
+# Copy sitecustomize THẬT vào PYSITE
 cp "${HOST_PY_LIB}/sitecustomize.py" "${PYSITE}/sitecustomize.py"
 
 # PYTHONPATH
@@ -339,7 +355,6 @@ fi
 
 # ════════════════════════════════════════════════════════════
 # [FIX BLDLIBRARY] Sed cứng placeholder trong MỌI _sysconfigdata
-#                  nằm trong PYTHONPATH
 # ════════════════════════════════════════════════════════════
 for d in \
     "${WORKSPACE}/sysconfigdata-host" \
@@ -355,7 +370,6 @@ for d in \
     find "${d}/__pycache__" -name "_sysconfigdata__*" -delete 2>/dev/null || true
 done
 
-# Verify
 VERIFY_OUT=$(
     PYTHONPATH="${PYSITE}:${_SYSCONF_DIR}" \
     "${HOST_PYTHON}" -c "import sysconfig; print(sysconfig.get_config_var('BLDLIBRARY'))" 2>/dev/null || echo "FAIL"
@@ -524,11 +538,13 @@ EOF
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib"
         unset RUSTFLAGS
 
-        # ═══ [ABI3] Bật PyO3 abi3 + ép không link libpython ═══
+        # ═══ [FIX-ROOT] Bật PyO3 abi3 + chặn link libpython ═══
         if [ "$USE_ABI3" -eq 1 ]; then
             export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
+            export PYO3_NO_PYTHON=1                     # ⬅️ chặn build.rs scan host
+            export PYO3_ABI3_FORWARD_COMPATIBILITY=1    # ⬅️ tương thích PyO3 cũ
             SETUP_ARGS+=("--config-settings=--features=abi3")
-            echo "  🔗 maturin: --features=abi3"
+            echo "  🔗 maturin: --features=abi3, PYO3_NO_PYTHON=1"
 
             export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="\
 -C link-arg=-Wl,--as-needed \
@@ -545,7 +561,12 @@ EOF
         PLAT_NAME_ARG="--config-settings=--build-option=--plat-name=${ANDROID_TAG}"
         if [ "$USE_ABI3" -eq 1 ]; then
             SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=${ABI3_TARGET}")
+            # ═══ [FIX-ROOT] setuptools-rust + PyO3 cần env này ═══
+            export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
+            export PYO3_NO_PYTHON=1
+            export PYO3_ABI3_FORWARD_COMPATIBILITY=1
             echo "  🔗 setuptools: --py-limited-api=${ABI3_TARGET}"
+            echo "  🔗 PYO3_NO_PYTHON=1, PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1"
         fi
         ;;
 esac
@@ -720,7 +741,7 @@ PYEOF
         export ac_cv_build="x86_64-pc-linux-gnu"
         export ac_cv_target="aarch64-linux-android"
         export cross_compiling="yes"
-        # ═══ [FIX] HOSTCC/HOSTCXX phải là compiler x86_64 ═══
+        # HOSTCC/HOSTCXX phải là compiler x86_64
         export HOSTCC="/usr/bin/gcc"
         export HOSTCXX="/usr/bin/g++"
         export CC_FOR_BUILD="/usr/bin/gcc"
@@ -799,24 +820,88 @@ strip_libpython_from_wheel() {
     local work
     work="$(mktemp -d)"
     local changed=0
+
     unzip -o -q "$whl" -d "$work"
+
     while IFS= read -r so; do
         [ -f "$so" ] || continue
+
+        if ! ${READELF} -d "$so" 2>/dev/null | grep -qE 'NEEDED.*libpython3\.[0-9]+\.so'; then
+            continue
+        fi
+
+        echo "    🧹 [$(basename "$so")] phát hiện NEEDED libpython"
+
+        # ── Pass 1: patchelf ──
         local needed
         needed=$(${READELF} -d "$so" 2>/dev/null \
                  | grep -E 'NEEDED.*libpython3\.[0-9]+\.so' \
                  | sed -E 's/.*\[([^]]+)\].*/\1/' || true)
-        [ -z "$needed" ] && continue
         for lib in $needed; do
-            echo "    🧹 strip NEEDED $lib khỏi $(basename "$so")"
-            patchelf --remove-needed "$lib" "$so" || true
-            changed=1
+            echo "      patchelf --remove-needed $lib"
+            patchelf --remove-needed "$lib" "$so" 2>/dev/null || true
         done
+
+        # ── Pass 2: lief fallback ──
+        if ${READELF} -d "$so" 2>/dev/null | grep -qE 'NEEDED.*libpython3\.[0-9]+\.so'; then
+            echo "      ⚠️  patchelf không xoá hết → dùng lief"
+            if ! SO_PATH="$so" "${HOST_PYTHON}" - <<'PYEOF'
+import os, sys
+try:
+    import lief
+except ImportError:
+    print("lief not installed", file=sys.stderr)
+    sys.exit(1)
+
+so = os.environ["SO_PATH"]
+binary = lief.parse(so)
+if binary is None:
+    print(f"lief parse failed: {so}", file=sys.stderr)
+    sys.exit(1)
+
+removed = []
+for entry in list(binary.dynamic_entries):
+    tag_name = str(entry.tag)
+    if "NEEDED" not in tag_name:
+        continue
+    libname = getattr(entry, "name", "")
+    if libname.startswith("libpython3.") and libname.endswith(".so"):
+        removed.append(libname)
+        try:
+            binary.remove(entry)
+        except Exception as e:
+            print(f"remove failed: {e}", file=sys.stderr)
+
+if not removed:
+    print("lief: no libpython entry found", file=sys.stderr)
+    sys.exit(2)
+
+binary.write(so)
+print(f"lief removed: {removed}")
+PYEOF
+            then
+                echo "    ❌ lief strip failed cho $(basename "$so")"
+                rm -rf "$work"
+                return 1
+            fi
+        fi
+
+        # ── Pass 3: verify cuối, FAIL CỨNG ──
+        if ${READELF} -d "$so" 2>/dev/null | grep -qE 'NEEDED.*libpython3\.[0-9]+\.so'; then
+            echo "    ❌ VẪN còn NEEDED libpython trong $(basename "$so"):"
+            ${READELF} -d "$so" | grep -E 'NEEDED.*libpython' | sed 's/^/       /'
+            rm -rf "$work"
+            return 1
+        fi
+        echo "    ✅ $(basename "$so") sạch"
+        changed=1
     done < <(find "$work" -name "*.so")
+
     if [ "$changed" -eq 1 ]; then
         repack_wheel_record "$whl" "$work"
     fi
     rm -rf "$work"
+    return 0
 }
 
 add_libpython_to_wheel() {
@@ -855,7 +940,10 @@ for whl in "${WHEELS_OUT}"/*.whl; do
 
     if [[ "$base" == *"-abi3-"* ]]; then
         echo "  🔧 [abi3] Strip libpython khỏi $base"
-        strip_libpython_from_wheel "$whl"
+        if ! strip_libpython_from_wheel "$whl"; then
+            echo "  ❌ Strip thất bại cho $base — abort"
+            exit 1
+        fi
     else
         echo "  🔧 [native] Add libpython cho $base"
         add_libpython_to_wheel "$whl"
