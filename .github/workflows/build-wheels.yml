@@ -15,6 +15,10 @@ on:
         description: 'Xóa release wheels cũ (giữ 3 gần nhất) — true/false'
         required: false
         default: 'false'
+      abi3_target:
+        description: 'ABI3 target (cp38|cp39|cp310|cp311|cp312) hoặc "off" để tắt'
+        required: false
+        default: 'cp38'
   push:
     branches:
       - main
@@ -104,6 +108,7 @@ jobs:
             -e INPUT_PACKAGES="${{ github.event.inputs.packages }}" \
             -e INPUT_FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}" \
             -e INPUT_CLEAN_OLD="${{ github.event.inputs.clean_old_releases }}" \
+            -e INPUT_ABI3_TARGET="${{ github.event.inputs.abi3_target || 'cp38' }}" \
             p4a-wheels:latest \
             bash /work/scripts/entrypoint.sh
 
@@ -221,6 +226,7 @@ jobs:
           name: Wheels ${{ steps.tag.outputs.tag }}
           body: |
             Wheels cho Android aarch64 / Python 3.13.
+            ABI3 target: ${{ github.event.inputs.abi3_target || 'cp38' }}
 
             **Build status:** ${{ steps.summary.outputs.BUILD_STATUS || 'UNKNOWN' }}
 
