@@ -358,14 +358,39 @@ if ! ${HOST_PYTHON} -m pip install \
     exit 1
 fi
 
-# Verify từng module importable từ BUILD_DEPS_SITE
+# ════════════════════════════════════════════════════════════
+# [FIX] Verify build-time deps với mapping pip-name:import-name
+#
+# Lý do dùng mapping:
+#   - poetry-core  → import poetry.core   (dot, không phải underscore)
+#   - Các package khác đều đổi '-' → '_'
+#     nhưng poetry-core là ngoại lệ phải viết tường minh.
+# ════════════════════════════════════════════════════════════
 echo "🔍 Verify build-time deps..."
 FAIL=0
-for mod in setuptools_scm cppy hatch_vcs hatchling mesonpy ninja flit_core scikit_build_core cmake packaging pybind11 poetry_core setuptools_rust expandvars tomli pkgconfig; do
-    if PYTHONPATH="${BUILD_DEPS_SITE}" ${HOST_PYTHON} -c "import $mod" 2>/dev/null; then
-        echo "  ✅ $mod"
+for spec in \
+    "setuptools_scm:setuptools_scm" \
+    "cppy:cppy" \
+    "hatch-vcs:hatch_vcs" \
+    "hatchling:hatchling" \
+    "meson-python:mesonpy" \
+    "ninja:ninja" \
+    "flit-core:flit_core" \
+    "scikit-build-core:scikit_build_core" \
+    "cmake:cmake" \
+    "packaging:packaging" \
+    "pybind11:pybind11" \
+    "poetry-core:poetry.core" \
+    "setuptools-rust:setuptools_rust" \
+    "expandvars:expandvars" \
+    "tomli:tomli" \
+    "pkgconfig:pkgconfig"; do
+    pkg_name="${spec%%:*}"
+    mod_name="${spec##*:}"
+    if PYTHONPATH="${BUILD_DEPS_SITE}" ${HOST_PYTHON} -c "import ${mod_name}" 2>/dev/null; then
+        echo "  ✅ ${pkg_name} (import ${mod_name})"
     else
-        echo "  ❌ $mod NOT importable"
+        echo "  ❌ ${pkg_name} — import ${mod_name} FAILED"
         FAIL=1
     fi
 done
