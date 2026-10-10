@@ -116,7 +116,6 @@ unset FC F77 F90
 export CC="${NDK_CC}" CXX="${NDK_CXX}" AR="${NDK_AR}" RANLIB="${RANLIB}" STRIP="${STRIP}"
 export CPP="${NDK_CC} -E" LD="${NDK_CC}" AS="${NDK_CC}"
 
-# Target-specific env cho cc-rs
 export CC_aarch64_linux_android="${NDK_CC}"
 export CXX_aarch64_linux_android="${NDK_CXX}"
 export AR_aarch64_linux_android="${NDK_AR}"
@@ -150,14 +149,17 @@ unset PKG_CONFIG_LIBDIR
 unset PKG_CONFIG_SYSROOT_DIR
 
 # ════════════════════════════════════════════════════════════
-# [FIX NumPy ICE clang 14.0.7 / NDK r25c]
-# Export CFLAGS/CXXFLAGS + patch meson.build (xem thêm ở section 7)
+# [NDK r27] NumPy ICE workaround — giữ như defense-in-depth
+#
+# Với clang 18 (NDK r27), ICE clang 14 đã hết. Nhưng vẫn giữ
+# -O1 để đảm bảo không có bất ngờ. Có thể bỏ nếu muốn NumPy
+# performance tối đa (không khuyến nghị).
 # ════════════════════════════════════════════════════════════
 case "$PKG_NAME" in
     numpy|scipy)
         export CFLAGS="-O1 -fno-vectorize -fno-slp-vectorize"
         export CXXFLAGS="-O1 -fno-vectorize -fno-slp-vectorize"
-        echo "  → NumPy/SciPy: CFLAGS=$CFLAGS"
+        echo "  → NumPy/SciPy: CFLAGS=$CFLAGS (defense với clang 18)"
         ;;
 esac
 
@@ -186,7 +188,7 @@ export PYO3_CONFIG_FILE="$PYO3_CONFIG"
 export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
 export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
 
-# sitecustomize
+# sitecustomize cho PYSITE
 cat > "${PYSITE}/sitecustomize.py" <<SITEEOF
 import sysconfig
 _patches = {
@@ -205,7 +207,16 @@ def _gcv(name):
 sysconfig.get_config_var = _gcv
 SITEEOF
 
-export PYTHONPATH="${PYSITE}"
+# ════════════════════════════════════════════════════════════
+# [FIX build-deps] PYTHONPATH = PYSITE + BUILD_DEPS_SITE
+#
+# - PYSITE: package override (numpy-config, v.v.)
+# - BUILD_DEPS_SITE: backend như setuptools_scm, cppy, hatch_vcs,
+#   mesonpy... mà pip build cần (do --no-build-isolation).
+#
+# KHÔNG thêm TARGET_SITE (có cffi cũ shadow host cffi).
+# ════════════════════════════════════════════════════════════
+export PYTHONPATH="${PYSITE}:${BUILD_DEPS_SITE:-${WORKSPACE}/build-deps-site}"
 
 # 6. site.cfg
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
@@ -227,14 +238,7 @@ case "$BACKEND" in
         echo "  → Meson backend"
         case "$PKG_NAME" in
             numpy|scipy)
-                # ════════════════════════════════════════════════════════
-                # [FIX NumPy ICE] Patch thẳng meson.build
-                #
-                # Lý do: NumPy meson.build gọi add_project_arguments()
-                # với '-O3'/'optimization: 3'. Meson append project args
-                # SAU env → env CFLAGS không thắng được cho các target
-                # có flag riêng. Sed-replace trực tiếp để chắc chắn.
-                # ════════════════════════════════════════════════════════
+                # Patch meson.build — defense với clang 18
                 echo "  → Patch NumPy/SciPy meson.build: -O3/-O2 → -O1"
                 find "$SRC_PATH" -name "meson.build" -type f -print0 | \
                 while IFS= read -r -d '' f; do
@@ -242,15 +246,11 @@ case "$BACKEND" in
                             s/optimization: 3/optimization: 1/g; \
                             s/optimization: 2/optimization: 1/g; \
                             s/optimization:'3'/optimization:'1'/g; \
-                            s/optimization:'2'/optimization:'1'/g; \
-                            s/optimization:\"3\"/optimization:\"1\"/g; \
-                            s/optimization:\"2\"/optimization:\"1\"/g" "$f"
+                            s/optimization:'2'/optimization:'1'/g" "$f"
                 done
                 echo "  ✅ Patched $(find "$SRC_PATH" -name meson.build | wc -l) meson.build files"
 
-                # ════════════════════════════════════════════════════════
-                # [FIX BLAS] Đảm bảo openblas.pc tồn tại
-                # ════════════════════════════════════════════════════════
+                # openblas.pc fallback
                 if [ ! -f "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" ]; then
                     echo "  ⚠️  openblas.pc missing — generating fallback"
                     mkdir -p "${DEPS_INSTALL}/lib/pkgconfig"
@@ -272,9 +272,6 @@ PCEOF
                 if ! PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig" \
                      /usr/bin/pkg-config --exists openblas; then
                     echo "  ❌ pkg-config KHÔNG tìm thấy openblas"
-                    echo "     DEPS_INSTALL=${DEPS_INSTALL}"
-                    ls -la "${DEPS_INSTALL}/lib/pkgconfig/" 2>/dev/null | head -20
-                    ls -la "${DEPS_INSTALL}/lib/" 2>/dev/null | grep -i openblas
                     exit 1
                 fi
                 echo "  ✅ pkg-config OK: $(PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig" /usr/bin/pkg-config --modversion openblas)"
@@ -360,10 +357,6 @@ esac
 case "$PKG_NAME" in
     Pillow|pillow|PIL)
         echo "  → Patch Pillow"
-
-        # ════════════════════════════════════════════════════════
-        # [FIX Pillow] Ép dùng cross-compiled freetype/libjpeg/libpng
-        # ════════════════════════════════════════════════════════
         export FREETYPE_ROOT="${DEPS_INSTALL}"
         export ZLIB_ROOT="${DEPS_INSTALL}"
         export JPEG_ROOT="${DEPS_INSTALL}"
@@ -374,8 +367,6 @@ case "$PKG_NAME" in
         export WEBP_ROOT="${DEPS_INSTALL}"
         export XCB_ROOT="/nonexistent/skip"
 
-        # Verify cross-compiled libs tồn tại — nếu thiếu thì warn,
-        # KHÔNG exit (Pillow có thể build không có feature đó).
         MISSING_PILLOW=""
         for lib in libfreetype libjpeg libpng libz; do
             if [ ! -f "${DEPS_INSTALL}/lib/${lib}.a" ] && \
@@ -385,8 +376,6 @@ case "$PKG_NAME" in
         done
         if [ -n "$MISSING_PILLOW" ]; then
             echo "  ⚠️  Missing cross-compiled:${MISSING_PILLOW}"
-            echo "     → Pillow sẽ build thiếu feature tương ứng"
-            # Tắt hẳn feature thiếu để Pillow không fallback về HOST
             case "$MISSING_PILLOW" in
                 *libfreetype*) export FREETYPE_ROOT="/nonexistent/skip" ;;
             esac
@@ -516,71 +505,6 @@ PYEOF
         "${HOST_PYTHON}" /tmp/patch_pillow.py
         ;;
 
-    # ════════════════════════════════════════════════════════════
-    # [FIX orjson 3.13] Gate AVX512 cho non-x86_64
-    #
-    # Triệu chứng: orjson 3.13 build src/ffi/pystrref/avx512.rs
-    # không có #[cfg(target_arch = "x86_64")] → rustc báo:
-    #   error: the feature named `avx512bw` is not valid for this target
-    # trên aarch64.
-    #
-    # Giải pháp: prepend cfg gate cho toàn bộ file avx512.rs và
-    # gate mod declaration trong pystrref.rs.
-    # ════════════════════════════════════════════════════════════
-    orjson)
-        echo "  → Patch orjson: gate AVX512 cho non-x86_64"
-        AVX_FILE="$SRC_PATH/src/ffi/pystrref/avx512.rs"
-        if [ -f "$AVX_FILE" ]; then
-            sed -i '1i #![cfg(target_arch = "x86_64")]' "$AVX_FILE" || true
-            echo "  ✅ Patched: $AVX_FILE"
-        fi
-        MOD_FILE="$SRC_PATH/src/ffi/pystrref.rs"
-        if [ -f "$MOD_FILE" ] && ! grep -q 'cfg(target_arch = "x86_64")' "$MOD_FILE"; then
-            sed -i 's/^mod avx512;/#[cfg(target_arch = "x86_64")]\nmod avx512;/' "$MOD_FILE" || true
-            echo "  ✅ Patched: $MOD_FILE"
-        fi
-        ;;
-
-    # ════════════════════════════════════════════════════════════
-    # [FIX uvloop] Cross-compile libuv
-    #
-    # Triệu chứng: libuv ./configure exit 77 (config.status fail)
-    # vì autoconf không detect được cross-compile.
-    #
-    # Giải pháp:
-    #   1. Export env hint cho autoconf (ac_cv_func_*)
-    #   2. Export NDK toolchain để ./configure dùng đúng compiler
-    #   3. Set LIBUV_CROSS_COMPILE=1 cho uvloop build script
-    # ════════════════════════════════════════════════════════════
-    uvloop)
-        echo "  → Patch uvloop: cross-compile libuv"
-        export LIBUV_CROSS_COMPILE=1
-        export CROSS_COMPILE="aarch64-linux-android-"
-        export ac_cv_func_epoll_ctl=yes
-        export ac_cv_func_epoll_create1=yes
-        export ac_cv_func_eventfd=yes
-        export ac_cv_func_pipe2=yes
-        export ac_cv_func_inotify_init1=yes
-        export ac_cv_func_getrandom=yes
-        export ac_cv_func_pthread_condattr_setclock=yes
-        export ac_cv_func_pthread_barrier_init=yes
-        export ac_cv_lib_rt_clock_gettime=yes
-        export CC="${NDK_CC}"
-        export CXX="${NDK_CXX}"
-        export AR="${NDK_AR}"
-        export RANLIB="${RANLIB}"
-        export STRIP="${STRIP}"
-        export CFLAGS="-fPIC -O2 -I${DEPS_INSTALL}/include"
-        export LDFLAGS="-L${DEPS_INSTALL}/lib -L${TARGET_ROOT}/lib"
-        ;;
-
-    # ════════════════════════════════════════════════════════════
-    # [FIX chardet] Không cần patch — dep hatch-vcs đã cài ở entrypoint
-    # ════════════════════════════════════════════════════════════
-    chardet)
-        echo "  → chardet: hatch-vcs (đã cài ở entrypoint)"
-        ;;
-
     cffi)
         export CFFI_PY_LIMITED_API="0x030D0000"
         SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=cp313")
@@ -590,9 +514,6 @@ PYEOF
         echo "  → zstandard: cffi đã dọn"
         ;;
 
-    # ════════════════════════════════════════════════════════════
-    # [FIX cryptography 50.x] Tắt legacy provider NGAY LÚC BUILD
-    # ════════════════════════════════════════════════════════════
     cryptography)
         echo "  → cryptography: CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1"
         export CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1
