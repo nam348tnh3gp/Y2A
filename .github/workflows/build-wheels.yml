@@ -53,9 +53,6 @@ jobs:
                       /opt/ghc /usr/local/share/boost 2>/dev/null || true
           df -h / | tail -1
 
-      # ============================================================
-      # [CACHE] deps-install
-      # ============================================================
       - name: Cache deps-install
         uses: actions/cache@v4
         with:
@@ -64,9 +61,6 @@ jobs:
           restore-keys: |
             deps-aarch64-api24-
 
-      # ============================================================
-      # [CACHE] python-android
-      # ============================================================
       - name: Cache python-android
         uses: actions/cache@v4
         with:
@@ -94,9 +88,6 @@ jobs:
           sudo chown -R 1000:1000 "${{ github.workspace }}"
           ls -la "${{ github.workspace }}"
 
-      # ============================================================
-      # Run build in container
-      # ============================================================
       - name: Run build in container
         id: build
         run: |
@@ -116,9 +107,6 @@ jobs:
         if: always()
         run: sudo chown -R $(id -u):$(id -g) "${{ github.workspace }}" || true
 
-      # ============================================================
-      # Read build summary
-      # ============================================================
       - name: Read build summary
         id: summary
         if: always()
@@ -135,9 +123,6 @@ jobs:
             cat build-summary.txt
           fi
 
-      # ============================================================
-      # Show summary in Actions UI
-      # ============================================================
       - name: Add build summary to job summary
         if: always()
         run: |
@@ -165,9 +150,6 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ============================================================
-      # Upload failures log as artifact
-      # ============================================================
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('build-failures.txt') != ''
         with:
@@ -177,9 +159,6 @@ jobs:
             build-summary.txt
           retention-days: 30
 
-      # ============================================================
-      # Cleanup old releases nếu được yêu cầu
-      # ============================================================
       - name: Cleanup old wheel releases
         if: github.event.inputs.clean_old_releases == 'true'
         env:
@@ -204,9 +183,6 @@ jobs:
             gh release delete "$tag" --yes --cleanup-tag 2>&1 || true
           done <<< "$DELETE"
 
-      # ============================================================
-      # Generate release tag
-      # ============================================================
       - name: Generate release tag
         id: tag
         if: hashFiles('wheels-final/*.whl') != ''
@@ -215,9 +191,6 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "→ TAG=$TAG"
 
-      # ============================================================
-      # Create release (dùng softprops — không cần gh CLI)
-      # ============================================================
       - name: Create release
         if: hashFiles('wheels-final/*.whl') != ''
         uses: softprops/action-gh-release@v2
@@ -244,9 +217,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ============================================================
-      # Generate pip index
-      # ============================================================
       - name: Generate pip index
         if: hashFiles('wheels-final/*.whl') != ''
         run: |
@@ -276,9 +246,6 @@ jobs:
           EOF
           fi
 
-      # ============================================================
-      # Commit docs
-      # ============================================================
       - name: Commit docs
         if: hashFiles('wheels-final/*.whl') != ''
         env:
@@ -312,9 +279,6 @@ jobs:
           echo "❌ Push thất bại sau 5 lần"
           exit 1
 
-      # ============================================================
-      # Upload wheels artifact
-      # ============================================================
       - uses: actions/upload-artifact@v4
         if: hashFiles('wheels-final/*.whl') != ''
         with:
