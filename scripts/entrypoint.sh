@@ -1,9 +1,9 @@
 #!/bin/bash
-# Entrypoint chạy trong Docker container
+# Entrypoint chạy trong Docker container — multi-Python native build
 set -eo pipefail
 
 echo "════════════════════════════════════════════════════════════"
-echo "🐳 p4a-style wheel builder"
+echo "🐳 p4a-style wheel builder — Python ${PYTHON_MINOR} (native)"
 echo "════════════════════════════════════════════════════════════"
 
 source "${CARGO_HOME}/env" 2>/dev/null || true
@@ -31,34 +31,18 @@ export NDK_AR="${AR}"
 mkdir -p "${TARGET_ROOT}" "${DEPS_INSTALL}" "${WHEELS_OUT}" "${WHEELS_FINAL}"
 
 # ════════════════════════════════════════════════════════════
-# [ABI3] Chuẩn hoá target
+# [NATIVE] Không abi3 — build thẳng cho PYTHON_MINOR
 # ════════════════════════════════════════════════════════════
-ABI3_RAW="${INPUT_ABI3_TARGET:-cp38}"
-case "$ABI3_RAW" in
-    off|none|disable|"")
-        export ABI3_TARGET=""
-        echo "📌 ABI3: OFF"
-        ;;
-    cp37|cp38|cp39|cp310|cp311|cp312)
-        export ABI3_TARGET="$ABI3_RAW"
-        echo "📌 ABI3 target: ${ABI3_TARGET} (wheel chạy Python ≥ ${ABI3_TARGET#cp})"
-        ;;
-    *)
-        export ABI3_TARGET=""
-        echo "⚠️  ABI3 target không hợp lệ: $ABI3_RAW — tắt ABI3"
-        ;;
-esac
+echo "📌 Native build cho Python ${PYTHON_MINOR} (không abi3)"
+echo "   PYTHON_VERSION=${PYTHON_VERSION}"
+echo "   PYTHON_MINOR=${PYTHON_MINOR}"
 
 # ════════════════════════════════════════════════════════════
-# [NDK r27] Verify NDK version
+# Verify NDK
 # ════════════════════════════════════════════════════════════
 NDK_REV=$(grep 'Pkg.Revision' "${NDK}/source.properties" 2>/dev/null | cut -d= -f2 | tr -d ' ' || echo "unknown")
 echo "📌 NDK revision: ${NDK_REV}"
 echo "📌 Clang: $(${NDK_CC} --version 2>/dev/null | head -1 || echo 'unknown')"
-case "${NDK_REV}" in
-    27.*|28.*|29.*) echo "  ✅ NDK r27+ — Clang 18+" ;;
-    *) echo "  ⚠️  NDK ${NDK_REV}" ;;
-esac
 
 # 1. Cross-compile core deps
 if [ ! -f "${DEPS_INSTALL}/.done" ]; then
@@ -75,7 +59,7 @@ if [ ! -f "${TARGET_INCLUDE_CHECK}/Python.h" ]; then
 fi
 
 if [ ! -f "${TARGET_ROOT}/.python-built" ]; then
-    echo "🔨 Cross-compile CPython..."
+    echo "🔨 Cross-compile CPython ${PYTHON_VERSION}..."
     bash scripts/cross-compile-python.sh || { echo "❌ python FAILED"; exit 1; }
     touch "${TARGET_ROOT}/.python-built"
 fi
@@ -103,7 +87,6 @@ for f in "${TARGET_STDLIB}"/_sysconfigdata__*.py; do
     [ -f "$f" ] && cp -v "$f" "$HOST_PY_LIB/" 2>/dev/null || true
 done
 
-# ═══ Patch BLDLIBRARY/LIBRARY/LDLIBRARY ═══
 echo "🔧 Patch sysconfigdata (BLDLIBRARY, LIBRARY, LDLIBRARY)"
 
 PATCH_PY="${WORKSPACE}/.patch-sysconf-$$.py"
@@ -158,7 +141,6 @@ else
 fi
 rm -f "$PATCH_PY"
 
-# Patch path
 for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py "${TARGET_STDLIB}"/_sysconfigdata__*.py; do
     [ -f "$f" ] || continue
     sed -i "s|'CCSHARED': .*|'CCSHARED': '-fPIC',|g" "$f" 2>/dev/null || true
@@ -187,7 +169,7 @@ if [ -d "${TARGET_INCLUDE_CHECK}" ] && [ -d "${HOST_INCLUDE}" ]; then
     cp -rf "${TARGET_INCLUDE_CHECK}/." "${HOST_INCLUDE}/" 2>/dev/null || true
 fi
 
-echo "🔧 Copy Python headers vào parent dir (giữ subdirs)"
+echo "🔧 Copy Python headers vào parent dir"
 cp -rn "${HOST_INCLUDE}/." "${HOST_INCLUDE_PARENT}/" 2>/dev/null || true
 echo "  ✅ Python.h ở ${HOST_INCLUDE_PARENT}/Python.h"
 [ -f "${HOST_INCLUDE_PARENT}/cpython/pymem.h" ] || {
@@ -195,7 +177,6 @@ echo "  ✅ Python.h ở ${HOST_INCLUDE_PARENT}/Python.h"
     ln -sfn "python${PYTHON_MINOR}/internal" "${HOST_INCLUDE_PARENT}/internal" 2>/dev/null || true
 }
 
-# Global sitecustomize
 cat > "${HOST_PY_LIB}/sitecustomize.py" <<SITEEOF
 import os, sysconfig
 
@@ -283,7 +264,7 @@ echo "🔧 Setup native tools"
 sudo mkdir -p /usr/local/bin
 for bindir in /usr/local/bin /usr/bin; do
     sudo ln -sf "${HOST_PYTHON}" "${bindir}/python3"
-    sudo ln -sf "${HOST_PYTHON}" "${bindir}/python3.13"
+    sudo ln -sf "${HOST_PYTHON}" "${bindir}/python${PYTHON_MINOR}"
     sudo ln -sf "${HOST_PYTHON}" "${bindir}/python"
     [ -f "${HOST_PY_PREFIX}/bin/cython" ] && sudo ln -sf "${HOST_PY_PREFIX}/bin/cython" "${bindir}/cython"
     [ -f "${HOST_PY_PREFIX}/bin/cython3" ] && sudo ln -sf "${HOST_PY_PREFIX}/bin/cython3" "${bindir}/cython3"
@@ -338,7 +319,7 @@ for dst in \
     sudo cp "${DEPS_INSTALL}/lib/pkgconfig/python3.pc" "$dst/" 2>/dev/null || \
         cp "${DEPS_INSTALL}/lib/pkgconfig/python3.pc" "$dst/" 2>/dev/null || true
 done
-echo "  ✅ python3.pc OK (5 paths)"
+echo "  ✅ python3.pc OK"
 echo "  pkg-config test: $(pkg-config --modversion python3 2>&1 || echo 'not found')"
 
 echo "🔧 Cleanup cffi khỏi TARGET_SITE"
@@ -349,22 +330,9 @@ rm -rf "${TARGET_SITE}/pycparser" 2>/dev/null || true
 rm -rf "${TARGET_SITE}/pycparser-"*.dist-info 2>/dev/null || true
 rm -f  "${TARGET_SITE}/_cffi_backend"* 2>/dev/null || true
 
-LEFTOVER=$(find "${TARGET_SITE}" -maxdepth 1 -mindepth 1 \
-    \( -name "cffi*" -o -name "_cffi_backend*" -o -name "pycparser*" \) \
-    2>/dev/null | wc -l)
-LEFTOVER=${LEFTOVER:-0}
-LEFTOVER=$(echo "$LEFTOVER" | tr -d '[:space:]')
-
-if [ "${LEFTOVER:-0}" -gt 0 ]; then
-    echo "  ⚠️  Còn ${LEFTOVER} leftover — force remove"
-    sudo rm -rf "${TARGET_SITE}"/cffi* "${TARGET_SITE}"/_cffi_backend* "${TARGET_SITE}"/pycparser* 2>/dev/null || true
-fi
-echo "  ✅ TARGET_SITE cleaned (leftover=${LEFTOVER:-0})"
-
 "${HOST_PYTHON}" -c "
 import cffi, _cffi_backend
 print(f'  host cffi: {cffi.__version__}')
-print(f'  host _cffi_backend: {_cffi_backend.__version__}')
 " || echo "  ⚠️  host cffi check failed"
 
 # 4. Bootstrap pip
@@ -376,11 +344,11 @@ if [ ! -d "${TARGET_SITE}/pip" ]; then
         --upgrade pip setuptools wheel || exit 1
 fi
 
-# 5. Install build-time deps
+# 5. Build-time deps
 export BUILD_DEPS_SITE="${WORKSPACE}/build-deps-site"
 mkdir -p "${BUILD_DEPS_SITE}"
 
-echo "🔨 Install build-time deps vào ${BUILD_DEPS_SITE}..."
+echo "🔨 Install build-time deps..."
 BUILD_DEPS=(
     "hatch-vcs>=0.4"
     "hatchling>=1.25"
@@ -436,9 +404,9 @@ for spec in \
     pkg_name="${spec%%:*}"
     mod_name="${spec##*:}"
     if PYTHONPATH="${BUILD_DEPS_SITE}" ${HOST_PYTHON} -c "import ${mod_name}" 2>/dev/null; then
-        echo "  ✅ ${pkg_name} (import ${mod_name})"
+        echo "  ✅ ${pkg_name}"
     else
-        echo "  ❌ ${pkg_name} — import ${mod_name} FAILED"
+        echo "  ❌ ${pkg_name} FAILED"
         FAIL=1
     fi
 done
@@ -463,20 +431,14 @@ CLEAN=$(echo "$CLEAN" | xargs)
 export PKGLIST="${CLEAN}"
 echo "📦 Packages: ${PKGLIST}"
 
-echo "🔍 Verify pin/comment:"
-echo "$PKGLIST" | tr ' ' '\n' | grep -E "orjson|uvloop" 2>/dev/null || echo "  (không có orjson/uvloop)"
-
 # 7. Build
-echo "🔍 [pre-build] Kiểm tra ABI3 config:"
-echo "  ABI3_TARGET=${ABI3_TARGET:-<off>}"
-echo "  PYTHON_MINOR=${PYTHON_MINOR}"
+echo "🔍 [pre-build] PYTHON_VERSION=${PYTHON_VERSION} PYTHON_MINOR=${PYTHON_MINOR}"
 
 bash scripts/build-wheels.sh || true
 
 WHEEL_COUNT=$(ls "${WHEELS_OUT}"/*.whl 2>/dev/null | wc -l)
 [ "$WHEEL_COUNT" -eq 0 ] && { echo "❌ No wheels"; exit 1; }
 
-# ═══ Log trạng thái libpython của từng wheel ═══
 echo ""
 echo "════════════════════════════════════════════"
 echo "  Kiểm tra libpython linkage"
@@ -487,21 +449,19 @@ for whl in "${WHEELS_OUT}"/*.whl; do
     [[ "$base" == *"none-any"* ]] && continue
     tmp=$(mktemp -d)
     unzip -q -o "$whl" -d "$tmp" 2>/dev/null || true
-    tag="native"
-    [[ "$base" == *"-abi3-"* ]] && tag="abi3"
     found=0
     while IFS= read -r so; do
         if ${READELF} -d "$so" 2>/dev/null | grep -qE 'NEEDED.*libpython3\.[0-9]+\.so'; then
-            echo "  [$tag] $base → $(basename "$so") NEEDED libpython"
+            echo "  $base → $(basename "$so") NEEDED libpython"
             found=1
         fi
     done < <(find "$tmp" -name "*.so" 2>/dev/null)
-    [ "$found" -eq 0 ] && echo "  [$tag] $base → OK (không NEEDED libpython)"
+    [ "$found" -eq 0 ] && echo "  $base → OK"
     rm -rf "$tmp"
 done
 
 bash scripts/post-process.sh || exit 1
 bash scripts/verify-wheels.sh || { echo "❌ Verify FAILED"; exit 1; }
 
-echo "✅ Build complete"
+echo "✅ Build complete — Python ${PYTHON_MINOR}"
 exit 0
