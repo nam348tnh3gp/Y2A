@@ -1,6 +1,9 @@
-# Dockerfile.wheels — Cross-compile Android wheels cho Python 3.13
-# Cache bust: 2026-10-10-v4 — NDK r27 LTS (Clang 18, fix ICE clang 14)
+# Dockerfile.wheels — Cross-compile Android wheels (multi-Python)
+# Cache bust: 2026-10-11-v6 — 3.13 + 3.14, bỏ ABI3
 FROM ubuntu:22.04
+
+ARG PYTHON_VERSION=3.13.1
+ARG PYTHON_MINOR=3.13
 
 # ---- Locale ----
 RUN apt-get update -qq && \
@@ -14,8 +17,8 @@ ENV LANG="en_US.UTF-8" \
     DEBIAN_FRONTEND=noninteractive
 
 # ---- Version pins ----
-ENV PYTHON_VERSION=3.13.1 \
-    PYTHON_MINOR=3.13 \
+ENV PYTHON_VERSION=${PYTHON_VERSION} \
+    PYTHON_MINOR=${PYTHON_MINOR} \
     OPENSSL_VERSION=3.3.2 \
     LIBFFI_VERSION=3.4.6 \
     SQLITE_VERSION=3460100 \
@@ -33,7 +36,7 @@ ENV PYTHON_VERSION=3.13.1 \
     ANDROID_TAG=android_24_arm64_v8a \
     NDK_VERSION=r27
 
-# ---- Build tools + lld + dev headers ----
+# ---- Build tools ----
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         build-essential autoconf automake libtool \
@@ -47,15 +50,20 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/*
 
 # ============================================================
-# Tải Python source tarball — giữ lại cho cross-compile
+# Python source tarball
 # ============================================================
 ENV PYTHON_SRC=/opt/python-src
 RUN mkdir -p ${PYTHON_SRC} && cd ${PYTHON_SRC} && \
-    wget -q "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz" && \
+    PY_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz" && \
+    if ! wget -q --spider "$PY_URL"; then \
+        echo "⚠️  $PY_URL không tồn tại — thử pre-release dir" && \
+        PY_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz" ; \
+    fi && \
+    wget -q "$PY_URL" && \
     ls -lh ${PYTHON_SRC}/
 
 # ============================================================
-# Build HOST Python
+# Build HOST Python (cùng version để cross-compile)
 # ============================================================
 ENV HOST_PYTHON=/opt/host-python/bin/python${PYTHON_MINOR}
 ENV HOST_PY_PREFIX=/opt/host-python
@@ -78,18 +86,17 @@ RUN cd ${PYTHON_SRC} && \
     ${HOST_PYTHON} -c "import zlib, ssl, sqlite3, ctypes; print('OK')" && \
     rm -rf "${PYTHON_SRC}/Python-${PYTHON_VERSION}"
 
-# Host Python build deps
 RUN ${HOST_PYTHON} -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     ${HOST_PYTHON} -m pip install --no-cache-dir \
-        "setuptools_scm<8.2" pybind11 maturin meson-python meson ninja \
+        pybind11 maturin meson-python meson ninja \
         pkgconfig Cython expandvars packaging tomli \
-        poetry-core flit-core hatchling wheel setuptools-rust \
+        poetry-core flit-core hatchling hatch-vcs \
+        setuptools-scm setuptools-rust \
         scikit-build-core cffi && \
     rm -rf ~/.cache/pip
 
 # ============================================================
-# NDK r27 LTS — Clang 18, libc++ mới, fix ICE clang 14
-# Ref: https://github.com/android/ndk/wiki/Changelog-r27
+# NDK r27 LTS
 # ============================================================
 ENV NDK=/opt/ndk/android-ndk-${NDK_VERSION}
 RUN mkdir -p /opt/ndk && cd /opt/ndk && \
@@ -106,7 +113,6 @@ ENV STRIP=${NDK_TOOLCHAIN}/bin/llvm-strip
 ENV READELF=${NDK_TOOLCHAIN}/bin/llvm-readelf
 ENV PATH="${NDK_TOOLCHAIN}/bin:${PATH}"
 
-# Verify NDK r27 (fail sớm nếu sai NDK)
 RUN ${CC} --version | head -1 && \
     echo "✅ NDK: $(grep 'Pkg.Revision' ${NDK}/source.properties)"
 
@@ -125,7 +131,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     rustc --version && cargo --version
 
 # ============================================================
-# User + chown build dirs
+# User + chown
 # ============================================================
 RUN useradd -m -s /bin/bash builder && \
     mkdir -p /work && \
