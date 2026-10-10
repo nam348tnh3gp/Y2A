@@ -37,11 +37,10 @@ for whl in "${WHEELS_OUT}"/*.whl; do
     newname="${newname//manylinux_2_28_aarch64/${ANDROID_TAG}}"
     newname="${newname//manylinux2014_aarch64/${ANDROID_TAG}}"
     newname="${newname//manylinux_2_17_aarch64/${ANDROID_TAG}}"
+    newname="${newname//manylinux_2_24_aarch64/${ANDROID_TAG}}"
 
-    # ═══ [ABI3] Normalize tag abi3 về ABI3_TARGET nếu có ═══
+    # ═══ [ABI3] Normalize tag abi3 (chỉ nâng, không hạ) ═══
     if [[ "$newname" == *"-abi3-"* ]] && [ -n "${ABI3_TARGET:-}" ]; then
-        # Chỉ ghi đè nếu tag cũ ≤ target (tránh hạ cấp).
-        # Giữ nguyên nếu crate chọn tag cao hơn target.
         cur_num=$(echo "$newname" | sed -nE 's/.*-cp3([0-9]+)-abi3-.*/\1/p')
         tgt_num="${ABI3_TARGET#cp3}"
         if [ -n "$cur_num" ] && [ -n "$tgt_num" ] && [ "$cur_num" -le "$tgt_num" ]; then
