@@ -20,9 +20,7 @@ echo "════════════════════════�
 echo "  Cross-compiling core deps"
 echo "════════════════════════════════════════════"
 
-# ═══════════════════════════════════════════════════════════
 # libffi
-# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ libffi ═══"
 wget -q "https://github.com/libffi/libffi/releases/download/v${LIBFFI_VERSION}/libffi-${LIBFFI_VERSION}.tar.gz"
@@ -32,9 +30,7 @@ CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLA
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
-# ═══════════════════════════════════════════════════════════
 # OpenSSL
-# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ OpenSSL ═══"
 wget -q "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
@@ -51,9 +47,7 @@ make -j$(nproc)
 make install_sw
 cd ..
 
-# ═══════════════════════════════════════════════════════════
 # SQLite3
-# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ SQLite3 ═══"
 SQLITE_URL="https://www.sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_VERSION}.tar.gz"
@@ -67,9 +61,7 @@ CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLA
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
-# ═══════════════════════════════════════════════════════════
 # XZ
-# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ XZ ═══"
 wget -q "https://github.com/tukaani-project/xz/releases/download/v${XZ_VERSION}/xz-${XZ_VERSION}.tar.gz"
@@ -79,7 +71,6 @@ CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLA
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
-# Xoá ARM binary khỏi DEPS_INSTALL/bin
 for bin in xz xzdec lzma unlzma unxz lzcat lzma-config xz-config; do
     if [ -f "${DEPS_INSTALL}/bin/${bin}" ]; then
         if file "${DEPS_INSTALL}/bin/${bin}" 2>/dev/null | grep -q "ELF"; then
@@ -89,9 +80,7 @@ for bin in xz xzdec lzma unlzma unxz lzcat lzma-config xz-config; do
     fi
 done
 
-# ═══════════════════════════════════════════════════════════
-# zlib — FORCE CLEAN BUILD với -fPIC
-# ═══════════════════════════════════════════════════════════
+# zlib
 echo ""
 echo "═══ zlib ═══"
 wget -q "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz"
@@ -105,9 +94,7 @@ make -j$(nproc) CFLAGS="-fPIC -O2"
 make install
 cd ..
 
-# ═══════════════════════════════════════════════════════════
 # libxml2
-# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ libxml2 ═══"
 wget -q "https://download.gnome.org/sources/libxml2/2.12/libxml2-${LIBXML2_VERSION}.tar.xz"
@@ -129,9 +116,7 @@ if [ ! -x "${DEPS_INSTALL}/bin/xml2-config" ]; then
 fi
 echo "  ✅ libxml2 + xml2-config OK"
 
-# ═══════════════════════════════════════════════════════════
-# libxslt — chỉ build libxslt + libexslt (skip xsltproc)
-# ═══════════════════════════════════════════════════════════
+# libxslt
 echo ""
 echo "═══ libxslt (skip xsltproc) ═══"
 wget -q "https://download.gnome.org/sources/libxslt/1.1/libxslt-${LIBXSLT_VERSION}.tar.xz"
@@ -184,9 +169,7 @@ if [ ! -f "${DEPS_INSTALL}/lib/libxslt.a" ] || [ ! -f "${DEPS_INSTALL}/lib/libex
 fi
 echo "  ✅ libxslt + libexslt OK"
 
-# ═══════════════════════════════════════════════════════════
 # libjpeg-turbo
-# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ libjpeg-turbo ═══"
 wget -q "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${LIBJPEGTURBO_VERSION}/libjpeg-turbo-${LIBJPEGTURBO_VERSION}.tar.gz"
@@ -204,9 +187,7 @@ cmake -G Ninja \
 ninja && ninja install
 cd ../..
 
-# ═══════════════════════════════════════════════════════════
 # libpng
-# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ libpng ═══"
 wget -q "https://download.sourceforge.net/libpng/libpng-${LIBPNG_VERSION}.tar.gz" \
@@ -217,18 +198,7 @@ CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLA
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
-# ═══════════════════════════════════════════════════════════
-# [FIX Pillow] freetype — cần cho PIL.ImageFont + _imagingft
-#
-# Triệu chứng: Pillow link với HOST freetype do cross-compiled
-# libfreetype.a không tồn tại → link command chứa
-#   -I/usr/include/freetype2 -L/usr/lib/x86_64-linux-gnu -lfreetype
-# → linker tìm thấy libfreetype x86-64 → mismatch ABI.
-#
-# Giải pháp: cross-compile freetype với --host, bật -fPIC, static.
-#   Disable optional deps (bzip2, png, harfbuzz, brotli) để giảm
-#   phụ thuộc — Pillow chỉ cần core freetype cho TTF rendering.
-# ═══════════════════════════════════════════════════════════
+# freetype
 echo ""
 echo "═══ freetype ═══"
 FREETYPE_VER="${FREETYPE_VERSION:-2.13.3}"
@@ -260,11 +230,9 @@ if [ ! -f "${DEPS_INSTALL}/lib/libfreetype.a" ]; then
     echo "❌ libfreetype.a không tồn tại sau build"
     exit 1
 fi
-echo "  ✅ freetype OK: $(ls ${DEPS_INSTALL}/lib/libfreetype.* 2>/dev/null)"
+echo "  ✅ freetype OK"
 
-# ═══════════════════════════════════════════════════════════
 # OpenBLAS
-# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ OpenBLAS ═══"
 wget -q "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${OPENBLAS_VERSION}/OpenBLAS-${OPENBLAS_VERSION}.tar.gz"
@@ -278,8 +246,6 @@ make -j$(nproc) \
     COMMON_OPT="-O2 -fPIC" CFLAGS="-O2 -fPIC -I${DEPS_INSTALL}/include"
 make PREFIX="${DEPS_INSTALL}" install
 
-# [FIX BLAS] OpenBLAS tự sinh openblas.pc khi `make install`.
-# Verify để tránh lỗi im lặng về sau.
 if [ ! -f "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" ]; then
     echo "  ⚠️  OpenBLAS không sinh openblas.pc — tạo fallback"
     cat > "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" <<PCEOF
@@ -296,18 +262,15 @@ Libs.private: -lm -ldl
 Cflags: -I\${includedir}
 PCEOF
 fi
-echo "  ✅ openblas.pc: ${DEPS_INSTALL}/lib/pkgconfig/openblas.pc"
+echo "  ✅ openblas.pc OK"
 cd ..
 
-# ═══════════════════════════════════════════════════════════
 # Summary
-# ═══════════════════════════════════════════════════════════
 echo ""
 echo "════════════════════════════════════════════"
 echo "✅ Tất cả core deps built"
 echo "════════════════════════════════════════════"
 
-# Verify critical libs
 MISSING=""
 for lib in libffi.a libssl.so libcrypto.so libsqlite3.a liblzma.a libz.a \
            libxml2.a libxslt.a libexslt.a libjpeg.a libpng.a \
