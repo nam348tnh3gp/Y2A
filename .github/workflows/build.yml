@@ -568,34 +568,9 @@ jobs:
           cp "$PY_LIB/libpython3.13.so" "$JNI/"
           find "$DEPS_INSTALL/lib" -maxdepth 1 -name "*.so*" -exec cp {} "$JNI/" \; 2>/dev/null || true
 
-          for f in "$JNI"/*.so.*; do
-            [ -f "$f" ] || continue
-            base=$(basename "$f")
-            new=$(echo "$base" | sed -E 's/(\.so)\.[0-9]+(\.[0-9]+)*$/\1/')
-            [ "$new" = "$base" ] && continue
-            mv "$f" "$JNI/$new"
-          done
-
-          PATCHED=0
-          for so in "$JNI/libpython3.13.so" "$PY_LIB/libpython3.13.so" "$DYNLIB"/*.so; do
-            [ -f "$so" ] || continue
-            for needed in $(readelf -d "$so" 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/'); do
-              new_needed=$(echo "$needed" | sed -E 's/(\.so)\.[0-9]+(\.[0-9]+)*$/\1/')
-              if [ "$new_needed" != "$needed" ] && [ -f "$JNI/$new_needed" ]; then
-                patchelf --replace-needed "$needed" "$new_needed" "$so"
-                PATCHED=$((PATCHED+1))
-              fi
-            done
-          done
-          echo "Patched $PATCHED NEEDED entries"
-
-          for so in "$JNI/libpython3.13.so" "$JNI/libssl.so" "$JNI/libcrypto.so"; do
-            [ -f "$so" ] && patchelf --force-rpath --set-rpath '$ORIGIN' "$so" 2>/dev/null || true
-          done
-
-          for so in "$DYNLIB"/*.so; do
-            [ -f "$so" ] && patchelf --force-rpath --set-rpath '$ORIGIN' "$so" 2>/dev/null || true
-          done
+          # Đệ quy: đổi tên *.so.N -> *.so, vá SONAME/NEEDED, rpath = $ORIGIN
+          # cho jniLibs + lib-dynload (không đụng site-packages: các .so ở đó tự có rpath riêng)
+          bash scripts/relocate_so.sh "$JNI" "$DYNLIB"
 
           SSL_SO=$(ls "$DYNLIB"/_ssl*.so 2>/dev/null | head -1)
           if [ -z "$SSL_SO" ]; then
@@ -659,11 +634,28 @@ jobs:
             cp "${TERMUX_BIN}/ffprobe" app/src/main/jniLibs/arm64-v8a/libffprobe.so
           fi
 
-          find "$TERMUX_LIB" -maxdepth 1 -type f \
+          # Copy cả file thật lẫn symlink (-a) để script dựng được bảng alias
+          find "$TERMUX_LIB" -maxdepth 1 \( -type f -o -type l \) \
             \( -name "libav*.so*" -o -name "libsw*.so*" -o -name "libpostproc*.so*" \) \
+            -exec cp -a {} app/src/main/assets/ffmpeg/lib/ \;
+
+          # Đệ quy: bỏ hậu tố phiên bản, vá SONAME/NEEDED, đổi RPATH Termux -> $ORIGIN
+          # Binary + lib xử lý chung 1 lần để NEEDED của ffmpeg khớp tên lib mới
+          STAGE="$(mktemp -d)"
+          cp -a app/src/main/assets/ffmpeg/lib/. "$STAGE/"
+          cp "${TERMUX_BIN}/ffmpeg" "$STAGE/ffmpeg"
+          [ -f "${TERMUX_BIN}/ffprobe" ] && cp "${TERMUX_BIN}/ffprobe" "$STAGE/ffprobe"
+          bash scripts/relocate_so.sh "$STAGE"
+
+          rm -rf app/src/main/assets/ffmpeg/lib && mkdir -p app/src/main/assets/ffmpeg/lib
+          find "$STAGE" -maxdepth 1 -type f -name "lib*.so" \
             -exec cp {} app/src/main/assets/ffmpeg/lib/ \;
+          cp "$STAGE/ffmpeg" app/src/main/jniLibs/arm64-v8a/libffmpeg.so
+          [ -f "$STAGE/ffprobe" ] && cp "$STAGE/ffprobe" app/src/main/jniLibs/arm64-v8a/libffprobe.so
 
           chmod 755 app/src/main/jniLibs/arm64-v8a/libffmpeg.so
+          echo "ffmpeg libs sau khi đổi tên:"; ls -l app/src/main/assets/ffmpeg/lib/
+          readelf -d app/src/main/jniLibs/arm64-v8a/libffmpeg.so | grep -E "NEEDED|RPATH|RUNPATH"
 
       # ============================================================
       # [FIX v3] Verify libpython + symbols trong jniLibs
