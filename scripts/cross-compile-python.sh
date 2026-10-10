@@ -1,6 +1,10 @@
 #!/bin/bash
-# Cross-compile CPython cho Android
+# Cross-compile CPython cho Android — hỗ trợ mọi PYTHON_VERSION/PYTHON_MINOR
 set -eo pipefail
+
+echo "════════════════════════════════════════════"
+echo "  Cross-compile CPython ${PYTHON_VERSION} (minor=${PYTHON_MINOR})"
+echo "════════════════════════════════════════════"
 
 # ════════════════════════════════════════════════════════════
 # Tarball fallback
@@ -17,13 +21,18 @@ if [ ! -f "$TARBALL" ]; then
     echo "  ⚠️  Không có $TARBALL — tải lại"
     mkdir -p /tmp/build-host
     cd /tmp/build-host
-    wget -q "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz"
+    PY_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz"
+    if ! wget -q --spider "$PY_URL"; then
+        echo "  ❌ Không tồn tại: $PY_URL"
+        exit 1
+    fi
+    wget -q "$PY_URL"
 fi
 
 echo "✅ Source: $TARBALL ($(stat -c%s "$TARBALL") bytes)"
 
 # ════════════════════════════════════════════════════════════
-# Export PKG_CONFIG_PATH — CPython configure cần
+# Export PKG_CONFIG_PATH
 # ════════════════════════════════════════════════════════════
 export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 export PKG_CONFIG_LIBDIR="${DEPS_INSTALL}/lib/pkgconfig"
@@ -69,8 +78,7 @@ tar -xf "$TARBALL"
 cd "Python-${PYTHON_VERSION}"
 
 # ════════════════════════════════════════════════════════════
-# [FIX] Ghi Setup.local — disable modules không cần +
-# FORCE ADD các module critical (không phụ thuộc configure detect)
+# Setup.local — disable modules + force _sqlite3
 # ════════════════════════════════════════════════════════════
 cat > Modules/Setup.local <<EOF
 *disabled*
@@ -85,18 +93,16 @@ _multiprocessing
 nis
 _uuid
 
-# Force enable _sqlite3 (bỏ qua configure detection)
 _sqlite3 _sqlite/module.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c -I${DEPS_INSTALL}/include -L${DEPS_INSTALL}/lib -lsqlite3
 EOF
 
 echo ""
 echo "════════════════════════════════════════════"
-echo "  Modules/Setup.local content:"
+echo "  Modules/Setup.local"
 echo "════════════════════════════════════════════"
 cat Modules/Setup.local
 echo "════════════════════════════════════════════"
 
-# Linker flags
 export LDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export BLDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both"
 export CCSHARED="-fPIC -Wl,--hash-style=both"
@@ -124,27 +130,13 @@ sed -i "s|^CCSHARED=.*|CCSHARED= -fPIC -Wl,--hash-style=both|" Makefile
 sed -i "s|^LDCXXSHARED=.*|LDCXXSHARED= ${CXX} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both|" Makefile
 sed -i "s|^LINKFORSHARED=.*|LINKFORSHARED= -Wl,--hash-style=both -Xlinker -export-dynamic|" Makefile
 
-# ════════════════════════════════════════════════════════════
-# Debug: xem CPython có nhận module không
-# ════════════════════════════════════════════════════════════
 echo ""
-echo "════════════════════════════════════════════"
-echo "  Debug: sqlite3 detection trong Makefile"
-echo "════════════════════════════════════════════"
-grep -E "SQLITE3" Makefile | head -20 || echo "  (không có SQLITE3)"
+echo "  Debug: SQLITE3 detection"
+grep -E "SQLITE3" Makefile | head -10 || echo "  (none)"
 
 echo ""
 echo "════════════════════════════════════════════"
-echo "  Debug: Makefile modules targets"
-echo "════════════════════════════════════════════"
-grep -E "_sqlite3" Makefile | head -20 || echo "  (không có _sqlite3 target)"
-
-# ════════════════════════════════════════════════════════════
-# Build
-# ════════════════════════════════════════════════════════════
-echo ""
-echo "════════════════════════════════════════════"
-echo "  Building CPython"
+echo "  Building CPython ${PYTHON_VERSION}"
 echo "════════════════════════════════════════════"
 make -j$(nproc) \
     LDSHARED="${CC} -shared -L${DEPS_INSTALL}/lib -Wl,--hash-style=both" \
@@ -153,15 +145,18 @@ make -j$(nproc) \
 make install
 
 # ════════════════════════════════════════════════════════════
-# Verify (non-fatal)
+# Verify — dùng PYTHON_MINOR động
 # ════════════════════════════════════════════════════════════
 echo ""
-echo "🔍 Verify libpython..."
-LP="${TARGET_ROOT}/lib/libpython3.13.so"
+echo "🔍 Verify libpython (minor=${PYTHON_MINOR})..."
+LP="${TARGET_ROOT}/lib/libpython${PYTHON_MINOR}.so"
 if [ -f "$LP" ]; then
     SYSV=$(${READELF} --dynamic "$LP" 2>/dev/null | grep -E "\(HASH\)" | grep -v "GNU_HASH" | wc -l || true)
     GNU=$(${READELF} --dynamic "$LP" 2>/dev/null | grep -c "GNU_HASH" || true)
-    echo "  libpython3.13.so: SysV=$SYSV GNU=$GNU"
+    echo "  libpython${PYTHON_MINOR}.so: SysV=$SYSV GNU=$GNU"
+else
+    echo "  ❌ KHÔNG có $LP"
+    exit 1
 fi
 
 LLVM_NM="${NDK_TOOLCHAIN}/bin/llvm-nm"
@@ -175,7 +170,7 @@ fi
 
 echo ""
 echo "🔍 Verify critical extensions..."
-LIBDYLOAD="${TARGET_ROOT}/lib/python3.13/lib-dynload"
+LIBDYLOAD="${TARGET_ROOT}/lib/python${PYTHON_MINOR}/lib-dynload"
 if [ -d "$LIBDYLOAD" ]; then
     CRITICAL="_lzma _sqlite3 _ssl _ctypes _hashlib _socket _posixsubprocess zlib binascii"
     MISSING=""
@@ -188,16 +183,9 @@ if [ -d "$LIBDYLOAD" ]; then
             MISSING="$MISSING $mod"
         fi
     done
-    if [ -n "$MISSING" ]; then
-        echo ""
-        echo "  ⚠️  Modules thiếu:$MISSING"
-        echo "  (không fail — pipeline tiếp tục)"
-    fi
+    [ -n "$MISSING" ] && echo "" && echo "  ⚠️  Modules thiếu:$MISSING (không fail)"
 fi
 
-# ════════════════════════════════════════════════════════════
-# Dump toàn bộ lib-dynload nếu thiếu module
-# ════════════════════════════════════════════════════════════
 if [ -d "$LIBDYLOAD" ]; then
     echo ""
     echo "🔍 Full content lib-dynload:"
@@ -205,4 +193,4 @@ if [ -d "$LIBDYLOAD" ]; then
 fi
 
 echo ""
-echo "✅ Cross-compile CPython hoàn tất"
+echo "✅ Cross-compile CPython ${PYTHON_VERSION} hoàn tất"
