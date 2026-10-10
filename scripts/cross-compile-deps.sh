@@ -97,7 +97,6 @@ echo "═══ zlib ═══"
 wget -q "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz"
 tar -xf "zlib-${ZLIB_VERSION}.tar.gz"
 cd "zlib-${ZLIB_VERSION}"
-# [FIX] Force clean build với -fPIC (bắt buộc cho static lib link vào .so)
 make distclean 2>/dev/null || true
 CFLAGS="-fPIC -O2" CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" \
     ./configure --prefix="${DEPS_INSTALL}" --static
@@ -219,6 +218,51 @@ make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
 # ═══════════════════════════════════════════════════════════
+# [FIX Pillow] freetype — cần cho PIL.ImageFont + _imagingft
+#
+# Triệu chứng: Pillow link với HOST freetype do cross-compiled
+# libfreetype.a không tồn tại → link command chứa
+#   -I/usr/include/freetype2 -L/usr/lib/x86_64-linux-gnu -lfreetype
+# → linker tìm thấy libfreetype x86-64 → mismatch ABI.
+#
+# Giải pháp: cross-compile freetype với --host, bật -fPIC, static.
+#   Disable optional deps (bzip2, png, harfbuzz, brotli) để giảm
+#   phụ thuộc — Pillow chỉ cần core freetype cho TTF rendering.
+# ═══════════════════════════════════════════════════════════
+echo ""
+echo "═══ freetype ═══"
+FREETYPE_VER="${FREETYPE_VERSION:-2.13.3}"
+wget -q "https://download.savannah.gnu.org/releases/freetype/freetype-${FREETYPE_VER}.tar.gz" \
+    || wget -q "https://downloads.sourceforge.net/project/freetype/freetype2/${FREETYPE_VER}/freetype-${FREETYPE_VER}.tar.gz"
+tar -xf "freetype-${FREETYPE_VER}.tar.gz"
+cd "freetype-${FREETYPE_VER}"
+CFLAGS="-fPIC -O2 -I${DEPS_INSTALL}/include" \
+./configure \
+    --host="${TARGET_HOST}" \
+    --prefix="${DEPS_INSTALL}" \
+    --enable-static \
+    --disable-shared \
+    --with-zlib=yes \
+    --with-bzip2=no \
+    --with-png=no \
+    --with-harfbuzz=no \
+    --with-brotli=no \
+    CC="${CC}" \
+    AR="${AR}" \
+    RANLIB="${RANLIB}" \
+    STRIP="${STRIP}" \
+    LDFLAGS="${COMMON_LDFLAGS} -L${DEPS_INSTALL}/lib"
+make -j$(nproc) CFLAGS="-fPIC -O2 -I${DEPS_INSTALL}/include"
+make install
+cd ..
+
+if [ ! -f "${DEPS_INSTALL}/lib/libfreetype.a" ]; then
+    echo "❌ libfreetype.a không tồn tại sau build"
+    exit 1
+fi
+echo "  ✅ freetype OK: $(ls ${DEPS_INSTALL}/lib/libfreetype.* 2>/dev/null)"
+
+# ═══════════════════════════════════════════════════════════
 # OpenBLAS
 # ═══════════════════════════════════════════════════════════
 echo ""
@@ -233,6 +277,26 @@ make -j$(nproc) \
     USE_THREAD=1 USE_OPENMP=0 NUM_THREADS=64 \
     COMMON_OPT="-O2 -fPIC" CFLAGS="-O2 -fPIC -I${DEPS_INSTALL}/include"
 make PREFIX="${DEPS_INSTALL}" install
+
+# [FIX BLAS] OpenBLAS tự sinh openblas.pc khi `make install`.
+# Verify để tránh lỗi im lặng về sau.
+if [ ! -f "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" ]; then
+    echo "  ⚠️  OpenBLAS không sinh openblas.pc — tạo fallback"
+    cat > "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" <<PCEOF
+prefix=${DEPS_INSTALL}
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: OpenBLAS
+Description: OpenBLAS is an optimized BLAS library
+Version: ${OPENBLAS_VERSION}
+Libs: -L\${libdir} -lopenblas
+Libs.private: -lm -ldl
+Cflags: -I\${includedir}
+PCEOF
+fi
+echo "  ✅ openblas.pc: ${DEPS_INSTALL}/lib/pkgconfig/openblas.pc"
 cd ..
 
 # ═══════════════════════════════════════════════════════════
@@ -246,7 +310,8 @@ echo "════════════════════════�
 # Verify critical libs
 MISSING=""
 for lib in libffi.a libssl.so libcrypto.so libsqlite3.a liblzma.a libz.a \
-           libxml2.a libxslt.a libexslt.a libjpeg.a libpng.a libopenblas.a; do
+           libxml2.a libxslt.a libexslt.a libjpeg.a libpng.a \
+           libfreetype.a libopenblas.a; do
     [ ! -f "${DEPS_INSTALL}/lib/${lib}" ] && MISSING="$MISSING $lib"
 done
 if [ -n "$MISSING" ]; then
