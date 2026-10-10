@@ -12,13 +12,9 @@ on:
         required: false
         default: 'false'
       clean_old_releases:
-        description: 'Xóa release wheels cũ (giữ 3 gần nhất) — true/false'
+        description: 'Xóa release wheels cũ (giữ 3 gần nhất)'
         required: false
         default: 'false'
-      abi3_target:
-        description: 'ABI3 target (cp38|cp39|cp310|cp311|cp312) hoặc "off" để tắt'
-        required: false
-        default: 'cp38'
   push:
     branches:
       - main
@@ -26,6 +22,7 @@ on:
     paths:
       - 'wheels/list.txt'
       - 'scripts/**'
+      - 'recipes/**'
       - 'Dockerfile.wheels'
       - '.github/workflows/build-wheels.yml'
 
@@ -37,7 +34,18 @@ permissions:
   contents: write
 
 jobs:
+  # ════════════════════════════════════════════════════════════
+  # Matrix: build cho từng phiên bản Python
+  # ════════════════════════════════════════════════════════════
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python_version: '3.13.1'
+            python_minor: '3.13'
+          - python_version: '3.14.0rc2'
+            python_minor: '3.14'
     runs-on: ubuntu-latest
     timeout-minutes: 300
 
@@ -57,7 +65,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/deps-install
-          key: deps-aarch64-api24-v6-docker
+          key: deps-aarch64-api24-v7
           restore-keys: |
             deps-aarch64-api24-
 
@@ -65,22 +73,25 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/python-android
-          key: python-android-3.13.1-v15-docker-${{ hashFiles('Dockerfile.wheels') }}
+          key: python-android-${{ matrix.python_minor }}-v17-docker-${{ hashFiles('Dockerfile.wheels') }}
           restore-keys: |
-            python-android-3.13.1-v15-docker-
+            python-android-${{ matrix.python_minor }}-v17-docker-
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build wheel-builder image
+      - name: Build wheel-builder image (py${{ matrix.python_minor }})
         uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile.wheels
           load: true
-          tags: p4a-wheels:latest
-          cache-from: type=gha,scope=v3
-          cache-to: type=gha,mode=max,scope=v3
+          tags: p4a-wheels:py${{ matrix.python_minor }}
+          build-args: |
+            PYTHON_VERSION=${{ matrix.python_version }}
+            PYTHON_MINOR=${{ matrix.python_minor }}
+          cache-from: type=gha,scope=v5-py${{ matrix.python_minor }}
+          cache-to: type=gha,mode=max,scope=v5-py${{ matrix.python_minor }}
 
       - name: Prepare workspace dirs
         run: |
@@ -88,129 +99,123 @@ jobs:
           sudo chown -R 1000:1000 "${{ github.workspace }}"
           ls -la "${{ github.workspace }}"
 
-      - name: Run build in container
-        id: build
+      - name: Run build in container (py${{ matrix.python_minor }})
         run: |
           set -e
           docker run --rm \
             -v "${{ github.workspace }}:/work" \
             -w /work \
             -u 1000:1000 \
+            -e PYTHON_VERSION=${{ matrix.python_version }} \
+            -e PYTHON_MINOR=${{ matrix.python_minor }} \
             -e INPUT_PACKAGES="${{ github.event.inputs.packages }}" \
             -e INPUT_FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}" \
             -e INPUT_CLEAN_OLD="${{ github.event.inputs.clean_old_releases }}" \
-            -e INPUT_ABI3_TARGET="${{ github.event.inputs.abi3_target || 'cp38' }}" \
-            p4a-wheels:latest \
+            p4a-wheels:py${{ matrix.python_minor }} \
             bash /work/scripts/entrypoint.sh
 
       - name: Fix ownership back
         if: always()
         run: sudo chown -R $(id -u):$(id -g) "${{ github.workspace }}" || true
 
-      - name: Read build summary
-        id: summary
-        if: always()
-        run: |
-          if [ -f build-summary.env ]; then
-            cat build-summary.env
-            while IFS='=' read -r key val; do
-              [ -z "$key" ] && continue
-              echo "${key}=${val}" >> "$GITHUB_OUTPUT"
-            done < build-summary.env
-          fi
-          if [ -f build-summary.txt ]; then
-            echo "=== Build Summary ==="
-            cat build-summary.txt
-          fi
-
-      - name: Add build summary to job summary
+      - name: Add summary to job summary
         if: always()
         run: |
           {
-            echo "## 📦 Build Summary"
+            echo "## 📦 Build Summary — py${{ matrix.python_minor }}"
             echo ""
             if [ -f build-summary.txt ]; then
               echo '```'
               cat build-summary.txt
               echo '```'
-            else
-              echo "(Không có build-summary.txt)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Add failures detail to job summary
-        if: always() && hashFiles('build-failures.txt') != ''
-        run: |
-          {
-            echo ""
-            echo "## ❌ Chi tiết lỗi"
-            echo ""
-            echo '```'
-            head -500 build-failures.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: actions/upload-artifact@v4
-        if: always() && hashFiles('build-failures.txt') != ''
+      - name: Upload wheels artifact
+        if: hashFiles('wheels-final/*.whl') != ''
+        uses: actions/upload-artifact@v4
         with:
-          name: build-failures-${{ github.run_id }}
+          name: wheels-py${{ matrix.python_minor }}
+          path: wheels-final/*.whl
+          retention-days: 30
+
+      - name: Upload failures (if any)
+        if: always() && hashFiles('build-failures.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: failures-py${{ matrix.python_minor }}-${{ github.run_id }}
           path: |
             build-failures.txt
             build-summary.txt
           retention-days: 30
 
-      - name: Cleanup old wheel releases
+  # ════════════════════════════════════════════════════════════
+  # Release — gộp wheels từ 2 phiên bản
+  # ════════════════════════════════════════════════════════════
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: needs.build.result == 'success'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-py*
+          merge-multiple: true
+          path: wheels-final
+
+      - name: List wheels
+        run: |
+          echo "=== WHEELS ==="
+          ls -lh wheels-final/ || true
+          echo "Total: $(ls wheels-final/*.whl 2>/dev/null | wc -l)"
+
+      - name: Verify wheels
+        env:
+          WHEELS_FINAL: ${{ github.workspace }}/wheels-final
+          READELF: readelf
+        run: |
+          chmod +x scripts/verify-wheels.sh
+          bash scripts/verify-wheels.sh
+
+      - name: Cleanup old releases (optional)
         if: github.event.inputs.clean_old_releases == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "=== Danh sách releases wheels ==="
-          gh release list --limit 100 --json tagName -q '.[] | select(.tagName | startswith("wheels-")) | .tagName' > /tmp/all_tags.txt
-          cat /tmp/all_tags.txt
+          gh release list --limit 100 --json tagName \
+            -q '.[] | select(.tagName | startswith("wheels-")) | .tagName' > /tmp/all_tags.txt
           TOTAL=$(wc -l < /tmp/all_tags.txt)
-          echo "Tổng: $TOTAL release"
-          if [ "$TOTAL" -le 3 ]; then
-            echo "≤ 3 release — không cần xóa"
-            exit 0
-          fi
-          KEEP=$(head -3 /tmp/all_tags.txt)
-          DELETE=$(tail -n +4 /tmp/all_tags.txt)
-          echo "=== Giữ lại ==="; echo "$KEEP"
-          echo "=== Xóa ==="; echo "$DELETE"
-          while read -r tag; do
+          if [ "$TOTAL" -le 3 ]; then exit 0; fi
+          tail -n +4 /tmp/all_tags.txt | while read -r tag; do
             [ -z "$tag" ] && continue
-            echo "→ Xóa release: $tag"
             gh release delete "$tag" --yes --cleanup-tag 2>&1 || true
-          done <<< "$DELETE"
+          done
 
       - name: Generate release tag
         id: tag
-        if: hashFiles('wheels-final/*.whl') != ''
         run: |
           TAG="wheels-$(date +%Y%m%d-%H%M%S)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "→ TAG=$TAG"
 
       - name: Create release
-        if: hashFiles('wheels-final/*.whl') != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: Wheels ${{ steps.tag.outputs.tag }}
           body: |
-            Wheels cho Android aarch64 / Python 3.13.
-            ABI3 target: ${{ github.event.inputs.abi3_target || 'cp38' }}
+            Android aarch64 wheels cho **Python 3.13 & 3.14**.
 
-            **Build status:** ${{ steps.summary.outputs.BUILD_STATUS || 'UNKNOWN' }}
+            Bao gồm: `cp313-cp313-android_24_arm64_v8a` và `cp314-cp314-android_24_arm64_v8a`.
 
-            Success: ${{ steps.summary.outputs.BUILD_SUCCESS_COUNT || '?' }}
-            Failed:  ${{ steps.summary.outputs.BUILD_FAILED_COUNT || '?' }}
-
-            Packages OK:
-            ${{ steps.summary.outputs.BUILD_SUCCESS_PKGS || '' }}
-
-            Packages failed:
-            ${{ steps.summary.outputs.BUILD_FAILED_PKGS || '' }}
+            Pip index: `pip install --extra-index-url https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/simple/ <pkg>`
           files: wheels-final/*.whl
           generate_release_notes: false
           make_latest: false
@@ -218,7 +223,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate pip index
-        if: hashFiles('wheels-final/*.whl') != ''
         run: |
           python3 scripts/gen_index.py \
             wheels-final docs \
@@ -227,7 +231,6 @@ jobs:
             ${{ steps.tag.outputs.tag }}
 
       - name: Create docs/index.html if missing
-        if: hashFiles('wheels-final/*.whl') != ''
         run: |
           if [ ! -f docs/index.html ]; then
             cat > docs/index.html <<'EOF'
@@ -247,7 +250,6 @@ jobs:
           fi
 
       - name: Commit docs
-        if: hashFiles('wheels-final/*.whl') != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -262,26 +264,15 @@ jobs:
           git commit -m "chore(wheels): update index [${{ steps.tag.outputs.tag }}] [skip ci]"
           git checkout -- . 2>/dev/null || true
           git reset --hard HEAD 2>/dev/null || true
-          git clean -fd -x -e wheels-out -e wheels-final 2>/dev/null || true
+          git clean -fd -x -e wheels-final 2>/dev/null || true
           for i in 1 2 3 4 5; do
             echo "=== Attempt $i ==="
             if git pull --rebase origin "${{ github.ref_name }}" && \
                git push origin "HEAD:${{ github.ref_name }}"; then
-              echo "✅ Push OK (attempt $i)"
+              echo "✅ Push OK"
               exit 0
             fi
-            echo "⚠️ Retry $i"
-            git checkout -- . 2>/dev/null || true
-            git reset --hard HEAD 2>/dev/null || true
-            git clean -fd -x -e wheels-out -e wheels-final 2>/dev/null || true
             sleep 5
           done
-          echo "❌ Push thất bại sau 5 lần"
+          echo "❌ Push thất bại"
           exit 1
-
-      - uses: actions/upload-artifact@v4
-        if: hashFiles('wheels-final/*.whl') != ''
-        with:
-          name: wheels-${{ steps.tag.outputs.tag }}
-          path: wheels-final/*.whl
-          retention-days: 30
