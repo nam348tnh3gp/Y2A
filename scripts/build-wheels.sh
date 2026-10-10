@@ -19,14 +19,14 @@ SYSCONF_DIR="${WORKSPACE}/sysconfigdata-host"
 rm -rf "$SYSCONF_DIR" && mkdir -p "$SYSCONF_DIR"
 cp "$SYSCONF_FILE" "$SYSCONF_DIR/"
 
-# ═══ [FIX] Sed placeholder trong bản copy ngay lập tức ═══
+# Sed placeholder trong bản copy
 for f in "${SYSCONF_DIR}"/_sysconfigdata__*.py; do
     [ -f "$f" ] || continue
     sed -i "s|\$(BLDLIBRARY)|-lpython${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
     sed -i "s|\$(LDLIBRARY)|libpython${PYTHON_MINOR}.so|g" "$f" 2>/dev/null || true
     sed -i "s|\$(LIBRARY)|python${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
 done
-echo "  ✅ sysconfigdata-host patched: $(grep -m1 BLDLIBRARY "${SYSCONF_DIR}"/_sysconfigdata__*.py | head -1)"
+echo "  ✅ sysconfigdata-host patched"
 
 # Patch CCSHARED
 HOST_PY_LIB="${HOST_PY_PREFIX}/lib/python${PYTHON_MINOR}"
@@ -168,6 +168,7 @@ fi
 cat > "$SUMMARY_FILE" <<EOF
 ════════════════════════════════════════════
 BUILD SUMMARY — ${STATUS}
+Python: ${PYTHON_VERSION} (${PYTHON_MINOR})
 ════════════════════════════════════════════
 Total packages:  $((SUCCESS_COUNT + FAIL_COUNT))
 ✅ Success:      ${SUCCESS_COUNT}
