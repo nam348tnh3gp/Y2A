@@ -138,6 +138,24 @@ export CMAKE_SYSTEM_NAME="Android"
 export CMAKE_SYSTEM_PROCESSOR="aarch64"
 export CMAKE_ANDROID_API="${ANDROID_API}"
 
+# ════════════════════════════════════════════════════════════
+# [FIX BLAS detection] pkg-config cho NumPy meson build
+#
+# NumPy meson KHÔNG đọc site.cfg (khác setuptools). Nó tìm BLAS
+# qua pkg-config → cần:
+#   1. pkg-config binary có trong PATH
+#   2. openblas.pc được cài ở DEPS_INSTALL/lib/pkgconfig
+#   3. PKG_CONFIG_PATH trỏ đúng DEPS_INSTALL
+#
+# Tránh 2 biến có thể làm pkg-config "tắt" khi cross-build:
+#   - PKG_CONFIG_LIBDIR: nếu set, pkg-config CHỈ tìm trong đó
+#   - PKG_CONFIG_SYSROOT_DIR: tự prepend sysroot → sai path
+# ════════════════════════════════════════════════════════════
+export PKG_CONFIG="${PKG_CONFIG:-/usr/bin/pkg-config}"
+export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig:${DEPS_INSTALL}/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:/usr/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+unset PKG_CONFIG_LIBDIR
+unset PKG_CONFIG_SYSROOT_DIR
+
 export NPY_DISABLE_SVML=1
 export NPY_USE_BLAS_ILP64=0
 export NPY_BLAS_LIBS="-lopenblas"
@@ -211,6 +229,39 @@ case "$BACKEND" in
         echo "  → Meson backend"
         case "$PKG_NAME" in
             numpy|scipy)
+                # ════════════════════════════════════════════════════════
+                # [FIX BLAS] Đảm bảo openblas.pc tồn tại. Nếu
+                # cross-compile-deps.sh không tạo, tự sinh fallback.
+                # ════════════════════════════════════════════════════════
+                if [ ! -f "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" ]; then
+                    echo "  ⚠️  openblas.pc missing — generating fallback"
+                    mkdir -p "${DEPS_INSTALL}/lib/pkgconfig"
+                    cat > "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" <<PCEOF
+prefix=${DEPS_INSTALL}
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: OpenBLAS
+Description: OpenBLAS is an optimized BLAS library
+Version: 0.3.0
+Libs: -L\${libdir} -lopenblas
+Libs.private: -lm -ldl
+Cflags: -I\${includedir}
+PCEOF
+                fi
+
+                # Sanity check pkg-config tìm được openblas
+                if ! PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig" \
+                     /usr/bin/pkg-config --exists openblas; then
+                    echo "  ❌ pkg-config KHÔNG tìm thấy openblas"
+                    echo "     DEPS_INSTALL=${DEPS_INSTALL}"
+                    ls -la "${DEPS_INSTALL}/lib/pkgconfig/" 2>/dev/null | head -20
+                    ls -la "${DEPS_INSTALL}/lib/" 2>/dev/null | grep -i openblas
+                    exit 1
+                fi
+                echo "  ✅ pkg-config OK: $(PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig" /usr/bin/pkg-config --modversion openblas)"
+
                 # [FIX] Native file có pkg_config_path trỏ /usr/lib/x86_64-linux-gnu/pkgconfig
                 cat > "${TMP_BUILD}/native-tools.ini" <<EOF
 [binaries]
@@ -221,9 +272,10 @@ cython = '${HOST_PY_PREFIX}/bin/cython'
 cython3 = '${HOST_PY_PREFIX}/bin/cython3'
 pkg-config = '/usr/bin/pkg-config'
 
-[properties]
-pkg_config_path = '/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:/work/deps-install/lib/pkgconfig'
+[built-in options]
+pkg_config_path = '${DEPS_INSTALL}/lib/pkgconfig:${DEPS_INSTALL}/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig'
 EOF
+
                 # ════════════════════════════════════════════════════════════
                 # [FIX ICE clang 14.0.7 / NDK r25c]
                 # Bug: clang crash (exit code 70) khi compile
@@ -232,6 +284,11 @@ EOF
                 # Giải pháp: hạ -O1 + tắt vectorize/SLP cho NumPy/SciPy.
                 # Ảnh hưởng: CHỈ NumPy/SciPy. Các lib khác KHÔNG đụng vì
                 # cross-file này nằm riêng trong ${TMP_BUILD} của từng pkg.
+                #
+                # [FIX BLAS] pkg-config + pkg_config_path bổ sung:
+                #   - pkg-config = '/usr/bin/pkg-config' trong [binaries]
+                #   - pkg_config_path trong [built-in options] (KHÔNG phải
+                #     [properties] — đặt sai section sẽ bị Meson bỏ qua)
                 # ════════════════════════════════════════════════════════════
                 cat > "${TMP_BUILD}/android-cross.ini" <<EOF
 [binaries]
@@ -242,6 +299,7 @@ strip = '${STRIP}'
 ranlib = '${RANLIB}'
 python3 = '${HOST_PYTHON}'
 cython = '${HOST_PY_PREFIX}/bin/cython'
+pkg-config = '/usr/bin/pkg-config'
 exe_wrapper = '/bin/true'
 
 [host_machine]
@@ -255,6 +313,7 @@ longdouble_format = 'IEEE_QUAD_LE'
 needs_exe_wrapper = true
 
 [built-in options]
+pkg_config_path = '${DEPS_INSTALL}/lib/pkgconfig:${DEPS_INSTALL}/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig'
 c_args   = ['-O1', '-fno-vectorize', '-fno-slp-vectorize']
 cpp_args = ['-O1', '-fno-vectorize', '-fno-slp-vectorize']
 EOF
