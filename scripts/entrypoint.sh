@@ -31,6 +31,25 @@ export NDK_AR="${AR}"
 mkdir -p "${TARGET_ROOT}" "${DEPS_INSTALL}" "${WHEELS_OUT}" "${WHEELS_FINAL}"
 
 # ════════════════════════════════════════════════════════════
+# [ABI3] Chuẩn hoá target — off|cp38|cp39|cp310|cp311|cp312
+# ════════════════════════════════════════════════════════════
+ABI3_RAW="${INPUT_ABI3_TARGET:-cp38}"
+case "$ABI3_RAW" in
+    off|none|disable|"")
+        export ABI3_TARGET=""
+        echo "📌 ABI3: OFF"
+        ;;
+    cp37|cp38|cp39|cp310|cp311|cp312)
+        export ABI3_TARGET="$ABI3_RAW"
+        echo "📌 ABI3 target: ${ABI3_TARGET} (wheel chạy Python ≥ ${ABI3_TARGET#cp})"
+        ;;
+    *)
+        export ABI3_TARGET=""
+        echo "⚠️  ABI3 target không hợp lệ: $ABI3_RAW — tắt ABI3"
+        ;;
+esac
+
+# ════════════════════════════════════════════════════════════
 # [NDK r27] Verify NDK version
 # ════════════════════════════════════════════════════════════
 NDK_REV=$(grep 'Pkg.Revision' "${NDK}/source.properties" 2>/dev/null | cut -d= -f2 | tr -d ' ' || echo "unknown")
