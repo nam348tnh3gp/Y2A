@@ -369,6 +369,27 @@ PYEOF
     zstandard)
         echo "  → zstandard: cffi đã dọn"
         ;;
+
+    # ════════════════════════════════════════════════════════════
+    # [FIX cryptography 50.x] Tắt legacy provider NGAY LÚC BUILD
+    #
+    # Vấn đề: cryptography 50.x chuyển sang OpenSSL 4.0, khiến biến
+    #         runtime CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1 không còn
+    #         được kiểm tra → warning "OpenSSL 3's legacy provider
+    #         failed to load..." vẫn xuất hiện khi import.
+    #
+    # Giải pháp: set CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1 ở bước
+    #            build. Đây là biến chính thức cryptography dùng để
+    #            compile mà không nhúng logic load legacy provider.
+    #
+    # Ảnh hưởng: CHỈ cryptography. Các lib khác (bcrypt, nh3,
+    #            pydantic-core, orjson, tokenizers) không dùng
+    #            OpenSSL trong cùng ngữ cảnh nên không bị đụng.
+    # ════════════════════════════════════════════════════════════
+    cryptography)
+        echo "  → cryptography: CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1"
+        export CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1
+        ;;
 esac
 
 # 9. Build
