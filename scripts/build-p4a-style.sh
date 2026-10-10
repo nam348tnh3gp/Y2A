@@ -1,30 +1,12 @@
 #!/bin/bash
-# build-p4a-style.sh
+# build-p4a-style.sh — native build cho PYTHON_MINOR, hỗ trợ p4a recipes
 set -eo pipefail
 
 PKG_SPEC="${1:-}"
 [ -z "$PKG_SPEC" ] && { echo "❌ Missing pkg"; exit 1; }
 PKG_NAME="${PKG_SPEC%%[<>=!~]*}"
 
-# ════════════════════════════════════════════════════════════
-# [ABI3] Danh sách package hỗ trợ Py_LIMITED_API / PyO3-abi3.
-# ════════════════════════════════════════════════════════════
-ABI3_TARGET="${ABI3_TARGET:-}"
-ABI3_CANDIDATES="cryptography bcrypt nh3 pydantic-core cffi"
-USE_ABI3=0
-if [ -n "$ABI3_TARGET" ]; then
-    for _c in $ABI3_CANDIDATES; do
-        if [ "$PKG_NAME" = "$_c" ]; then
-            USE_ABI3=1
-            break
-        fi
-    done
-fi
-if [ "$USE_ABI3" -eq 1 ]; then
-    echo "  🔗 ABI3: ${ABI3_TARGET} → wheel tương thích Python ≥ ${ABI3_TARGET#cp}"
-else
-    echo "  📦 Build native cho Python ${PYTHON_MINOR}"
-fi
+echo "  📦 Build native cho Python ${PYTHON_MINOR} (không abi3)"
 
 TMP_BUILD="/tmp/p4a-build-${PKG_NAME}"
 SRC_DIR="${TMP_BUILD}/src"
@@ -40,19 +22,18 @@ echo "  PKG_NAME: $PKG_NAME"
 # ── [orjson] Hard skip ──
 case "$PKG_NAME" in
     orjson)
-        echo "  ⏭️  orjson: skip (x86-only SIMD code) — pin orjson<3.13 trong list.txt"
-        exit 0
-        ;;
+        echo "  ⏭️  orjson: skip (x86-only SIMD code)"
+        exit 0        ;;
 esac
 
 # Symlink python tools
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python3"
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python"
-ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python3.13"
+ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python${PYTHON_MINOR}"
 [ -f "${HOST_PY_PREFIX}/bin/cython" ] && ln -sf "${HOST_PY_PREFIX}/bin/cython" "${TMP_BUILD}/bin/cython"
 [ -f "${HOST_PY_PREFIX}/bin/cython3" ] && ln -sf "${HOST_PY_PREFIX}/bin/cython3" "${TMP_BUILD}/bin/cython3"
 
-# 1. Tải source
+# 1. Download source
 cd "$SRC_DIR"
 if ! "${HOST_PYTHON}" -m pip download "$PKG_SPEC" \
         --no-deps --no-binary=:all: --dest="$SRC_DIR" > /tmp/dl.log 2>&1; then
@@ -173,7 +154,7 @@ export CMAKE_TOOLCHAIN_FILE="${NDK}/build/cmake/android.toolchain.cmake"
 export ANDROID_ABI="arm64-v8a"
 export ANDROID_PLATFORM="android-${ANDROID_API}"
 
-# ── [uvloop / autoconf] cross env ──
+# autoconf cross env
 export CONFIG_SITE="${TMP_BUILD}/config.site"
 cat > "$CONFIG_SITE" <<EOF
 host_alias=aarch64-linux-android
@@ -213,41 +194,29 @@ export NPY_CBLAS_LIBS="-lopenblas"
 export NPY_LAPACK_LIBS="-lopenblas"
 
 # ════════════════════════════════════════════════════════════
-# [FIX-ROOT] PyO3 config — KEY: suppress_build_script_link_lines
-# Khi file này được set, PyO3 CHỈ đọc nó và bỏ qua auto-detect.
-# - abi3=true + suppress=false → PyO3 vẫn emit
-#     cargo:rustc-link-lib=python3.13 → wheel abi3 dính NEEDED libpython.
-# - abi3=true + suppress=true  → PyO3 KHÔNG emit → wheel abi3 sạch.
+# PyO3 config — luôn native, abi3=false
 # ════════════════════════════════════════════════════════════
 PYO3_CONFIG="${TMP_BUILD}/pyo3-config.txt"
-
-if [ "$USE_ABI3" -eq 1 ]; then
-    PYO3_ABI3="true"
-    PYO3_SUPPRESS="true"
-else
-    PYO3_ABI3="false"
-    PYO3_SUPPRESS="false"
-fi
 
 cat > "$PYO3_CONFIG" <<EOF
 implementation=CPython
 version=${PYTHON_MINOR}
 shared=true
-abi3=${PYO3_ABI3}
+abi3=false
 lib_name=python${PYTHON_MINOR}
 lib_dir=${TARGET_ROOT}/lib
 executable=${TARGET_ROOT}/bin/python${PYTHON_MINOR}
 pointer_width=64
 build_flags=
-suppress_build_script_link_lines=${PYO3_SUPPRESS}
+suppress_build_script_link_lines=false
 EOF
 export PYO3_CONFIG_FILE="$PYO3_CONFIG"
-echo "  🔧 PYO3_CONFIG: abi3=${PYO3_ABI3} suppress_link_lines=${PYO3_SUPPRESS}"
+echo "  🔧 PYO3_CONFIG: abi3=false (native)"
 
 export PYO3_CROSS_LIB_DIR="${TARGET_ROOT}/lib"
 export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
 
-# ── [numpy] GHI ĐÈ host sitecustomize ──
+# ── GHI ĐÈ host sitecustomize ──
 cat > "${HOST_PY_LIB}/sitecustomize.py" <<SITEEOF
 import os, sysconfig as _sc
 
@@ -342,10 +311,8 @@ assert v_s and '$(BLDLIBRARY)' not in str(v_s), f"singular bad: {v_s!r}"
 assert v_p and '$(BLDLIBRARY)' not in str(v_p), f"plural bad: {v_p!r}"
 PYEOF
 
-# Copy sitecustomize THẬT vào PYSITE
 cp "${HOST_PY_LIB}/sitecustomize.py" "${PYSITE}/sitecustomize.py"
 
-# PYTHONPATH
 _SYSCONF_DIR="${WORKSPACE}/sysconfigdata-host"
 if [ -d "$_SYSCONF_DIR" ]; then
     export PYTHONPATH="${PYSITE}:${_SYSCONF_DIR}:${BUILD_DEPS_SITE:-${WORKSPACE}/build-deps-site}"
@@ -353,9 +320,7 @@ else
     export PYTHONPATH="${PYSITE}:${BUILD_DEPS_SITE:-${WORKSPACE}/build-deps-site}"
 fi
 
-# ════════════════════════════════════════════════════════════
-# [FIX BLDLIBRARY] Sed cứng placeholder trong MỌI _sysconfigdata
-# ════════════════════════════════════════════════════════════
+# Sed placeholder BLDLIBRARY
 for d in \
     "${WORKSPACE}/sysconfigdata-host" \
     "${HOST_PY_LIB}" \
@@ -392,7 +357,7 @@ runtime_library_dirs = ${DEPS_INSTALL}/lib
 EOF
 fi
 
-# 7. Setup args
+# 7. Setup args — base theo backend
 SETUP_ARGS=()
 PLAT_NAME_ARG=""
 
@@ -401,7 +366,8 @@ case "$BACKEND" in
         echo "  → Meson backend"
         case "$PKG_NAME" in
             numpy|scipy)
-                echo "  → Aggressive patch BLDLIBRARY trong sysconfigdata"
+                echo "  → Aggressive patch BLDLIBRARY"
+
                 for f in \
                     "${HOST_PY_LIB}"/_sysconfigdata__*.py \
                     "${TARGET_STDLIB}"/_sysconfigdata__*.py \
@@ -412,14 +378,12 @@ case "$BACKEND" in
                     sed -i "s|\$(BLDLIBRARY)|-lpython${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
                     sed -i "s|\$(LDLIBRARY)|libpython${PYTHON_MINOR}.so|g" "$f" 2>/dev/null || true
                     sed -i "s|\$(LIBRARY)|python${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
-                    echo "    ✅ patched: $f"
                 done
 
                 find "${HOST_PY_LIB}" "${TARGET_STDLIB}" \
                     -name "__pycache__" -type d \
                     -exec rm -rf {} + 2>/dev/null || true
 
-                echo "  🔍 Verify BLDLIBRARY (grep file):"
                 REMAIN=0
                 for f in \
                     "${HOST_PY_LIB}"/_sysconfigdata__*.py \
@@ -432,7 +396,6 @@ case "$BACKEND" in
                     fi
                 done
                 [ "$REMAIN" -gt 0 ] && { echo "  ❌ BLDLIBRARY patch failed"; exit 1; }
-                echo "    ✅ Files OK"
 
                 find "$SRC_PATH" -name "meson.build" -type f -print0 | \
                 while IFS= read -r -d '' f; do
@@ -442,7 +405,6 @@ case "$BACKEND" in
                             s/optimization:'3'/optimization:'1'/g; \
                             s/optimization:'2'/optimization:'1'/g" "$f"
                 done
-                echo "  ✅ Patched $(find "$SRC_PATH" -name meson.build | wc -l) meson.build"
 
                 if [ ! -f "${DEPS_INSTALL}/lib/pkgconfig/openblas.pc" ]; then
                     mkdir -p "${DEPS_INSTALL}/lib/pkgconfig"
@@ -471,7 +433,7 @@ PCEOF
 [binaries]
 python3 = '${HOST_PYTHON}'
 python = '${HOST_PYTHON}'
-python3.13 = '${HOST_PYTHON}'
+python${PYTHON_MINOR} = '${HOST_PYTHON}'
 cython = '${HOST_PY_PREFIX}/bin/cython'
 cython3 = '${HOST_PY_PREFIX}/bin/cython3'
 pkg-config = '/usr/bin/pkg-config'
@@ -527,7 +489,7 @@ EOF
         esac
         ;;
     *maturin*)
-        echo "  → Maturin backend"
+        echo "  → Maturin backend (native)"
         export PYO3_PYTHON="${HOST_PYTHON}"
         export PYO3_CROSS=1
         export PYO3_CROSS_PYTHON_VERSION="${PYTHON_MINOR}"
@@ -535,43 +497,43 @@ EOF
         export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
         export PYO3_CONFIG_FILE="${PYO3_CONFIG}"
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK_CC}"
-        export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib"
-        unset RUSTFLAGS
-
-        # ═══ [FIX-ROOT] Bật PyO3 abi3 + chặn link libpython ═══
-        if [ "$USE_ABI3" -eq 1 ]; then
-            export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
-            export PYO3_NO_PYTHON=1                     # ⬅️ chặn build.rs scan host
-            export PYO3_ABI3_FORWARD_COMPATIBILITY=1    # ⬅️ tương thích PyO3 cũ
-            SETUP_ARGS+=("--config-settings=--features=abi3")
-            echo "  🔗 maturin: --features=abi3, PYO3_NO_PYTHON=1"
-
-            export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="\
--C link-arg=-Wl,--as-needed \
--C link-arg=-Wl,--allow-shlib-undefined \
--C link-arg=-L${TARGET_ROOT}/lib"
-        else
-            export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="\
+        export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="\
 -C link-arg=-L${TARGET_ROOT}/lib \
 -C link-arg=-lpython${PYTHON_MINOR}"
-        fi
+        unset RUSTFLAGS
         ;;
     *)
-        echo "  → Setuptools backend"
+        echo "  → Setuptools backend (native)"
         PLAT_NAME_ARG="--config-settings=--build-option=--plat-name=${ANDROID_TAG}"
-        if [ "$USE_ABI3" -eq 1 ]; then
-            SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=${ABI3_TARGET}")
-            # ═══ [FIX-ROOT] setuptools-rust + PyO3 cần env này ═══
-            export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
-            export PYO3_NO_PYTHON=1
-            export PYO3_ABI3_FORWARD_COMPATIBILITY=1
-            echo "  🔗 setuptools: --py-limited-api=${ABI3_TARGET}"
-            echo "  🔗 PYO3_NO_PYTHON=1, PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1"
-        fi
         ;;
 esac
 
-# 8. Patch đặc biệt
+# ════════════════════════════════════════════════════════════
+# 8a. p4a-style recipe (nếu có)
+# ════════════════════════════════════════════════════════════
+RECIPE_FILE="${WORKSPACE}/recipes/${PKG_NAME}.sh"
+if [ -f "$RECIPE_FILE" ]; then
+    echo "  📖 [p4a-recipe] source $(basename "$RECIPE_FILE")"
+    # shellcheck disable=SC1090
+    source "$RECIPE_FILE"
+
+    if declare -F recipe_env >/dev/null 2>&1; then
+        recipe_env
+    fi
+
+    if declare -F recipe_setup_args >/dev/null 2>&1; then
+        while IFS= read -r _arg; do
+            [ -n "$_arg" ] && SETUP_ARGS+=("$_arg")
+        done < <(recipe_setup_args || true)
+    fi
+
+    if declare -F recipe_patch >/dev/null 2>&1; then
+        recipe_patch "$SRC_PATH" || echo "  ⚠️  recipe_patch non-zero"
+    fi
+    echo "  ✅ [p4a-recipe] applied"
+fi
+
+# 8b. Patch đặc biệt
 case "$PKG_NAME" in
     Pillow|pillow|PIL)
         echo "  → Patch Pillow"
@@ -679,23 +641,8 @@ PYEOF
         ;;
 
     cffi)
-        if [ "$USE_ABI3" -eq 1 ]; then
-            case "$ABI3_TARGET" in
-                cp37)  ABI3_HEX="0x03070000" ;;
-                cp38)  ABI3_HEX="0x03080000" ;;
-                cp39)  ABI3_HEX="0x03090000" ;;
-                cp310) ABI3_HEX="0x030A0000" ;;
-                cp311) ABI3_HEX="0x030B0000" ;;
-                cp312) ABI3_HEX="0x030C0000" ;;
-                *)     ABI3_HEX="0x03080000" ;;
-            esac
-            export CFFI_PY_LIMITED_API="$ABI3_HEX"
-            SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=${ABI3_TARGET}")
-            echo "  🔗 cffi: abi3 ${ABI3_TARGET} (Py_LIMITED_API=${ABI3_HEX})"
-        else
-            export CFFI_PY_LIMITED_API="0x030D0000"
-            SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=cp313")
-        fi
+        echo "  → cffi: native (không abi3)"
+        unset CFFI_PY_LIMITED_API 2>/dev/null || true
         ;;
 
     zstandard)
@@ -705,49 +652,6 @@ PYEOF
     cryptography)
         echo "  → cryptography: CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1"
         export CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1
-        ;;
-
-    uvloop)
-        echo "  → Patch uvloop setup.py: --host cho libuv configure"
-        UV_SETUP="${SRC_PATH}/setup.py"
-        if [ -f "$UV_SETUP" ]; then
-            cp "$UV_SETUP" "${UV_SETUP}.bak"
-            UV_SETUP="$UV_SETUP" TARGET_HOST="aarch64-linux-android" \
-            "${HOST_PYTHON}" - <<'PYEOF'
-import os
-p = os.environ["UV_SETUP"]
-host = os.environ.get("TARGET_HOST", "aarch64-linux-android")
-src = open(p).read()
-orig = src
-src = src.replace(
-    "['./configure']",
-    "['./configure', '--host=" + host + "', '--build=x86_64-pc-linux-gnu',"
-    " '--disable-shared', '--enable-static']"
-)
-src = src.replace(
-    '[\"./configure\"]',
-    '[\"./configure\", \"--host=' + host + '\",'
-    ' \"--build=x86_64-pc-linux-gnu\",'
-    ' \"--disable-shared\", \"--enable-static\"]'
-)
-if src != orig:
-    open(p, "w").write(src)
-    print(f"[uvloop-patch] patched: {p}")
-else:
-    print(f"[uvloop-patch] no change in {p}")
-PYEOF
-        fi
-        export ac_cv_host="aarch64-linux-android"
-        export ac_cv_build="x86_64-pc-linux-gnu"
-        export ac_cv_target="aarch64-linux-android"
-        export cross_compiling="yes"
-        # HOSTCC/HOSTCXX phải là compiler x86_64
-        export HOSTCC="/usr/bin/gcc"
-        export HOSTCXX="/usr/bin/g++"
-        export CC_FOR_BUILD="/usr/bin/gcc"
-        export CXX_FOR_BUILD="/usr/bin/g++"
-        export AR_FOR_BUILD="/usr/bin/ar"
-        export RANLIB_FOR_BUILD="/usr/bin/ranlib"
         ;;
 esac
 
@@ -775,7 +679,7 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-# 10. Post-build: strip libpython khỏi abi3, add cho native
+# 10. Post-build: add libpython (native path)
 # ════════════════════════════════════════════════════════════
 repack_wheel_record() {
     local whl="$1" work="$2"
@@ -815,95 +719,6 @@ print(f"[repack] {whl}")
 PYEOF
 }
 
-strip_libpython_from_wheel() {
-    local whl="$1"
-    local work
-    work="$(mktemp -d)"
-    local changed=0
-
-    unzip -o -q "$whl" -d "$work"
-
-    while IFS= read -r so; do
-        [ -f "$so" ] || continue
-
-        if ! ${READELF} -d "$so" 2>/dev/null | grep -qE 'NEEDED.*libpython3\.[0-9]+\.so'; then
-            continue
-        fi
-
-        echo "    🧹 [$(basename "$so")] phát hiện NEEDED libpython"
-
-        # ── Pass 1: patchelf ──
-        local needed
-        needed=$(${READELF} -d "$so" 2>/dev/null \
-                 | grep -E 'NEEDED.*libpython3\.[0-9]+\.so' \
-                 | sed -E 's/.*\[([^]]+)\].*/\1/' || true)
-        for lib in $needed; do
-            echo "      patchelf --remove-needed $lib"
-            patchelf --remove-needed "$lib" "$so" 2>/dev/null || true
-        done
-
-        # ── Pass 2: lief fallback ──
-        if ${READELF} -d "$so" 2>/dev/null | grep -qE 'NEEDED.*libpython3\.[0-9]+\.so'; then
-            echo "      ⚠️  patchelf không xoá hết → dùng lief"
-            if ! SO_PATH="$so" "${HOST_PYTHON}" - <<'PYEOF'
-import os, sys
-try:
-    import lief
-except ImportError:
-    print("lief not installed", file=sys.stderr)
-    sys.exit(1)
-
-so = os.environ["SO_PATH"]
-binary = lief.parse(so)
-if binary is None:
-    print(f"lief parse failed: {so}", file=sys.stderr)
-    sys.exit(1)
-
-removed = []
-for entry in list(binary.dynamic_entries):
-    tag_name = str(entry.tag)
-    if "NEEDED" not in tag_name:
-        continue
-    libname = getattr(entry, "name", "")
-    if libname.startswith("libpython3.") and libname.endswith(".so"):
-        removed.append(libname)
-        try:
-            binary.remove(entry)
-        except Exception as e:
-            print(f"remove failed: {e}", file=sys.stderr)
-
-if not removed:
-    print("lief: no libpython entry found", file=sys.stderr)
-    sys.exit(2)
-
-binary.write(so)
-print(f"lief removed: {removed}")
-PYEOF
-            then
-                echo "    ❌ lief strip failed cho $(basename "$so")"
-                rm -rf "$work"
-                return 1
-            fi
-        fi
-
-        # ── Pass 3: verify cuối, FAIL CỨNG ──
-        if ${READELF} -d "$so" 2>/dev/null | grep -qE 'NEEDED.*libpython3\.[0-9]+\.so'; then
-            echo "    ❌ VẪN còn NEEDED libpython trong $(basename "$so"):"
-            ${READELF} -d "$so" | grep -E 'NEEDED.*libpython' | sed 's/^/       /'
-            rm -rf "$work"
-            return 1
-        fi
-        echo "    ✅ $(basename "$so") sạch"
-        changed=1
-    done < <(find "$work" -name "*.so")
-
-    if [ "$changed" -eq 1 ]; then
-        repack_wheel_record "$whl" "$work"
-    fi
-    rm -rf "$work"
-    return 0
-}
-
 add_libpython_to_wheel() {
     local whl="$1"
     local work
@@ -916,7 +731,7 @@ add_libpython_to_wheel() {
             continue
         fi
         case "$so" in
-            *.cpython-*.so|*abi3*.so|*_rust*.so)
+            *.cpython-*.so|*_rust*.so)
                 patchelf --add-needed "libpython${PYTHON_MINOR}.so" "$so" || true
                 changed=1
                 ;;
@@ -938,16 +753,8 @@ for whl in "${WHEELS_OUT}"/*.whl; do
     base=$(basename "$whl")
     [[ "$base" == *"none-any"* ]] && continue
 
-    if [[ "$base" == *"-abi3-"* ]]; then
-        echo "  🔧 [abi3] Strip libpython khỏi $base"
-        if ! strip_libpython_from_wheel "$whl"; then
-            echo "  ❌ Strip thất bại cho $base — abort"
-            exit 1
-        fi
-    else
-        echo "  🔧 [native] Add libpython cho $base"
-        add_libpython_to_wheel "$whl"
-    fi
+    echo "  🔧 [native] Add libpython cho $base"
+    add_libpython_to_wheel "$whl"
 done
 shopt -u nullglob
 
