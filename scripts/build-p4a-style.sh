@@ -8,8 +8,6 @@ PKG_NAME="${PKG_SPEC%%[<>=!~]*}"
 
 # ════════════════════════════════════════════════════════════
 # [ABI3] Danh sách package hỗ trợ Py_LIMITED_API / PyO3-abi3.
-# Chỉ những package này mới build dạng cpXX-abi3.
-# Package không hỗ trợ → build như cũ (cp313-cp313).
 # ════════════════════════════════════════════════════════════
 ABI3_TARGET="${ABI3_TARGET:-}"
 ABI3_CANDIDATES="cryptography bcrypt nh3 pydantic-core cffi"
@@ -39,7 +37,7 @@ mkdir -p "$SRC_DIR" "${TMP_BUILD}/bin" "$PYSITE"
 echo "  Building: $PKG_SPEC"
 echo "  PKG_NAME: $PKG_NAME"
 
-# ── [orjson] Hard skip: source chứa avx512 code không build được trên aarch64 ──
+# ── [orjson] Hard skip ──
 case "$PKG_NAME" in
     orjson)
         echo "  ⏭️  orjson: skip (x86-only SIMD code) — pin orjson<3.13 trong list.txt"
@@ -175,7 +173,7 @@ export CMAKE_TOOLCHAIN_FILE="${NDK}/build/cmake/android.toolchain.cmake"
 export ANDROID_ABI="arm64-v8a"
 export ANDROID_PLATFORM="android-${ANDROID_API}"
 
-# ── [uvloop / autoconf] cross env cho ./configure của libuv ──
+# ── [uvloop / autoconf] cross env ──
 export CONFIG_SITE="${TMP_BUILD}/config.site"
 cat > "$CONFIG_SITE" <<EOF
 host_alias=aarch64-linux-android
@@ -191,8 +189,10 @@ export HOSTCC="/usr/bin/gcc"
 export HOSTCXX="/usr/bin/g++"
 export CC_FOR_BUILD="/usr/bin/gcc"
 export CXX_FOR_BUILD="/usr/bin/g++"
+export AR_FOR_BUILD="/usr/bin/ar"
+export RANLIB_FOR_BUILD="/usr/bin/ranlib"
 
-# pkg-config cho BLAS
+# pkg-config
 export PKG_CONFIG="${PKG_CONFIG:-/usr/bin/pkg-config}"
 export PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig:${DEPS_INSTALL}/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:/usr/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
 unset PKG_CONFIG_LIBDIR
@@ -326,8 +326,8 @@ assert v_s and '$(BLDLIBRARY)' not in str(v_s), f"singular bad: {v_s!r}"
 assert v_p and '$(BLDLIBRARY)' not in str(v_p), f"plural bad: {v_p!r}"
 PYEOF
 
-# sitecustomize phụ ở PYSITE
-printf '# trigger only\n' > "${PYSITE}/sitecustomize.py"
+# ═══ [FIX] Copy sitecustomize THẬT vào PYSITE (che file rỗng) ═══
+cp "${HOST_PY_LIB}/sitecustomize.py" "${PYSITE}/sitecustomize.py"
 
 # PYTHONPATH
 _SYSCONF_DIR="${WORKSPACE}/sysconfigdata-host"
@@ -336,6 +336,36 @@ if [ -d "$_SYSCONF_DIR" ]; then
 else
     export PYTHONPATH="${PYSITE}:${BUILD_DEPS_SITE:-${WORKSPACE}/build-deps-site}"
 fi
+
+# ════════════════════════════════════════════════════════════
+# [FIX BLDLIBRARY] Sed cứng placeholder trong MỌI _sysconfigdata
+#                  nằm trong PYTHONPATH
+# ════════════════════════════════════════════════════════════
+for d in \
+    "${WORKSPACE}/sysconfigdata-host" \
+    "${HOST_PY_LIB}" \
+    "${TARGET_STDLIB}"; do
+    for f in "${d}"/_sysconfigdata__*.py; do
+        [ -f "$f" ] || continue
+        sed -i "s|\$(BLDLIBRARY)|-lpython${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
+        sed -i "s|\$(LDLIBRARY)|libpython${PYTHON_MINOR}.so|g" "$f" 2>/dev/null || true
+        sed -i "s|\$(LIBRARY)|python${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
+    done
+    find "${d}" -name "_sysconfigdata__*.pyc" -delete 2>/dev/null || true
+    find "${d}/__pycache__" -name "_sysconfigdata__*" -delete 2>/dev/null || true
+done
+
+# Verify
+VERIFY_OUT=$(
+    PYTHONPATH="${PYSITE}:${_SYSCONF_DIR}" \
+    "${HOST_PYTHON}" -c "import sysconfig; print(sysconfig.get_config_var('BLDLIBRARY'))" 2>/dev/null || echo "FAIL"
+)
+echo "  🔍 [verify] BLDLIBRARY = ${VERIFY_OUT}"
+if printf '%s' "$VERIFY_OUT" | grep -qF '$(BLDLIBRARY)'; then
+    echo "  ❌ Vẫn còn placeholder sau patch — abort"
+    exit 1
+fi
+echo "  ✅ BLDLIBRARY OK"
 
 # 6. site.cfg
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
@@ -491,20 +521,28 @@ EOF
         export PYO3_CROSS_INCLUDE_DIR="${TARGET_ROOT}/include/python${PYTHON_MINOR}"
         export PYO3_CONFIG_FILE="${PYO3_CONFIG}"
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK_CC}"
-        export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib -C link-arg=-lpython${PYTHON_MINOR}"
+        export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-L${TARGET_ROOT}/lib"
         unset RUSTFLAGS
 
-        # ═══ [ABI3] Bật PyO3 abi3 cho Rust crate ═══
+        # ═══ [ABI3] Bật PyO3 abi3 + ép không link libpython ═══
         if [ "$USE_ABI3" -eq 1 ]; then
             export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
             SETUP_ARGS+=("--config-settings=--features=abi3")
-            echo "  🔗 maturin: --features=abi3 (PyO3 forward-compat)"
+            echo "  🔗 maturin: --features=abi3"
+
+            export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="\
+-C link-arg=-Wl,--as-needed \
+-C link-arg=-Wl,--allow-shlib-undefined \
+-C link-arg=-L${TARGET_ROOT}/lib"
+        else
+            export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="\
+-C link-arg=-L${TARGET_ROOT}/lib \
+-C link-arg=-lpython${PYTHON_MINOR}"
         fi
         ;;
     *)
         echo "  → Setuptools backend"
         PLAT_NAME_ARG="--config-settings=--build-option=--plat-name=${ANDROID_TAG}"
-        # ═══ [ABI3] setuptools Extension(py_limited_api=True) ═══
         if [ "$USE_ABI3" -eq 1 ]; then
             SETUP_ARGS+=("--config-settings=--build-option=--py-limited-api=${ABI3_TARGET}")
             echo "  🔗 setuptools: --py-limited-api=${ABI3_TARGET}"
@@ -621,7 +659,6 @@ PYEOF
 
     cffi)
         if [ "$USE_ABI3" -eq 1 ]; then
-            # cp38 → 0x03080000, cp39 → 0x03090000, …
             case "$ABI3_TARGET" in
                 cp37)  ABI3_HEX="0x03070000" ;;
                 cp38)  ABI3_HEX="0x03080000" ;;
@@ -683,10 +720,13 @@ PYEOF
         export ac_cv_build="x86_64-pc-linux-gnu"
         export ac_cv_target="aarch64-linux-android"
         export cross_compiling="yes"
+        # ═══ [FIX] HOSTCC/HOSTCXX phải là compiler x86_64 ═══
+        export HOSTCC="/usr/bin/gcc"
+        export HOSTCXX="/usr/bin/g++"
         export CC_FOR_BUILD="/usr/bin/gcc"
         export CXX_FOR_BUILD="/usr/bin/g++"
-        export HOSTCC="${NDK_CC}"
-        export HOSTCXX="${NDK_CXX}"
+        export AR_FOR_BUILD="/usr/bin/ar"
+        export RANLIB_FOR_BUILD="/usr/bin/ranlib"
         ;;
 esac
 
@@ -713,68 +753,114 @@ else
     exit $RC
 fi
 
-# 10. Patch cryptography/bcrypt/... sau build
-case "$PKG_NAME" in
-    cryptography|bcrypt|nh3|pydantic-core|tokenizers)
-        # ═══ [ABI3] Wheel abi3 KHÔNG được link libpython${PYTHON_MINOR}
-        #           → để portable giữa các phiên bản Python.
-        if [ "$USE_ABI3" -eq 1 ]; then
-            echo "  ⏭️  Skip libpython patch (ABI3 mode)"
-            exit 0
-        fi
-
-        pkg_under=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
-        pkg_lower=$(echo "$PKG_NAME" | tr '[:upper:]' '[:lower:]')
-        WHL=$(ls -t "${WHEELS_OUT}"/${pkg_under}-*.whl \
-                    "${WHEELS_OUT}"/${pkg_lower}-*.whl \
-                    "${WHEELS_OUT}"/${PKG_NAME}-*.whl 2>/dev/null | head -1 || true)
-        [ -z "$WHL" ] && exit 0
-        WHL=$(realpath "$WHL")
-        WORK="/tmp/patch-${PKG_NAME}"
-        rm -rf "$WORK" && mkdir -p "$WORK"
-        cd "$WORK"
-        unzip -o -q "$WHL"
-        RUST_SO=$(find . -name "_rust*.so" -o -name "*.abi3.so" | head -1)
-        [ -z "$RUST_SO" ] && exit 0
-        PATCHED=0
-        if ! ${READELF} -d "$RUST_SO" | grep -q "libpython${PYTHON_MINOR}.so"; then
-            patchelf --add-needed "libpython${PYTHON_MINOR}.so" "$RUST_SO"
-            PATCHED=1
-        fi
-        if ! ${READELF} -d "$RUST_SO" | grep -qE "RPATH|RUNPATH"; then
-            patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$RUST_SO"
-            PATCHED=1
-        fi
-        if [ "$PATCHED" -eq 1 ]; then
-            WHL="$WHL" RUST_SO_REL="$RUST_SO" "${HOST_PYTHON}" - <<'PYEOF'
-import base64, hashlib, csv, os, zipfile, tempfile, shutil
+# ════════════════════════════════════════════════════════════
+# 10. Post-build: strip libpython khỏi abi3, add cho native
+# ════════════════════════════════════════════════════════════
+repack_wheel_record() {
+    local whl="$1" work="$2"
+    WHL="$whl" WORK_TMP="$work" "${HOST_PYTHON}" - <<'PYEOF'
+import base64, hashlib, csv, os, zipfile, shutil
 whl = os.environ["WHL"]
-rust_rel = os.environ["RUST_SO_REL"].lstrip("./")
-tmp = tempfile.mkdtemp()
-try:
-    with zipfile.ZipFile(whl, 'r') as z: z.extractall(tmp)
+tmp = os.environ["WORK_TMP"]
+record_path = None
+for root, _, files in os.walk(tmp):
+    if root.endswith(".dist-info") and "RECORD" in files:
+        record_path = os.path.join(root, "RECORD")
+        break
+if record_path:
+    with open(record_path, "r", newline="") as f:
+        rows = list(csv.reader(f))
+    for r in rows:
+        if len(r) >= 3 and r[0] and not r[0].endswith("RECORD"):
+            full = os.path.join(tmp, r[0])
+            if os.path.isfile(full):
+                with open(full, "rb") as fh:
+                    data = fh.read()
+                d = base64.urlsafe_b64encode(
+                    hashlib.sha256(data).digest()
+                ).rstrip(b"=").decode()
+                r[1] = f"sha256={d}"
+                r[2] = str(len(data))
+    with open(record_path, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+out = whl + ".tmp"
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
     for root, _, files in os.walk(tmp):
-        if 'RECORD' in files and '.dist-info' in root:
-            rp = os.path.join(root, 'RECORD')
-            with open(rp, 'r', newline='') as f: rows = list(csv.reader(f))
-            for r in rows:
-                if len(r) >= 3 and r[0] == rust_rel:
-                    full = os.path.join(tmp, rust_rel)
-                    with open(full, 'rb') as fh: data = fh.read()
-                    d = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()
-                    r[1] = f'sha256={d}'; r[2] = str(len(data))
-            with open(rp, 'w', newline='') as f: csv.writer(f).writerows(rows)
-    out = whl + '.tmp'
-    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(tmp):
-            for f in files:
-                full = os.path.join(root, f)
-                zf.write(full, os.path.relpath(full, tmp))
-    shutil.move(out, whl)
-finally: shutil.rmtree(tmp, ignore_errors=True)
+        for fn in files:
+            full = os.path.join(root, fn)
+            zf.write(full, os.path.relpath(full, tmp))
+shutil.move(out, whl)
+print(f"[repack] {whl}")
 PYEOF
+}
+
+strip_libpython_from_wheel() {
+    local whl="$1"
+    local work
+    work="$(mktemp -d)"
+    local changed=0
+    unzip -o -q "$whl" -d "$work"
+    while IFS= read -r so; do
+        [ -f "$so" ] || continue
+        local needed
+        needed=$(${READELF} -d "$so" 2>/dev/null \
+                 | grep -E 'NEEDED.*libpython3\.[0-9]+\.so' \
+                 | sed -E 's/.*\[([^]]+)\].*/\1/' || true)
+        [ -z "$needed" ] && continue
+        for lib in $needed; do
+            echo "    🧹 strip NEEDED $lib khỏi $(basename "$so")"
+            patchelf --remove-needed "$lib" "$so" || true
+            changed=1
+        done
+    done < <(find "$work" -name "*.so")
+    if [ "$changed" -eq 1 ]; then
+        repack_wheel_record "$whl" "$work"
+    fi
+    rm -rf "$work"
+}
+
+add_libpython_to_wheel() {
+    local whl="$1"
+    local work
+    work="$(mktemp -d)"
+    local changed=0
+    unzip -o -q "$whl" -d "$work"
+    while IFS= read -r so; do
+        [ -f "$so" ] || continue
+        if ${READELF} -d "$so" 2>/dev/null | grep -q "libpython${PYTHON_MINOR}.so"; then
+            continue
         fi
-        ;;
-esac
+        case "$so" in
+            *.cpython-*.so|*abi3*.so|*_rust*.so)
+                patchelf --add-needed "libpython${PYTHON_MINOR}.so" "$so" || true
+                changed=1
+                ;;
+        esac
+        if ! ${READELF} -d "$so" 2>/dev/null | grep -qE "RPATH|RUNPATH"; then
+            patchelf --force-rpath --set-rpath '$ORIGIN/../../../../..' "$so" || true
+            changed=1
+        fi
+    done < <(find "$work" -name "*.so")
+    if [ "$changed" -eq 1 ]; then
+        repack_wheel_record "$whl" "$work"
+    fi
+    rm -rf "$work"
+}
+
+shopt -s nullglob
+for whl in "${WHEELS_OUT}"/*.whl; do
+    [ -f "$whl" ] || continue
+    base=$(basename "$whl")
+    [[ "$base" == *"none-any"* ]] && continue
+
+    if [[ "$base" == *"-abi3-"* ]]; then
+        echo "  🔧 [abi3] Strip libpython khỏi $base"
+        strip_libpython_from_wheel "$whl"
+    else
+        echo "  🔧 [native] Add libpython cho $base"
+        add_libpython_to_wheel "$whl"
+    fi
+done
+shopt -u nullglob
 
 exit 0
