@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """
 Sinh pip index (PEP 503) từ danh sách file .whl trong thư mục.
-
-Cách dùng:
-    python3 gen_index.py <wheels_dir> <docs_dir> <github_owner> <github_repo> <release_tag>
-
-Ví dụ:
-    python3 gen_index.py wheels docs nam348tnh3gp Y2A wheels-20261007
+Hỗ trợ nhiều phiên bản Python cùng package (cp313, cp314).
 """
-
 import os
 import re
 import sys
@@ -18,12 +12,10 @@ from pathlib import Path
 
 
 def normalize_name(name: str) -> str:
-    """PEP 503: lowercase + thay [-_.]+ bằng -"""
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def parse_wheel(filename: str):
-    """Trả (name, version) từ tên wheel. None nếu không parse được."""
     if not filename.endswith(".whl"):
         return None
     parts = filename[:-4].split("-")
@@ -38,7 +30,6 @@ def gen(wheels_dir: Path, docs_dir: Path, owner: str, repo: str, tag: str):
     simple_dir = docs_dir / "simple"
     simple_dir.mkdir(parents=True, exist_ok=True)
 
-    # Gom wheel theo package
     packages = defaultdict(list)
     wheel_files = sorted(wheels_dir.glob("*.whl"))
     if not wheel_files:
@@ -53,7 +44,6 @@ def gen(wheels_dir: Path, docs_dir: Path, owner: str, repo: str, tag: str):
         name, version = parsed
         packages[name].append((version, whl.name))
 
-    # Tạo index.html cho từng package
     for name, entries in packages.items():
         pkg_dir = simple_dir / name
         pkg_dir.mkdir(parents=True, exist_ok=True)
@@ -76,7 +66,6 @@ def gen(wheels_dir: Path, docs_dir: Path, owner: str, repo: str, tag: str):
         (pkg_dir / "index.html").write_text(html_content, encoding="utf-8")
         print(f"✅ {name}: {len(entries)} wheel")
 
-    # Root index
     root_links = "\n".join(
         f'    <a href="{html.escape(name)}/">{html.escape(name)}</a><br>'
         for name in sorted(packages.keys())
@@ -84,9 +73,9 @@ def gen(wheels_dir: Path, docs_dir: Path, owner: str, repo: str, tag: str):
     root = (
         "<!DOCTYPE html>\n"
         "<html>\n"
-        "<head><meta charset=\"utf-8\"><title>Mini-Y2mate Python Index</title></head>\n"
+        "<head><meta charset=\"utf-8\"><title>Python Package Index</title></head>\n"
         "<body>\n"
-        "<h1>Mini-Y2mate Python Index</h1>\n"
+        "<h1>Python Package Index</h1>\n"
         "<p>Tổng: " + str(len(packages)) + " package</p>\n"
         + root_links + "\n"
         "</body>\n"
@@ -95,7 +84,6 @@ def gen(wheels_dir: Path, docs_dir: Path, owner: str, repo: str, tag: str):
     (simple_dir / "index.html").write_text(root, encoding="utf-8")
     print(f"✅ Root index: {len(packages)} package")
 
-    # .nojekyll để GitHub Pages không chạy Jekyll
     (docs_dir / ".nojekyll").write_text("", encoding="utf-8")
     print("✅ .nojekyll")
 
