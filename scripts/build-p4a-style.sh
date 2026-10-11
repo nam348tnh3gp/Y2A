@@ -1,5 +1,6 @@
 #!/bin/bash
 # build-p4a-style.sh — native build cho PYTHON_MINOR, hỗ trợ p4a recipes
+# Fixes: numpy $(BLDLIBRARY) placeholder, uvloop libuv cross, orjson skip, cryptography OSSL
 set -eo pipefail
 
 PKG_SPEC="${1:-}"
@@ -19,12 +20,51 @@ mkdir -p "$SRC_DIR" "${TMP_BUILD}/bin" "$PYSITE"
 echo "  Building: $PKG_SPEC"
 echo "  PKG_NAME: $PKG_NAME"
 
-# ── [orjson] Hard skip ──
+# ════════════════════════════════════════════════════════════
+# SKIP packages (intentional — exit 0 + marker)
+# ════════════════════════════════════════════════════════════
 case "$PKG_NAME" in
     orjson)
-        echo "  ⏭️  orjson: skip (x86-only SIMD code)"
-        exit 0        ;;
+        echo "  ⏭️  orjson: skip (x86-only SIMD code) — SKIP_INTENTIONAL"
+        exit 0
+        ;;
 esac
+
+# ════════════════════════════════════════════════════════════
+# sanitize_sysconfigdata — patch TRIỆT ĐỂ mọi placeholder
+# ════════════════════════════════════════════════════════════
+sanitize_sysconfigdata() {
+    local PY="$1"
+    local TARGETS=(
+        "${HOST_PY_LIB}"
+        "${TARGET_STDLIB}"
+        "${WORKSPACE}/sysconfigdata-host"
+        "${HOST_PY_PREFIX}/lib/python${PY}"
+        "${TARGET_ROOT}/lib/python${PY}"
+    )
+    local N=0
+    for d in "${TARGETS[@]}"; do
+        [ -d "$d" ] || continue
+        for f in "${d}"/_sysconfigdata__*.py; do
+            [ -f "$f" ] || continue
+            sed -i \
+                -e "s|'\$(BLDLIBRARY)'|'-lpython${PY}'|g" \
+                -e "s|\"\$(BLDLIBRARY)\"|\"-lpython${PY}\"|g" \
+                -e "s|'\$(LDLIBRARY)'|'libpython${PY}.so'|g" \
+                -e "s|\"\$(LDLIBRARY)\"|\"libpython${PY}.so\"|g" \
+                -e "s|'\$(LIBRARY)'|'python${PY}'|g" \
+                -e "s|\"\$(LIBRARY)\"|\"python${PY}\"|g" \
+                "$f" 2>/dev/null || true
+            rm -f "${f}c" 2>/dev/null || true
+            N=$((N+1))
+        done
+        rm -rf "${d}/__pycache__" 2>/dev/null || true
+    done
+    echo "    sanitize: ${N} file(s)"
+}
+
+echo "🔧 Sanitize sysconfigdata TRƯỚC khi import..."
+sanitize_sysconfigdata "${PYTHON_MINOR}"
 
 # Symlink python tools
 ln -sf "${HOST_PYTHON}" "${TMP_BUILD}/bin/python3"
@@ -119,10 +159,14 @@ fi
 export _PYTHON_HOST_PLATFORM="${ANDROID_TAG}"
 export _PYTHON_PROJECT_BASE="${TARGET_ROOT}"
 export TARGET_PYTHON_EXE="${TARGET_ROOT}/bin/python${PYTHON_MINOR}"
+export PYTHONNOUSERSITE=1
 
-if [ -z "${_PYTHON_SYSCONFIGDATA_NAME:-}" ]; then
-    _SC=$(ls "${TARGET_STDLIB}"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
-    [ -n "$_SC" ] && export _PYTHON_SYSCONFIGDATA_NAME="$(basename "$_SC" .py)"
+# Force đúng sysconfigdata
+_SC_FILE=$(ls "${TARGET_STDLIB}"/_sysconfigdata__*.py 2>/dev/null | head -1 || true)
+if [ -n "$_SC_FILE" ]; then
+    export _PYTHON_SYSCONFIGDATA_NAME="$(basename "$_SC_FILE" .py)"
+    echo "  🔧 _PYTHON_SYSCONFIGDATA_NAME=${_PYTHON_SYSCONFIGDATA_NAME}"
+    cp -f "$_SC_FILE" "${HOST_PY_LIB}/${_PYTHON_SYSCONFIGDATA_NAME}.py" 2>/dev/null || true
 fi
 
 unset FC F77 F90
@@ -193,11 +237,8 @@ export NPY_BLAS_LIBS="-lopenblas"
 export NPY_CBLAS_LIBS="-lopenblas"
 export NPY_LAPACK_LIBS="-lopenblas"
 
-# ════════════════════════════════════════════════════════════
-# PyO3 config — luôn native, abi3=false
-# ════════════════════════════════════════════════════════════
+# PyO3 config
 PYO3_CONFIG="${TMP_BUILD}/pyo3-config.txt"
-
 cat > "$PYO3_CONFIG" <<EOF
 implementation=CPython
 version=${PYTHON_MINOR}
@@ -320,7 +361,7 @@ else
     export PYTHONPATH="${PYSITE}:${BUILD_DEPS_SITE:-${WORKSPACE}/build-deps-site}"
 fi
 
-# Sed placeholder BLDLIBRARY
+# Sed placeholder BLDLIBRARY (lần 2, sau khi sitecustomize sẵn sàng)
 for d in \
     "${WORKSPACE}/sysconfigdata-host" \
     "${HOST_PY_LIB}" \
@@ -335,16 +376,46 @@ for d in \
     find "${d}/__pycache__" -name "_sysconfigdata__*" -delete 2>/dev/null || true
 done
 
-VERIFY_OUT=$(
-    PYTHONPATH="${PYSITE}:${_SYSCONF_DIR}" \
-    "${HOST_PYTHON}" -c "import sysconfig; print(sysconfig.get_config_var('BLDLIBRARY'))" 2>/dev/null || echo "FAIL"
-)
-echo "  🔍 [verify] BLDLIBRARY = ${VERIFY_OUT}"
-if printf '%s' "$VERIFY_OUT" | grep -qF '$(BLDLIBRARY)'; then
-    echo "  ❌ Vẫn còn placeholder sau patch — abort"
+# ════════════════════════════════════════════════════════════
+# Verify CỨNG không còn placeholder
+# ════════════════════════════════════════════════════════════
+echo "🔍 Verify không còn \$(BLDLIBRARY)..."
+REMAIN=0
+for d in "${HOST_PY_LIB}" "${TARGET_STDLIB}" \
+         "${WORKSPACE}/sysconfigdata-host" \
+         "${HOST_PY_PREFIX}/lib/python${PYTHON_MINOR}" \
+         "${TARGET_ROOT}/lib/python${PYTHON_MINOR}"; do
+    [ -d "$d" ] || continue
+    while IFS= read -r f; do
+        if grep -qF '$(BLDLIBRARY)' "$f" 2>/dev/null; then
+            echo "  ❌ Còn placeholder: $f"
+            REMAIN=$((REMAIN+1))
+        fi
+    done < <(find "$d" -name "_sysconfigdata__*.py" 2>/dev/null)
+done
+if [ "$REMAIN" -gt 0 ]; then
+    echo "  ❌ $REMAIN file còn placeholder — ABORT"
     exit 1
 fi
-echo "  ✅ BLDLIBRARY OK"
+echo "  ✅ Không còn placeholder trong file"
+
+echo "🔍 Verify bằng Python (giống meson-python gọi):"
+BLD_RESULT=$("${HOST_PYTHON}" -c "
+import sysconfig, os
+os.environ.setdefault('_PYTHON_SYSCONFIGDATA_NAME', '${_PYTHON_SYSCONFIGDATA_NAME:-}')
+v = sysconfig.get_config_var('BLDLIBRARY')
+print(v if v is not None else 'NONE')
+" 2>&1 || echo "FAIL")
+echo "    get_config_var('BLDLIBRARY') = ${BLD_RESULT}"
+if printf '%s' "$BLD_RESULT" | grep -qF '$(BLDLIBRARY)'; then
+    echo "    ❌ Python vẫn trả về placeholder — ABORT"
+    exit 1
+fi
+if [ "$BLD_RESULT" = "NONE" ] || [ "$BLD_RESULT" = "FAIL" ]; then
+    echo "    ❌ Python không đọc được BLDLIBRARY — ABORT"
+    exit 1
+fi
+echo "    ✅ OK"
 
 # 6. site.cfg
 if [ -d "$SRC_PATH" ] && [ ! -f "$SRC_PATH/site.cfg" ]; then
@@ -533,7 +604,9 @@ if [ -f "$RECIPE_FILE" ]; then
     echo "  ✅ [p4a-recipe] applied"
 fi
 
+# ════════════════════════════════════════════════════════════
 # 8b. Patch đặc biệt
+# ════════════════════════════════════════════════════════════
 case "$PKG_NAME" in
     Pillow|pillow|PIL)
         echo "  → Patch Pillow"
@@ -580,8 +653,7 @@ _BAD_PREFIXES = (
 def _p4a_bad(p):
     p = str(p)
     for a in _ALLOWED_PREFIXES:
-        if p.startswith(a): return False
-    for b in _BAD_PREFIXES:
+        if p.startswith(a): return False    for b in _BAD_PREFIXES:
         if p.startswith(b): return True
     return False
 def _p4a_clean(lst):
@@ -650,8 +722,13 @@ PYEOF
         ;;
 
     cryptography)
-        echo "  → cryptography: CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1"
-        export CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=1
+        echo "  → cryptography: OPENSSL_DIR + provider flags"
+        export OPENSSL_DIR="${DEPS_INSTALL}"
+        export OPENSSL_LIB_DIR="${DEPS_INSTALL}/lib"
+        export OPENSSL_INCLUDE_DIR="${DEPS_INSTALL}/include"
+        # KHÔNG disable legacy → giữ OSSL_PROVIDER_unload
+        export CRYPTOGRAPHY_BUILD_OPENSSL_NO_LEGACY=0
+        export OPENSSL_NO_MODULE=1
         ;;
 esac
 
@@ -757,5 +834,42 @@ for whl in "${WHEELS_OUT}"/*.whl; do
     add_libpython_to_wheel "$whl"
 done
 shopt -u nullglob
+
+# ════════════════════════════════════════════════════════════
+# 11. Verify đặc biệt cho cryptography
+# ════════════════════════════════════════════════════════════
+case "$PKG_NAME" in
+    cryptography)
+        echo "  🔍 [verify/cryptography] check OSSL_PROVIDER symbols..."
+        shopt -s nullglob
+        for whl in "${WHEELS_OUT}"/cryptography-*.whl; do
+            [ -f "$whl" ] || continue
+            tmp=$(mktemp -d)
+            unzip -q -o "$whl" -d "$tmp"
+
+            while IFS= read -r so; do
+                [ -f "$so" ] || continue
+                echo "    → $(basename "$so")"
+
+                if ${READELF} -d "$so" 2>/dev/null | grep -qE 'NEEDED.*libcrypto\.so'; then
+                    echo "      ✅ NEEDED libcrypto.so"
+                else
+                    echo "      ⚠️  không NEEDED libcrypto.so"
+                fi
+
+                if ${NDK_TOOLCHAIN}/bin/llvm-nm -D "$so" 2>/dev/null \
+                     | grep -q 'U OSSL_PROVIDER_unload'; then
+                    echo "      ⚠️  U OSSL_PROVIDER_unload (runtime cần libcrypto đủ)"
+                fi
+
+                rpath=$(${READELF} -d "$so" 2>/dev/null | grep -E 'RPATH|RUNPATH' | head -1 || true)
+                [ -n "$rpath" ] && echo "      rpath: $rpath"
+            done < <(find "$tmp" -name "_rust*.so" -o -name "*.abi3.so" -o -name "_rust*.cpython*.so")
+
+            rm -rf "$tmp"
+        done
+        shopt -u nullglob
+        ;;
+esac
 
 exit 0
