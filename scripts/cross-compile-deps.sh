@@ -20,7 +20,9 @@ echo "════════════════════════�
 echo "  Cross-compiling core deps"
 echo "════════════════════════════════════════════"
 
+# ═══════════════════════════════════════════════════════════
 # libffi
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ libffi ═══"
 wget -q "https://github.com/libffi/libffi/releases/download/v${LIBFFI_VERSION}/libffi-${LIBFFI_VERSION}.tar.gz"
@@ -30,24 +32,73 @@ CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLA
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
-# OpenSSL
+# ═══════════════════════════════════════════════════════════
+# OpenSSL 3.3.x — BẮT BUỘC shared, đủ provider, có legacy
+# Fix: cryptography cần OSSL_PROVIDER_unload cho runtime Android
+# ═══════════════════════════════════════════════════════════
 echo ""
-echo "═══ OpenSSL ═══"
+echo "═══ OpenSSL ${OPENSSL_VERSION} (full provider) ═══"
+
 wget -q "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
     || wget -q "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz"
+
 tar -xf "openssl-${OPENSSL_VERSION}.tar.gz"
 cd "openssl-${OPENSSL_VERSION}"
+
 export ANDROID_NDK_ROOT="${NDK}"
+
+# shared       → sinh libcrypto.so/libssl.so để wheel link động
+# no-module    → provider TĨNH vào libcrypto (Termux không có ossl-modules/)
+# enable-legacy→ giữ OSSL_PROVIDER_* cho cryptography
 LDFLAGS="${COMMON_LDFLAGS}" \
-./Configure android-arm64 -D__ANDROID_API__=${ANDROID_API} \
-    --prefix="${DEPS_INSTALL}" --openssldir="${DEPS_INSTALL}/ssl" \
-    shared no-engine no-tests no-async \
+./Configure android-arm64 \
+    -D__ANDROID_API__=${ANDROID_API} \
+    --prefix="${DEPS_INSTALL}" \
+    --openssldir="${DEPS_INSTALL}/ssl" \
+    shared \
+    no-module \
+    no-tests \
+    no-async \
+    no-engine \
+    enable-legacy \
     CC="${CC}" CXX="${CXX}" AR="${AR}" RANLIB="${RANLIB}" STRIP="${STRIP}"
+
 make -j$(nproc)
 make install_sw
+
+# ── Verify symbols ──
+echo "  🔍 Verify OpenSSL provider symbols..."
+LIBCRYPTO="${DEPS_INSTALL}/lib/libcrypto.so"
+if [ ! -f "$LIBCRYPTO" ]; then
+    echo "  ❌ libcrypto.so không tồn tại"
+    exit 1
+fi
+
+REQUIRED_SYMS="OSSL_PROVIDER_unload OSSL_PROVIDER_load OSSL_PROVIDER_available"
+MISSING=""
+for sym in $REQUIRED_SYMS; do
+    if ${READELF} -Ws "$LIBCRYPTO" 2>/dev/null | grep -q " $sym\$"; then
+        echo "    ✅ $sym"
+    elif "${NDK_TOOLCHAIN:-}/bin/llvm-nm" -D "$LIBCRYPTO" 2>/dev/null | grep -q " $sym\$"; then
+        echo "    ✅ $sym (nm)"
+    else
+        echo "    ❌ MISSING: $sym"
+        MISSING="$MISSING $sym"
+    fi
+done
+
+if [ -n "$MISSING" ]; then
+    echo ""
+    echo "  ❌ libcrypto.so thiếu symbol:$MISSING"
+    exit 1
+fi
+echo "  ✅ OpenSSL provider symbols đầy đủ"
+
 cd ..
 
+# ═══════════════════════════════════════════════════════════
 # SQLite3
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ SQLite3 ═══"
 SQLITE_URL="https://www.sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_VERSION}.tar.gz"
@@ -61,7 +112,9 @@ CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLA
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
+# ═══════════════════════════════════════════════════════════
 # XZ
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ XZ ═══"
 wget -q "https://github.com/tukaani-project/xz/releases/download/v${XZ_VERSION}/xz-${XZ_VERSION}.tar.gz"
@@ -71,6 +124,7 @@ CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLA
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
+# Xoá ARM binary khỏi DEPS_INSTALL/bin
 for bin in xz xzdec lzma unlzma unxz lzcat lzma-config xz-config; do
     if [ -f "${DEPS_INSTALL}/bin/${bin}" ]; then
         if file "${DEPS_INSTALL}/bin/${bin}" 2>/dev/null | grep -q "ELF"; then
@@ -80,7 +134,9 @@ for bin in xz xzdec lzma unlzma unxz lzcat lzma-config xz-config; do
     fi
 done
 
-# zlib
+# ═══════════════════════════════════════════════════════════
+# zlib — FORCE CLEAN BUILD với -fPIC
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ zlib ═══"
 wget -q "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz"
@@ -94,7 +150,9 @@ make -j$(nproc) CFLAGS="-fPIC -O2"
 make install
 cd ..
 
+# ═══════════════════════════════════════════════════════════
 # libxml2
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ libxml2 ═══"
 wget -q "https://download.gnome.org/sources/libxml2/2.12/libxml2-${LIBXML2_VERSION}.tar.xz"
@@ -116,7 +174,9 @@ if [ ! -x "${DEPS_INSTALL}/bin/xml2-config" ]; then
 fi
 echo "  ✅ libxml2 + xml2-config OK"
 
-# libxslt
+# ═══════════════════════════════════════════════════════════
+# libxslt — chỉ build libxslt + libexslt (skip xsltproc)
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ libxslt (skip xsltproc) ═══"
 wget -q "https://download.gnome.org/sources/libxslt/1.1/libxslt-${LIBXSLT_VERSION}.tar.xz"
@@ -169,7 +229,9 @@ if [ ! -f "${DEPS_INSTALL}/lib/libxslt.a" ] || [ ! -f "${DEPS_INSTALL}/lib/libex
 fi
 echo "  ✅ libxslt + libexslt OK"
 
+# ═══════════════════════════════════════════════════════════
 # libjpeg-turbo
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ libjpeg-turbo ═══"
 wget -q "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${LIBJPEGTURBO_VERSION}/libjpeg-turbo-${LIBJPEGTURBO_VERSION}.tar.gz"
@@ -187,7 +249,9 @@ cmake -G Ninja \
 ninja && ninja install
 cd ../..
 
+# ═══════════════════════════════════════════════════════════
 # libpng
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ libpng ═══"
 wget -q "https://download.sourceforge.net/libpng/libpng-${LIBPNG_VERSION}.tar.gz" \
@@ -198,7 +262,9 @@ CFLAGS="-fPIC -O2" ./configure ${COMMON_CONFIGURE_FLAGS} LDFLAGS="${COMMON_LDFLA
 make -j$(nproc) CFLAGS="-fPIC -O2" install
 cd ..
 
-# freetype
+# ═══════════════════════════════════════════════════════════
+# freetype — cần cho Pillow (_imagingft)
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ freetype ═══"
 FREETYPE_VER="${FREETYPE_VERSION:-2.13.3}"
@@ -232,7 +298,9 @@ if [ ! -f "${DEPS_INSTALL}/lib/libfreetype.a" ]; then
 fi
 echo "  ✅ freetype OK"
 
+# ═══════════════════════════════════════════════════════════
 # OpenBLAS
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "═══ OpenBLAS ═══"
 wget -q "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${OPENBLAS_VERSION}/OpenBLAS-${OPENBLAS_VERSION}.tar.gz"
@@ -262,10 +330,12 @@ Libs.private: -lm -ldl
 Cflags: -I\${includedir}
 PCEOF
 fi
-echo "  ✅ openblas.pc OK"
+echo "  ✅ openblas.pc: ${DEPS_INSTALL}/lib/pkgconfig/openblas.pc"
 cd ..
 
-# Summary
+# ═══════════════════════════════════════════════════════════
+# Summary + verify
+# ═══════════════════════════════════════════════════════════
 echo ""
 echo "════════════════════════════════════════════"
 echo "✅ Tất cả core deps built"
