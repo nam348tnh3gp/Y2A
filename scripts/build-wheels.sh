@@ -19,16 +19,22 @@ SYSCONF_DIR="${WORKSPACE}/sysconfigdata-host"
 rm -rf "$SYSCONF_DIR" && mkdir -p "$SYSCONF_DIR"
 cp "$SYSCONF_FILE" "$SYSCONF_DIR/"
 
-# Sed placeholder trong bản copy
+# ════════════════════════════════════════════════════════════
+# Sanitize — patch TRIỆT ĐỂ placeholder trong bản copy NGAY
+# ════════════════════════════════════════════════════════════
 for f in "${SYSCONF_DIR}"/_sysconfigdata__*.py; do
     [ -f "$f" ] || continue
-    sed -i "s|\$(BLDLIBRARY)|-lpython${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
-    sed -i "s|\$(LDLIBRARY)|libpython${PYTHON_MINOR}.so|g" "$f" 2>/dev/null || true
-    sed -i "s|\$(LIBRARY)|python${PYTHON_MINOR}|g" "$f" 2>/dev/null || true
+    sed -i \
+        -e "s|\$(BLDLIBRARY)|-lpython${PYTHON_MINOR}|g" \
+        -e "s|\$(LDLIBRARY)|libpython${PYTHON_MINOR}.so|g" \
+        -e "s|\$(LIBRARY)|python${PYTHON_MINOR}|g" \
+        "$f" 2>/dev/null || true
+    rm -f "${f}c" 2>/dev/null || true
 done
+rm -rf "${SYSCONF_DIR}/__pycache__" 2>/dev/null || true
 echo "  ✅ sysconfigdata-host patched"
 
-# Patch CCSHARED
+# Patch CCSHARED + paths trong host + sysconfigdata-host
 HOST_PY_LIB="${HOST_PY_PREFIX}/lib/python${PYTHON_MINOR}"
 echo "🔧 Patch sysconfigdata (CCSHARED = -fPIC only)"
 for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py "${SYSCONF_DIR}"/_sysconfigdata__*.py; do
@@ -46,7 +52,9 @@ for f in "${HOST_PY_LIB}"/_sysconfigdata__*.py "${SYSCONF_DIR}"/_sysconfigdata__
     sed -i "s|/usr/local/include|${TARGET_ROOT}/include|g" "$f" 2>/dev/null || true
     sed -i "s|'/usr/lib'|'${TARGET_ROOT}/lib'|g" "$f" 2>/dev/null || true
     sed -i "s|'/usr/include'|'${TARGET_ROOT}/include'|g" "$f" 2>/dev/null || true
+    rm -f "${f}c" 2>/dev/null || true
 done
+rm -rf "${HOST_PY_LIB}/__pycache__" 2>/dev/null || true
 echo "  ✅ Patched"
 
 echo "  Verify CCSHARED:"
@@ -55,6 +63,7 @@ import sysconfig
 print('    CCSHARED:', sysconfig.get_config_var('CCSHARED'))
 print('    LIBDIR:', sysconfig.get_config_var('LIBDIR'))
 print('    LIBPL:', sysconfig.get_config_var('LIBPL'))
+print('    BLDLIBRARY:', sysconfig.get_config_var('BLDLIBRARY'))
 "
 
 HOST_INCLUDE="${HOST_PY_PREFIX}/include/python${PYTHON_MINOR}"
@@ -71,6 +80,7 @@ export _PYTHON_SYSCONFIGDATA_NAME="${SYSCONF_NAME}"
 export TARGET_PYTHON_EXE="${TARGET_ROOT}/bin/python${PYTHON_MINOR}"
 export PYTHONPATH="${SYSCONF_DIR}:${TARGET_SITE}"
 export PATH="${TARGET_SITE}/bin:${HOST_PY_PREFIX}/bin:${CARGO_HOME}/bin:${PATH}"
+export PYTHONNOUSERSITE=1
 
 export CFLAGS="-fPIC -O2 \
     -I${NDK_SYSROOT}/usr/include \
@@ -124,6 +134,13 @@ for pkg in $PKGLIST; do
     BUILD_LOG="/tmp/build_${pkg}.log"
 
     if bash scripts/build-p4a-style.sh "$pkg" > "$BUILD_LOG" 2>&1; then
+        # Build script chủ động skip → coi như SUCCESS
+        if grep -qE "SKIP_INTENTIONAL|⏭️.*skip" "$BUILD_LOG"; then
+            echo "⏭️  $pkg — skipped intentionally"
+            SUCCESS="$SUCCESS $pkg"
+            continue
+        fi
+
         whl=$(ls -t "${WHEELS_OUT}"/${pkg_under}-*.whl \
                      "${WHEELS_OUT}"/${pkg_lower}-*.whl \
                      "${WHEELS_OUT}"/${pkg}-*.whl 2>/dev/null | head -1 || true)
