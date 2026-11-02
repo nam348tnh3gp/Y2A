@@ -38,7 +38,7 @@ enum class Platform(
 data class Options(
     val platform: Platform = Platform.YOUTUBE,
     val audioOnly: Boolean = false,
-    val quality: String = "720p",
+    val quality: String = "1080p",
     val videoFormat: String = "mp4",
     val audioFormat: String = "mp3",
     val audioBitrate: Int = 128,

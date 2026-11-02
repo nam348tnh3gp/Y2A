@@ -54,7 +54,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return Options(
             platform = p,
             audioOnly = prefs.getBoolean("audioOnly", false),
-            quality = prefs.getString("quality", "720p") ?: "720p",
+            quality = prefs.getString("quality", "1080p") ?: "1080p",
             videoFormat = prefs.getString("videoFormat", "mp4") ?: "mp4",
             audioFormat = prefs.getString("audioFormat", "mp3") ?: "mp3",
             audioBitrate = prefs.getInt("bitrate", 128),
@@ -78,7 +78,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setPlatform(p: Platform) {
         var o = opts.copy(platform = p)
-        if (o.quality !in p.qualities) o = o.copy(quality = "720p")
+        if (o.quality !in p.qualities) o = o.copy(quality = "1080p")
         if (o.audioFormat !in p.audioFormats) o = o.copy(audioFormat = "mp3")
         if (p != Platform.YOUTUBE) o = o.copy(playlist = false)
         updateOpts(o)

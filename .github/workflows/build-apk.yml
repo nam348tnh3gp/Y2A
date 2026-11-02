@@ -130,27 +130,27 @@ jobs:
           du -sh app/src/main/jniLibs/arm64-v8a/
           du -sh app/src/main/assets/ffmpeg/lib/ 2>/dev/null || true
 
-      # Dùng debug keystore có sẵn trong repo (đã commit)
-      - name: Setup debug keystore
+      # Setup release keystore (ký chuẩn, cố định để cập nhật được)
+      - name: Setup release keystore
         run: |
           set -e
-          mkdir -p ~/.android
-
-          if [ -f "debug.keystore" ]; then
-            echo "🔐 Copy debug.keystore từ repo vào ~/.android/"
-            cp debug.keystore ~/.android/debug.keystore
-            echo "✅ Keystore đã sẵn sàng:"
-            ls -la ~/.android/debug.keystore
-            keytool -list -keystore ~/.android/debug.keystore -storepass android | head -5
+          if [ -f "release.keystore" ]; then
+            echo "🔐 Dùng release.keystore từ repo"
           else
-            echo "⚠️ Không tìm thấy debug.keystore trong repo, tạo tạm thời..."
-            keytool -genkey -v -keystore ~/.android/debug.keystore \
-              -storepass android -alias androiddebugkey -keypass android \
+            echo "⚠️ Không thấy release.keystore, tạo mới..."
+            keytool -genkey -v -keystore release.keystore \
+              -storepass y2a-release -alias y2a -keypass y2a-release \
               -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+              -dname "CN=Y2A Release,O=nam348tnh3gp,C=VN"
           fi
+          keytool -list -keystore release.keystore -storepass y2a-release | head -3
 
       - name: Build release APK
+        env:
+          RELEASE_KEYSTORE_FILE: ${{ github.workspace }}/release.keystore
+          RELEASE_KEYSTORE_PASSWORD: y2a-release
+          RELEASE_KEY_ALIAS: y2a
+          RELEASE_KEY_PASSWORD: y2a-release
         run: gradle :app:assembleRelease --stacktrace
 
       - name: Rename APK with version code
@@ -172,3 +172,19 @@ jobs:
           name: Mini-Y2mate-Pro-apk-v${{ steps.bump.outputs.new_version }}
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.new_version }}
+          name: Mini-Y2mate Pro v${{ steps.bump.outputs.new_version }}
+          body: |
+            Tự động build khi chạy workflow.
+            - Version code: ${{ steps.bump.outputs.new_version }}
+            - yt-dlp được nhúng lúc build
+            - Ký bằng release keystore
+          files: app/build/outputs/apk/release/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -937,6 +937,7 @@ private fun SettingsSheet(
     val ui by vm.ui.collectAsStateWithLifecycle()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     var updating by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
@@ -1029,8 +1030,42 @@ private fun SettingsSheet(
 
             Spacer(Modifier.height(6.dp))
             Text(
-                "ℹ️ yt-dlp được quản lý bởi Python/pip. Muốn lên bản mới, sửa `install(\"yt-dlp\")` " +
-                    "trong build.gradle.kts rồi build lại.",
+                "ℹ️ yt-dlp được nhúng lúc build. Bản app mới sẽ có yt-dlp mới hơn.",
+                fontSize = 11.sp, color = Muted,
+            )
+
+            Spacer(Modifier.height(16.dp))
+            var checkingApp by remember { mutableStateOf(false) }
+            Button(
+                onClick = {
+                    checkingApp = true
+                    scope.launch {
+                        val info = UpdateChecker.check(ctx)
+                        checkingApp = false
+                        if (info == null) {
+                            onSnackbar("App đã là bản mới nhất")
+                        } else if (info.apkUrl != null) {
+                            onSnackbar("Có bản ${info.tag}. Đang tải...")
+                            UpdateChecker.downloadAndInstall(ctx, info.apkUrl, info.versionCode)
+                        } else {
+                            onSnackbar("Có bản ${info.tag} nhưng chưa có file APK trên Release")
+                        }
+                    }
+                },
+                enabled = !checkingApp,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (checkingApp) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Đang kiểm tra app...")
+                } else {
+                    Text("🔄 Kiểm tra cập nhật App")
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Kiểm tra GitHub Release của repo Y2A. Nếu có bản mới sẽ tải và cài ngay.",
                 fontSize = 11.sp, color = Muted,
             )
 

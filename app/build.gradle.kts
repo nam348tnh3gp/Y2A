@@ -28,6 +28,20 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            // Ưu tiên keystore từ biến môi trường (CI), fallback file trong repo
+            val ksFile = System.getenv("RELEASE_KEYSTORE_FILE")?.let { file(it) }
+                ?: rootProject.file("release.keystore")
+            if (ksFile.exists()) {
+                storeFile = ksFile
+                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD") ?: "y2a-release"
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS") ?: "y2a"
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: "y2a-release"
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -36,7 +50,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (signingConfigs.findByName("release")?.storeFile?.exists() == true)
+                signingConfigs.getByName("release")
+            else
+                signingConfigs.getByName("debug")
         }
     }
 

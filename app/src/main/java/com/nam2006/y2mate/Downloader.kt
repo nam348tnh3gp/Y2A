@@ -218,17 +218,15 @@ object Downloader {
 
             Platform.YOUTUBE ->
                 if (o.iphone) {
-                    // iPhone mode: avc1 + mp4a, container mp4
+                    // iPhone mode: H.264 + AAC, container mp4
                     "bestvideo[height<=$h][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/" +
                     "best[height<=$h][ext=mp4]/best"
                 } else {
-                    // Ưu tiên H.264 + AAC (bitrate cao, tương thích tốt)
-                    // → H.264 + audio bất kỳ
-                    // → video-only bất kỳ (VP9/AV1)
-                    // → progressive (đã merge sẵn)
-                    // → best
+                    // Ưu tiên VP9/AV1 (bitrate cao, nét hơn) rồi mới đến H.264
+                    // format_sort trong bridge sẽ ưu tiên res + bitrate
+                    "bestvideo[height<=$h][vcodec^=av01]+bestaudio/" +
+                    "bestvideo[height<=$h][vcodec^=vp9]+bestaudio/" +
                     "bestvideo[height<=$h][vcodec^=avc1]+bestaudio[acodec^=mp4a]/" +
-                    "bestvideo[height<=$h][vcodec^=avc1]+bestaudio/" +
                     "bestvideo[height<=$h]+bestaudio/" +
                     "best[height<=$h]/best"
                 }
