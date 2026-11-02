@@ -15,6 +15,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 object UpdateChecker {
+    private const val UPDATE_JSON = "https://nam348tnh3gp.github.io/Y2A/update.json"
     private const val API = "https://api.github.com/repos/nam348tnh3gp/Y2A/releases/latest"
     private const val VERSION_URL = "https://raw.githubusercontent.com/nam348tnh3gp/Y2A/main/versioncode.txt"
 
@@ -30,7 +31,25 @@ object UpdateChecker {
             context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode.toInt()
         } catch (_: Exception) { 0 }
 
-        // Ưu tiên GitHub Release
+        // 1. Ưu tiên file update.json trên GitHub Pages
+        try {
+            val conn = URL(UPDATE_JSON).openConnection() as HttpURLConnection
+            conn.connectTimeout = 10000
+            conn.readTimeout = 10000
+            conn.setRequestProperty("User-Agent", "Y2A-UpdateChecker")
+            if (conn.responseCode == 200) {
+                val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+                val ver = json.optInt("versionCode", 0)
+                val tag = json.optString("tag", "v$ver")
+                val apk = json.optString("apkUrl", "").ifBlank { null }
+                val notes = json.optString("notes", "")
+                if (ver > current && apk != null) {
+                    return@withContext UpdateInfo(ver, tag, apk, notes)
+                }
+            }
+        } catch (_: Exception) { }
+
+        // 2. Fallback GitHub Release
         try {
             val conn = URL(API).openConnection() as HttpURLConnection
             conn.setRequestProperty("Accept", "application/vnd.github+json")

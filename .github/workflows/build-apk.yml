@@ -193,3 +193,31 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update docs/update.json
+        run: |
+          set -e
+          VER="${{ steps.bump.outputs.new_version }}"
+          APK_URL="https://github.com/nam348tnh3gp/Y2A/releases/download/v${VER}/$(basename app/build/outputs/apk/release/*.apk)"
+          # Lấy tên file apk thực tế
+          APK_FILE=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          APK_NAME=$(basename "$APK_FILE")
+          APK_URL="https://github.com/nam348tnh3gp/Y2A/releases/download/v${VER}/${APK_NAME}"
+          cat > docs/update.json << JSON
+          {
+            "versionCode": ${VER},
+            "tag": "v${VER}",
+            "apkUrl": "${APK_URL}",
+            "notes": "Build tự động. yt-dlp nhúng lúc build. Ký release keystore.",
+            "publishedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          JSON
+          # Fix indentation
+          python3 -c "import json; json.dump(json.load(open('docs/update.json')), open('docs/update.json','w'), indent=2)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/update.json
+          git commit -m "chore: update docs/update.json to v${VER} [skip ci]" || true
+          git push origin HEAD:${{ github.ref_name }} || true
+          echo "✅ update.json -> v${VER}"
+          cat docs/update.json

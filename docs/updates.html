@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Mini-Y2mate Pro — Cập nhật</title>
+  <style>
+    body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;background:#0f1115;color:#e8eaed}
+    a{color:#8ab4f8}
+    .card{background:#1a1d23;border-radius:12px;padding:16px;margin:16px 0}
+    code{background:#2a2d33;padding:2px 6px;border-radius:4px}
+  </style>
+</head>
+<body>
+  <h1>Mini-Y2mate Pro</h1>
+  <p>Danh sách cập nhật (app tự đọc <code>update.json</code>)</p>
+  <div class="card" id="latest">Đang tải...</div>
+  <script>
+    fetch('update.json').then(r=>r.json()).then(d=>{
+      document.getElementById('latest').innerHTML =
+        '<h2>Bản mới nhất: '+(d.tag||'—')+'</h2>'+
+        '<p>Version code: <b>'+(d.versionCode||'—')+'</b></p>'+
+        '<p>'+(d.notes||'')+'</p>'+
+        (d.apkUrl ? '<p><a href="'+d.apkUrl+'">Tải APK</a></p>' : '<p>Chưa có APK</p>')+
+        '<p style="color:#9aa0a6;font-size:13px">'+(d.publishedAt||'')+'</p>';
+    }).catch(()=>{document.getElementById('latest').textContent='Không đọc được update.json'});
+  </script>
+  <p><a href="https://github.com/nam348tnh3gp/Y2A/releases">Xem tất cả Releases trên GitHub</a></p>
+</body>
+</html>
