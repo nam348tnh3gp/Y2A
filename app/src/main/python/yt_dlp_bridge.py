@@ -120,7 +120,10 @@ def get_info(url, cookies_file=""):
         ydl_opts['cookiefile'] = cookies_file
     if 'youtube.com' in url or 'youtu.be' in url:
         ydl_opts['extractor_args'] = {
-            'youtube': {'player_client': ['web', 'tv', 'mweb']}
+            'youtube': {
+                'player_client': ['android', 'ios', 'web_safari', 'tv_embedded', 'mweb', 'web'],
+                'player_skip': ['webpage'],
+            }
         }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -211,9 +214,12 @@ def download(url, options_json):
         ydl_opts['socket_timeout'] = 30
 
         if 'youtube.com' in url or 'youtu.be' in url:
-            # Ưu tiên client trả về format chất lượng cao (VP9/AV1)
+            # Client ổn định, tránh lỗi "The page needs to be reloaded"
             ydl_opts['extractor_args'] = {
-                'youtube': {'player_client': ['web', 'tv', 'mweb']}
+                'youtube': {
+                    'player_client': ['android', 'ios', 'web_safari', 'tv_embedded', 'mweb', 'web'],
+                    'player_skip': ['webpage'],
+                }
             }
             # Ưu tiên độ phân giải rồi bitrate rồi codec hiện đại
             ydl_opts['format_sort'] = ['res', 'br', 'vcodec']
