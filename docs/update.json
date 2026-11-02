@@ -1,7 +1,7 @@
 {
-  "versionCode": 0,
-  "tag": "v0",
-  "apkUrl": "",
-  "notes": "Chưa có bản build",
-  "publishedAt": ""
+  "versionCode": 14,
+  "tag": "v14",
+  "apkUrl": "https://github.com/nam348tnh3gp/Y2A/releases/download/v14/app-release-v14.apk",
+  "notes": "Build t\u1ef1 \u0111\u1ed9ng. yt-dlp nh\u00fang l\u00fac build. K\u00fd release keystore.",
+  "publishedAt": "2026-11-02T06:21:59Z"
 }
