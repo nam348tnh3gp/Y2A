@@ -82,14 +82,19 @@ jobs:
         run: |
           set -e
 
-          FFMPEG_VERSION="8.1.3"
-          ARCH="aarch64"
-          DEB_URL="https://packages.termux.dev/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
-
-          echo "📥 Downloading FFmpeg ${FFMPEG_VERSION} (${ARCH})..."
+          POOL_URL="https://packages.termux.dev/apt/termux-main/pool/main/f/ffmpeg/"
+          echo "📥 Đang tìm FFmpeg aarch64 mới nhất từ ${POOL_URL}"
+          DEB_NAME=$(curl -sL "${POOL_URL}" | grep -oE 'ffmpeg_[^"<]+_aarch64\.deb' | sort -V | tail -1)
+          if [ -z "$DEB_NAME" ]; then
+            echo "❌ Không tìm thấy file .deb aarch64 trong pool"
+            exit 1
+          fi
+          DEB_URL="${POOL_URL}${DEB_NAME}"
+          echo "📥 Downloading ${DEB_NAME}"
+          echo "   URL: ${DEB_URL}"
           wget -q --show-progress -O ffmpeg.deb "${DEB_URL}" || {
             echo "❌ Không tải được từ URL chính, thử mirror..."
-            wget -q -O ffmpeg.deb "https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main/pool/main/f/ffmpeg/ffmpeg_${FFMPEG_VERSION}_${ARCH}.deb"
+            wget -q -O ffmpeg.deb "https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main/pool/main/f/ffmpeg/${DEB_NAME}"
           }
 
           echo "📦 Extracting .deb..."
