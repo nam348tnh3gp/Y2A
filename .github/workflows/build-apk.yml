@@ -47,8 +47,9 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      # Tự động bump version code
-      - name: Bump version code
+      # Tính version code kế tiếp và ghi vào versioncode.txt TRÊN RUNNER (để Gradle đọc).
+      # CHƯA commit: chỉ commit sau khi build thành công — build lỗi thì repo giữ nguyên version cũ.
+      - name: Compute next version code (chưa commit)
         id: bump
         run: |
           set -e
@@ -71,25 +72,8 @@ jobs:
           NEW=$((CURRENT + 1))
           echo "$NEW" > versioncode.txt
 
-          echo "🔢 Version code: $CURRENT → $NEW"
+          echo "🔢 Version code (tạm, chỉ commit nếu build OK): $CURRENT → $NEW"
           echo "new_version=$NEW" >> "$GITHUB_OUTPUT"
-
-      # Commit và push version mới (cần trước khi build để APK có version đúng)
-      - name: Commit version bump
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add versioncode.txt
-
-          if git diff --staged --quiet; then
-            echo "⚠️ Không có thay đổi để commit"
-          else
-            git commit -m "chore: bump version code to ${{ steps.bump.outputs.new_version }} [skip ci]"
-            git push origin HEAD:${{ github.ref_name }}
-            echo "✅ Đã push version code ${{ steps.bump.outputs.new_version }}"
-          fi
 
       # Tải FFmpeg từ Termux và đặt vào đúng vị trí
       - name: Download FFmpeg from Termux
@@ -191,6 +175,30 @@ jobs:
           name: Mini-Y2mate-Pro-apk-v${{ steps.bump.outputs.new_version }}
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      # Build thành công → mới commit version code mới lên repo
+      - name: Commit version bump (chỉ khi build thành công)
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add versioncode.txt
+
+          if git diff --staged --quiet; then
+            echo "⚠️ Không có thay đổi để commit"
+          else
+            git commit -m "chore: bump version code to ${{ steps.bump.outputs.new_version }} [skip ci]"
+            for i in 1 2 3; do
+              if git push origin HEAD:${{ github.ref_name }}; then
+                echo "✅ Đã push version code ${{ steps.bump.outputs.new_version }}"
+                break
+              fi
+              echo "⚠️ Push lỗi (lần $i), rebase rồi thử lại..."
+              git pull --rebase origin ${{ github.ref_name }} || true
+              sleep 3
+            done
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
