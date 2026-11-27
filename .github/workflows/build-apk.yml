@@ -27,6 +27,20 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # FIX: Chaquopy 15.0.1 dùng `python3` trên PATH làm build Python và chỉ hỗ trợ 3.8–3.12.
+      # ubuntu-latest hiện có python3 = 3.14 → pip của Chaquopy import `cgi` (đã bị xoá từ 3.13)
+      # → "ModuleNotFoundError: No module named 'cgi'". Ghim 3.12 để tránh.
+      - name: Setup build Python 3.12 (cho Chaquopy)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check build Python
+        run: |
+          which python3
+          python3 --version
+          python3 -c "import sys; assert sys.version_info[:2] <= (3, 12), 'Chaquopy 15 cần build Python <= 3.12'"
+
       - uses: android-actions/setup-android@v4
 
       - uses: gradle/actions/setup-gradle@v4
@@ -187,7 +201,7 @@ jobs:
             Tự động build khi chạy workflow.
             - Version code: ${{ steps.bump.outputs.new_version }}
             - yt-dlp được nhúng lúc build
-            - Ký bằng release keystore
+            - Ký bằng release keystore (công khai — chỉ tin APK tải từ Releases của repo này)
           files: app/build/outputs/apk/release/*.apk
           draft: false
           prerelease: false
@@ -198,11 +212,11 @@ jobs:
         run: |
           set -e
           VER="${{ steps.bump.outputs.new_version }}"
-          APK_URL="https://github.com/nam348tnh3gp/Y2A/releases/download/v${VER}/$(basename app/build/outputs/apk/release/*.apk)"
           # Lấy tên file apk thực tế
           APK_FILE=$(ls app/build/outputs/apk/release/*.apk | head -1)
           APK_NAME=$(basename "$APK_FILE")
           APK_URL="https://github.com/nam348tnh3gp/Y2A/releases/download/v${VER}/${APK_NAME}"
+          mkdir -p docs
           cat > docs/update.json << JSON
           {
             "versionCode": ${VER},
